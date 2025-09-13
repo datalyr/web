@@ -1,0 +1,42 @@
+# Source files (only publish built files)
+src/
+*.ts
+!*.d.ts
+
+# Config files
+tsconfig.json
+rollup.config.js
+.gitignore
+
+# Development files
+*.log
+node_modules/
+.DS_Store
+*.map
+
+# Test files
+test/
+tests/
+*.test.js
+*.spec.js
+
+# Documentation source
+docs/
+
+# Git files
+.git/
+.github/
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Keep the built files
+!dist/
+!lib/

@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Datalyr Web SDK Example</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 800px;
+      margin: 50px auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .container {
+      background: white;
+      border-radius: 8px;
+      padding: 30px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    h1 {
+      color: #333;
+      margin-bottom: 30px;
+    }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+      font-size: 14px;
+    }
+    button:hover {
+      background: #45a049;
+    }
+    button.secondary {
+      background: #2196F3;
+    }
+    button.secondary:hover {
+      background: #0b7dda;
+    }
+    button.danger {
+      background: #f44336;
+    }
+    button.danger:hover {
+      background: #da190b;
+    }
+    .info {
+      background: #e3f2fd;
+      border-left: 4px solid #2196F3;
+      padding: 15px;
+      margin: 20px 0;
+      border-radius: 4px;
+    }
+    .info h3 {
+      margin-top: 0;
+      color: #1976D2;
+    }
+    .log {
+      background: #f5f5f5;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 10px;
+      margin-top: 20px;
+      max-height: 300px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    .log-entry {
+      padding: 5px 0;
+      border-bottom: 1px solid #eee;
+    }
+    .log-entry:last-child {
+      border-bottom: none;
+    }
+    input {
+      padding: 8px;
+      margin: 5px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      width: 200px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🚀 Datalyr Web SDK Example</h1>
+    
+    <div class="info">
+      <h3>SDK Status</h3>
+      <p>Anonymous ID: <strong id="anonymousId">Loading...</strong></p>
+      <p>User ID: <strong id="userId">Not identified</strong></p>
+      <p>Session ID: <strong id="sessionId">Loading...</strong></p>
+      <p>Distinct ID: <strong id="distinctId">Loading...</strong></p>
+    </div>
+
+    <h3>Identity Management</h3>
+    <div>
+      <input type="email" id="emailInput" placeholder="Enter email to identify">
+      <button onclick="identifyUser()">Identify User</button>
+      <button onclick="resetUser()" class="danger">Reset User</button>
+    </div>
+
+    <h3>Track Events</h3>
+    <div>
+      <button onclick="trackPurchase()">Track Purchase</button>
+      <button onclick="trackAddToCart()" class="secondary">Track Add to Cart</button>
+      <button onclick="trackCustomEvent()" class="secondary">Track Custom Event</button>
+      <button onclick="trackPageView()">Track Page View</button>
+    </div>
+
+    <h3>Session & Attribution</h3>
+    <div>
+      <button onclick="startNewSession()">Start New Session</button>
+      <button onclick="showAttribution()">Show Attribution</button>
+      <button onclick="showJourney()">Show Journey</button>
+    </div>
+
+    <h3>Privacy</h3>
+    <div>
+      <button onclick="optOut()" class="danger">Opt Out</button>
+      <button onclick="optIn()">Opt In</button>
+      <button onclick="checkOptOut()">Check Opt-Out Status</button>
+    </div>
+
+    <h3>Debug</h3>
+    <div>
+      <button onclick="flushQueue()">Flush Queue</button>
+      <button onclick="showNetworkStatus()">Network Status</button>
+      <button onclick="showErrors()">Show Errors</button>
+    </div>
+
+    <div class="log" id="log">
+      <div class="log-entry">Console log will appear here...</div>
+    </div>
+  </div>
+
+  <!-- Include the SDK -->
+  <script src="../dist/datalyr.js"></script>
+  
+  <script>
+    // Initialize the SDK
+    window.datalyr.init({
+      workspaceId: 'test_workspace_123',
+      endpoint: 'https://ingest.datalyr.com',
+      debug: true,
+      batchSize: 5,
+      flushInterval: 3000
+    });
+
+    // Update status display
+    function updateStatus() {
+      document.getElementById('anonymousId').textContent = window.datalyr.getAnonymousId();
+      document.getElementById('userId').textContent = window.datalyr.getUserId() || 'Not identified';
+      document.getElementById('sessionId').textContent = window.datalyr.getSessionId();
+      document.getElementById('distinctId').textContent = window.datalyr.getDistinctId();
+    }
+
+    // Add log entry
+    function addLog(message, data) {
+      const log = document.getElementById('log');
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      if (data) {
+        entry.textContent += ` - ${JSON.stringify(data)}`;
+      }
+      log.insertBefore(entry, log.firstChild);
+      
+      // Keep only last 50 entries
+      while (log.children.length > 50) {
+        log.removeChild(log.lastChild);
+      }
+    }
+
+    // Identity functions
+    function identifyUser() {
+      const email = document.getElementById('emailInput').value;
+      if (!email) {
+        alert('Please enter an email');
+        return;
+      }
+      
+      window.datalyr.identify(email, {
+        email: email,
+        name: 'Test User',
+        plan: 'premium'
+      });
+      
+      addLog('User identified', { email });
+      updateStatus();
+    }
+
+    function resetUser() {
+      window.datalyr.reset();
+      addLog('User reset');
+      updateStatus();
+    }
+
+    // Event tracking functions
+    function trackPurchase() {
+      window.datalyr.track('purchase', {
+        value: 99.99,
+        currency: 'USD',
+        product_id: 'prod_123',
+        product_name: 'Premium Plan'
+      });
+      addLog('Purchase tracked', { value: 99.99 });
+    }
+
+    function trackAddToCart() {
+      window.datalyr.track('add_to_cart', {
+        product_id: 'prod_456',
+        product_name: 'Test Product',
+        price: 29.99,
+        quantity: 1
+      });
+      addLog('Add to cart tracked');
+    }
+
+    function trackCustomEvent() {
+      const eventName = prompt('Enter event name:');
+      if (eventName) {
+        window.datalyr.track(eventName, {
+          custom_property: 'test_value',
+          timestamp: Date.now()
+        });
+        addLog('Custom event tracked', { event: eventName });
+      }
+    }
+
+    function trackPageView() {
+      window.datalyr.page({
+        custom_property: 'manual_page_view'
+      });
+      addLog('Page view tracked');
+    }
+
+    // Session functions
+    function startNewSession() {
+      const sessionId = window.datalyr.startNewSession();
+      addLog('New session started', { sessionId });
+      updateStatus();
+    }
+
+    function showAttribution() {
+      const attribution = window.datalyr.getAttribution();
+      console.log('Attribution:', attribution);
+      addLog('Attribution', attribution);
+      alert(JSON.stringify(attribution, null, 2));
+    }
+
+    function showJourney() {
+      const journey = window.datalyr.getJourney();
+      console.log('Journey:', journey);
+      addLog('Customer journey', { touchpoints: journey.length });
+      alert(JSON.stringify(journey, null, 2));
+    }
+
+    // Privacy functions
+    function optOut() {
+      window.datalyr.optOut();
+      addLog('Opted out of tracking');
+    }
+
+    function optIn() {
+      window.datalyr.optIn();
+      addLog('Opted in to tracking');
+    }
+
+    function checkOptOut() {
+      const isOptedOut = window.datalyr.isOptedOut();
+      addLog('Opt-out status', { optedOut: isOptedOut });
+      alert(`Opted out: ${isOptedOut}`);
+    }
+
+    // Debug functions
+    function flushQueue() {
+      window.datalyr.flush().then(() => {
+        addLog('Queue flushed');
+      });
+    }
+
+    function showNetworkStatus() {
+      const status = window.datalyr.getNetworkStatus();
+      console.log('Network status:', status);
+      addLog('Network status', status);
+      alert(JSON.stringify(status, null, 2));
+    }
+
+    function showErrors() {
+      const errors = window.datalyr.getErrors();
+      console.log('Errors:', errors);
+      addLog('Errors', { count: errors.length });
+      if (errors.length > 0) {
+        alert(JSON.stringify(errors, null, 2));
+      } else {
+        alert('No errors recorded');
+      }
+    }
+
+    // Initial status update
+    setTimeout(updateStatus, 100);
+
+    // Listen for console logs
+    const originalLog = console.log;
+    console.log = function(...args) {
+      originalLog.apply(console, args);
+      if (args[0] && args[0].toString().includes('[Datalyr]')) {
+        addLog(args.join(' '));
+      }
+    };
+  </script>
+</body>
+</html>
