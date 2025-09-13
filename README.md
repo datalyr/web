@@ -5,7 +5,7 @@ The official Datalyr Web SDK for browser-based analytics. Track user behavior, m
 [![npm version](https://img.shields.io/npm/v/@datalyr/web.svg)](https://www.npmjs.com/package/@datalyr/web)
 [![Bundle Size](https://img.shields.io/bundlephobia/minzip/@datalyr/web)](https://bundlephobia.com/package/@datalyr/web)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue.svg)](https://www.typescriptlang.org/)
-[![License](https://img.shields.io/npm/l/@datalyr/web.svg)](https://github.com/datalyr/web-sdk/blob/main/LICENSE)
+[![License](https://img.shields.io/npm/l/@datalyr/web.svg)](https://github.com/datalyr/web/blob/main/LICENSE)
 
 ## Features
 
@@ -715,7 +715,7 @@ const datalyr = new Datalyr({
 ## Support
 
 - **Documentation**: [https://docs.datalyr.com](https://docs.datalyr.com)
-- **Issues**: [GitHub Issues](https://github.com/datalyr/web-sdk/issues)
+- **Issues**: [GitHub Issues](https://github.com/datalyr/web/issues)
 - **Email**: support@datalyr.com
 
 ## License

@@ -31,12 +31,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/datalyr/web-sdk.git"
+    "url": "git+https://github.com/datalyr/web.git"
   },
   "bugs": {
-    "url": "https://github.com/datalyr/web-sdk/issues"
+    "url": "https://github.com/datalyr/web/issues"
   },
-  "homepage": "https://github.com/datalyr/web-sdk#readme",
+  "homepage": "https://github.com/datalyr/web#readme",
   "devDependencies": {
     "@rollup/plugin-commonjs": "^25.0.7",
     "@rollup/plugin-node-resolve": "^15.2.3",
