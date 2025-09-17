@@ -262,6 +262,10 @@ export interface IngestEventPayload {
   // Timestamps
   timestamp?: string;
   received_at?: string;
+  
+  // SDK info
+  sdk_version?: string;
+  sdk_name?: string;
 }
 
 export interface IngestBatchPayload {

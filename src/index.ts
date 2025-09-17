@@ -524,6 +524,13 @@ class Datalyr {
     // Create payload with both camelCase and snake_case fields
     const identityFields = this.identity.getIdentityFields();
     const eventId = generateUUID();
+    
+    // Ensure we have all required identity fields
+    const distinctId = identityFields.distinct_id;
+    const anonymousId = identityFields.anonymous_id;
+    const visitorId = identityFields.visitor_id || anonymousId;
+    const sessionId = identityFields.session_id;
+    
     const payload: IngestEventPayload = {
       // Required fields
       workspaceId: this.config.workspaceId,
@@ -537,8 +544,19 @@ class Datalyr {
       source: 'web',
       timestamp: new Date().toISOString(),
       
-      // Identity fields (already includes both formats from identity.getIdentityFields())
-      ...identityFields,
+      // Identity fields (explicit to satisfy TypeScript)
+      distinct_id: distinctId,
+      anonymous_id: anonymousId,
+      visitor_id: visitorId,
+      visitorId: visitorId,
+      user_id: identityFields.user_id,
+      canonical_id: identityFields.canonical_id,
+      sessionId: sessionId,
+      session_id: sessionId,
+      
+      // Resolution metadata
+      resolution_method: 'browser_sdk',
+      resolution_confidence: 1.0,
       
       // SDK metadata
       sdk_version: '1.0.0',

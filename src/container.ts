@@ -4,7 +4,6 @@
  */
 
 import { storage } from './storage';
-import { sanitizeEventData } from './utils';
 
 export interface ContainerScript {
   id: string;
@@ -377,8 +376,8 @@ export class ContainerManager {
       
       // Initialize gtag
       (window as any).dataLayer = (window as any).dataLayer || [];
-      function gtag() {
-        (window as any).dataLayer.push(arguments);
+      function gtag(...args: any[]) {
+        (window as any).dataLayer.push(args);
       }
       (window as any).gtag = gtag;
       gtag('js', new Date());
@@ -398,7 +397,7 @@ export class ContainerManager {
   private initializeTikTokPixel(config: any): void {
     try {
       // Load TikTok Pixel script
-      (function(w: any, d: any, t: any) {
+      (function(w: any, _d: any, t: any) {
         w.TiktokAnalyticsObject = t;
         var ttq = w[t] = w[t] || [];
         ttq.methods = ['page', 'track', 'identify', 'instances', 'debug', 'on', 'off', 'once', 'ready', 'alias', 'group', 'enableCookie', 'disableCookie'];
@@ -423,7 +422,7 @@ export class ContainerManager {
           o.async = true;
           o.src = i + '?sdkid=' + e + '&lib=' + t;
           var a = document.getElementsByTagName('script')[0];
-          a.parentNode.insertBefore(o, a);
+          a.parentNode?.insertBefore(o, a);
         };
       })(window, document, 'ttq');
       

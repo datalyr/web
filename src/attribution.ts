@@ -4,21 +4,48 @@
  */
 
 import { storage } from './storage';
-import { getAllQueryParams, getQueryParam } from './utils';
+import { getAllQueryParams } from './utils';
 import type { Attribution, TouchPoint } from './types';
 
 export class AttributionManager {
   private attributionWindow: number;
   private trackedParams: string[];
   private UTM_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
-  private CLICK_IDS = ['fbclid', 'gclid', 'ttclid', 'msclkid', 'twclid', 'li_fat_id', 'sclid', 'dclid', 'epik'];
+  // Updated to match dl.js - includes ALL ad platform click IDs
+  private CLICK_IDS = [
+    'fbclid',     // Facebook/Meta
+    'gclid',      // Google Ads
+    'gbraid',     // Google Ads (iOS)
+    'wbraid',     // Google Ads (web)
+    'ttclid',     // TikTok
+    'msclkid',    // Microsoft/Bing
+    'twclid',     // Twitter/X
+    'li_fat_id',  // LinkedIn
+    'sclid',      // Snapchat
+    'dclid',      // Google Display/DoubleClick
+    'epik',       // Pinterest
+    'rdt_cid',    // Reddit
+    'obclid',     // Outbrain
+    'irclid',     // Impact Radius
+    'ko_click_id' // Klaviyo
+  ];
+  // Default tracked params matching dl.js
+  private DEFAULT_TRACKED_PARAMS = [
+    'lyr',        // Datalyr partner tracking
+    'ref',        // Generic referral
+    'source',     // Generic source (non-UTM)
+    'campaign',   // Generic campaign (non-UTM)
+    'medium',     // Generic medium (non-UTM)
+    'gad_source'  // Google Ads source parameter
+  ];
 
   constructor(options: {
     attributionWindow?: number;
     trackedParams?: string[];
   } = {}) {
     this.attributionWindow = options.attributionWindow || 30 * 24 * 60 * 60 * 1000; // 30 days
-    this.trackedParams = options.trackedParams || [];
+    // Merge default tracked params with user-provided ones
+    this.trackedParams = [...this.DEFAULT_TRACKED_PARAMS, ...(options.trackedParams || [])];
   }
 
   /**
@@ -126,9 +153,9 @@ export class AttributionManager {
     const touchpoint: TouchPoint = {
       timestamp: Date.now(),
       sessionId,
-      source: attribution.source,
-      medium: attribution.medium,
-      campaign: attribution.campaign
+      source: attribution.source || undefined,
+      medium: attribution.medium || undefined,
+      campaign: attribution.campaign || undefined
     };
 
     journey.push(touchpoint);

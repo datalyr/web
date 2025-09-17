@@ -316,7 +316,7 @@ export class FingerprintCollector {
       const sortedData = Object.keys(data)
         .sort()
         .reduce((obj, key) => {
-          obj[key] = data[key];
+          obj[key] = (data as any)[key];
           return obj;
         }, {} as any);
 

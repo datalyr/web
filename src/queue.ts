@@ -35,7 +35,6 @@ export class EventQueue {
   private recentEventIds = new Set<string>();
   private MAX_RECENT_EVENT_IDS = 1000;
   private OFFLINE_QUEUE_KEY = 'dl_offline_queue';
-  private currentEndpointIndex = 0;
 
   constructor(config: any) {
     this.config = {
@@ -109,7 +108,10 @@ export class EventQueue {
       const toDelete = this.recentEventIds.size - this.MAX_RECENT_EVENT_IDS;
       const iterator = this.recentEventIds.values();
       for (let i = 0; i < toDelete; i++) {
-        this.recentEventIds.delete(iterator.next().value);
+        const next = iterator.next();
+        if (!next.done) {
+          this.recentEventIds.delete(next.value);
+        }
       }
     }
 
@@ -234,7 +236,6 @@ export class EventQueue {
       }
 
       this.log(`Batch sent successfully to ${currentEndpoint}: ${events.length} events`);
-      this.currentEndpointIndex = 0; // Reset to primary on success
     } catch (error) {
       // Try next fallback endpoint if available
       if (endpointIndex < endpoints.length - 1) {
