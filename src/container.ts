@@ -59,8 +59,8 @@ export class ContainerManager {
     debug?: boolean;
   }) {
     this.workspaceId = options.workspaceId;
-    // Container scripts always use the app endpoint, not ingest
-    this.endpoint = this.extractAppEndpoint(options.endpoint);
+    // Container scripts use the same endpoint as tracking (ingest)
+    this.endpoint = options.endpoint || 'https://ingest.datalyr.com';
     this.debug = options.debug || false;
     
     // Load session scripts from storage
