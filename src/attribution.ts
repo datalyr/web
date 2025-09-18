@@ -3,7 +3,7 @@
  * Handles UTM parameters, click IDs, and customer journey
  */
 
-import { storage } from './storage';
+import { storage, cookies } from './storage';
 import { getAllQueryParams } from './utils';
 import type { Attribution, TouchPoint } from './types';
 
@@ -176,6 +176,71 @@ export class AttributionManager {
   }
 
   /**
+   * Capture advertising platform cookies
+   */
+  private captureAdCookies(): Record<string, string | null> {
+    const adCookies: Record<string, string | null> = {};
+    
+    // Facebook/Meta cookies
+    adCookies._fbp = cookies.get('_fbp');
+    adCookies._fbc = cookies.get('_fbc');
+    
+    // Google Ads cookies
+    adCookies._gcl_aw = cookies.get('_gcl_aw');
+    adCookies._gcl_dc = cookies.get('_gcl_dc');
+    adCookies._gcl_gb = cookies.get('_gcl_gb');
+    adCookies._gcl_ha = cookies.get('_gcl_ha');
+    adCookies._gac = cookies.get('_gac');
+    
+    // Google Analytics cookies
+    adCookies._ga = cookies.get('_ga');
+    adCookies._gid = cookies.get('_gid');
+    
+    // TikTok cookies
+    adCookies._ttp = cookies.get('_ttp');
+    adCookies._ttc = cookies.get('_ttc');
+    
+    // Generate _fbp if missing (Facebook browser ID)
+    if (!adCookies._fbp && (this.hasClickId('fbclid') || adCookies._fbc)) {
+      const timestamp = Date.now();
+      const randomId = Math.random().toString(36).substring(2, 15);
+      adCookies._fbp = `fb.1.${timestamp}.${randomId}`;
+      // Optionally set the cookie for future use
+      cookies.set('_fbp', adCookies._fbp, 90);
+    }
+    
+    // Generate _fbc if we have fbclid but no _fbc
+    const fbclid = this.getCurrentFbclid();
+    if (fbclid && !adCookies._fbc) {
+      const timestamp = Math.floor(Date.now() / 1000);
+      adCookies._fbc = `fb.1.${timestamp}.${fbclid}`;
+      // Optionally set the cookie for future use
+      cookies.set('_fbc', adCookies._fbc, 90);
+    }
+    
+    // Filter out null values for cleaner data
+    return Object.fromEntries(
+      Object.entries(adCookies).filter(([_, value]) => value !== null)
+    );
+  }
+
+  /**
+   * Check if we have a specific click ID in current params
+   */
+  private hasClickId(clickIdType: string): boolean {
+    const params = getAllQueryParams();
+    return !!params[clickIdType];
+  }
+
+  /**
+   * Get current fbclid from URL if present
+   */
+  private getCurrentFbclid(): string | null {
+    const params = getAllQueryParams();
+    return params.fbclid || null;
+  }
+
+  /**
    * Get attribution data for event
    */
   getAttributionData(): Record<string, any> {
@@ -183,6 +248,9 @@ export class AttributionManager {
     const lastTouch = this.getLastTouch();
     const journey = this.getJourney();
     const current = this.captureAttribution();
+    
+    // Capture advertising cookies automatically
+    const adCookies = this.captureAdCookies();
 
     // Update first/last touch if needed
     if (!firstTouch && Object.keys(current).length > 1) {
@@ -195,6 +263,9 @@ export class AttributionManager {
     return {
       // Current attribution
       ...current,
+      
+      // Advertising platform cookies
+      ...adCookies,
       
       // First touch (with snake_case aliases)
       first_touch_source: firstTouch?.source,
