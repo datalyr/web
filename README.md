@@ -34,15 +34,12 @@ pnpm add @datalyr/web
 ## Quick Start
 
 ```javascript
-import { Datalyr } from '@datalyr/web';
+import datalyr from '@datalyr/web';
 
-// Initialize with your workspace ID
-const datalyr = new Datalyr({
+// Initialize the SDK with your workspace ID
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID'
 });
-
-// Initialize the SDK
-await datalyr.init();
 
 // Track an event
 datalyr.track('Button Clicked', {
@@ -63,7 +60,10 @@ datalyr.identify('user_123', {
 ### Initialization
 
 ```javascript
-const datalyr = new Datalyr({
+import datalyr from '@datalyr/web';
+
+// Initialize the SDK with configuration
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
   
   // Optional configuration
@@ -79,8 +79,6 @@ const datalyr = new Datalyr({
   trackSPA: true,                          // Track SPA route changes
   trackPageViews: true                     // Track initial page view
 });
-
-await datalyr.init();
 ```
 
 ### Track Events
@@ -243,7 +241,9 @@ datalyr.track('Signup');
 // Includes: utm_source, utm_medium, first_touch_source, last_touch_source, etc.
 
 // Track custom URL parameters
-const datalyr = new Datalyr({
+import datalyr from '@datalyr/web';
+
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
   trackedParams: ['ref', 'affiliate_id', 'promo_code']
 });
@@ -254,7 +254,9 @@ const datalyr = new Datalyr({
 For single-page applications:
 
 ```javascript
-const datalyr = new Datalyr({
+import datalyr from '@datalyr/web';
+
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
   trackSPA: true  // Auto-track route changes (default: true)
 });
@@ -270,14 +272,16 @@ datalyr.page('Product Details', {
 Control data collection:
 
 ```javascript
+import datalyr from '@datalyr/web';
+
 // Standard mode (default) - balanced privacy
-const datalyr = new Datalyr({
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
   privacyMode: 'standard'
 });
 
-// Strict mode - minimal data collection
-const datalyr = new Datalyr({
+// Or strict mode - minimal data collection
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
   privacyMode: 'strict'
 });
@@ -300,14 +304,16 @@ await datalyr.flush();
 Automatically track users across subdomains:
 
 ```javascript
+import datalyr from '@datalyr/web';
+
 // Auto-detect domain for *.example.com
-const datalyr = new Datalyr({
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
   cookieDomain: 'auto'  // Default
 });
 
 // Or set explicitly
-const datalyr = new Datalyr({
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
   cookieDomain: '.example.com'
 });
@@ -318,7 +324,9 @@ const datalyr = new Datalyr({
 The SDK can automatically load and manage third-party tracking scripts with built-in security:
 
 ```javascript
-const datalyr = new Datalyr({
+import datalyr from '@datalyr/web';
+
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
   enableContainer: true  // Default: true
 });
@@ -352,6 +360,8 @@ The container manager supports:
 Extend SDK functionality:
 
 ```javascript
+import datalyr from '@datalyr/web';
+
 // Create a plugin
 const myPlugin = {
   name: 'my-plugin',
@@ -373,8 +383,8 @@ const myPlugin = {
   }
 };
 
-// Register plugin
-const datalyr = new Datalyr({
+// Register plugin during initialization
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
   plugins: [myPlugin]
 });
@@ -385,9 +395,10 @@ const datalyr = new Datalyr({
 Full TypeScript definitions are included:
 
 ```typescript
-import { Datalyr, EventProperties, UserTraits } from '@datalyr/web';
+import datalyr, { EventProperties, UserTraits } from '@datalyr/web';
 
-const datalyr = new Datalyr({
+// Initialize the SDK
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID'
 });
 
@@ -416,15 +427,13 @@ datalyr.identify('user_123', traits);
 
 ```jsx
 import { useEffect } from 'react';
-import { Datalyr } from '@datalyr/web';
-
-const datalyr = new Datalyr({
-  workspaceId: 'YOUR_WORKSPACE_ID'
-});
+import datalyr from '@datalyr/web';
 
 function App() {
   useEffect(() => {
-    datalyr.init();
+    datalyr.init({
+      workspaceId: 'YOUR_WORKSPACE_ID'
+    });
   }, []);
   
   const handleClick = () => {
@@ -442,14 +451,12 @@ function App() {
 ```vue
 <script setup>
 import { onMounted } from 'vue';
-import { Datalyr } from '@datalyr/web';
-
-const datalyr = new Datalyr({
-  workspaceId: 'YOUR_WORKSPACE_ID'
-});
+import datalyr from '@datalyr/web';
 
 onMounted(() => {
-  datalyr.init();
+  datalyr.init({
+    workspaceId: 'YOUR_WORKSPACE_ID'
+  });
 });
 
 const trackClick = () => {
@@ -469,15 +476,13 @@ const trackClick = () => {
 'use client';
 
 import { useEffect } from 'react';
-import { Datalyr } from '@datalyr/web';
-
-const datalyr = new Datalyr({
-  workspaceId: process.env.NEXT_PUBLIC_DATALYR_WORKSPACE_ID
-});
+import datalyr from '@datalyr/web';
 
 export function AnalyticsProvider({ children }) {
   useEffect(() => {
-    datalyr.init();
+    datalyr.init({
+      workspaceId: process.env.NEXT_PUBLIC_DATALYR_WORKSPACE_ID
+    });
   }, []);
   
   return children;
@@ -506,16 +511,14 @@ Initialize the SDK as early as possible in your application lifecycle:
 
 ```javascript
 // In your main entry file
-import { Datalyr } from '@datalyr/web';
+import datalyr from '@datalyr/web';
 
-const datalyr = new Datalyr({
+// Initialize before other code
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID'
 });
 
-// Initialize before other code
-datalyr.init().then(() => {
-  // Start your app
-});
+// Your app code...
 ```
 
 ### 2. Use Consistent Event Naming
@@ -617,13 +620,12 @@ If you're currently using the Datalyr script tag, migration is straightforward:
 
 ### After (Web SDK):
 ```javascript
-import { Datalyr } from '@datalyr/web';
+import datalyr from '@datalyr/web';
 
-const datalyr = new Datalyr({
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID'
 });
 
-await datalyr.init();
 datalyr.track('Button Clicked');
 ```
 
@@ -660,7 +662,9 @@ The SDK is designed with privacy in mind:
 Enable debug mode for detailed logging:
 
 ```javascript
-const datalyr = new Datalyr({
+import datalyr from '@datalyr/web';
+
+datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
   debug: true
 });
@@ -672,7 +676,7 @@ const datalyr = new Datalyr({
 
 ## API Reference
 
-### Constructor Options
+### Initialization Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -694,7 +698,7 @@ const datalyr = new Datalyr({
 
 | Method | Description |
 |--------|-------------|
-| `init()` | Initialize the SDK |
+| `init(config)` | Initialize the SDK with configuration |
 | `track(event, properties?)` | Track an event |
 | `identify(userId?, traits?)` | Identify a user |
 | `page(name?, properties?)` | Track a page view |
