@@ -504,6 +504,128 @@ export default function RootLayout({ children }) {
 }
 ```
 
+## Authentication & Server-Side Tracking
+
+### ⚠️ Critical: Server-Side Identification for Authentication
+
+When implementing authentication flows (login, signup, OAuth), you **MUST** call identify on the server-side before redirecting. Client-side identification during auth flows is unreliable and will cause attribution data loss.
+
+#### The Problem
+
+```javascript
+// ❌ WRONG - Client-side only (unreliable for auth flows)
+function LoginPage() {
+  const handleLogin = async () => {
+    await login(email, password);
+    datalyr.identify(userId); // May not execute before redirect!
+    router.push('/dashboard'); // User redirects, identify never completes
+  };
+}
+```
+
+#### The Solution
+
+```javascript
+// ✅ CORRECT - Server-side identification
+// Next.js Server Action example
+async function loginAction(email: string, password: string) {
+  const user = await authenticate(email, password);
+  
+  // Critical: Identify BEFORE redirect
+  await fetch('https://datalyr.com/api/v1/events', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.DATALYR_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      event_name: '$identify',
+      user_id: user.id,
+      workspace_id: process.env.DATALYR_WORKSPACE_ID,
+      properties: {
+        email: user.email,
+        source: 'login'
+      }
+    })
+  });
+  
+  redirect('/dashboard');
+}
+
+// For signup
+async function signupAction(email: string, password: string) {
+  const user = await createUser(email, password);
+  
+  // Identify new user server-side
+  await identifyUserServer(user.id, {
+    email: user.email,
+    created_at: new Date().toISOString(),
+    source: 'signup'
+  });
+  
+  redirect('/onboarding');
+}
+```
+
+### Why Server-Side Identification Matters
+
+1. **Attribution Tracking**: Links anonymous visitors who clicked ads (with fbclid, gclid, etc.) to authenticated users
+2. **Cross-Device Tracking**: Connects users across different devices and browsers
+3. **Reliability**: Guarantees execution before redirects, unlike client-side
+4. **OAuth Compatibility**: Works with complex OAuth redirect chains
+
+### Implementation Checklist
+
+Ensure you call identify server-side in ALL these scenarios:
+
+- [ ] **Email Signup**: Call identify when creating new accounts
+- [ ] **Email Login**: Call identify for returning users
+- [ ] **OAuth Signup**: Call identify in OAuth callback for new users
+- [ ] **OAuth Login**: Call identify in OAuth callback for existing users  
+- [ ] **Magic Links**: Call identify when validating magic link tokens
+- [ ] **Password Reset**: Call identify after successful password reset
+- [ ] **Session Restore**: Call identify when validating existing sessions on app load
+
+### Example: Complete OAuth Implementation
+
+```javascript
+// app/auth/callback/route.ts
+export async function GET(request: Request) {
+  const { user } = await validateOAuthCallback(request);
+  
+  const existingUser = await getUserByEmail(user.email);
+  
+  if (existingUser) {
+    // Existing user logging in
+    await identifyUserServer(existingUser.id, {
+      email: existingUser.email,
+      source: 'oauth_login',
+      provider: 'google'
+    });
+    await trackEventServer('login', { method: 'oauth' });
+  } else {
+    // New user signing up
+    const newUser = await createUser(user);
+    await identifyUserServer(newUser.id, {
+      email: newUser.email,
+      source: 'oauth_signup',
+      provider: 'google'
+    });
+    await trackEventServer('signup', { method: 'oauth' });
+  }
+  
+  return redirect('/dashboard');
+}
+```
+
+### What Happens Without Server-Side Identify
+
+Without proper server-side identification:
+- **Lost Attribution**: Ad clicks (fbclid, gclid) won't be associated with conversions
+- **Broken Cross-Device**: Users on multiple devices won't be linked
+- **Incomplete Funnels**: User journeys will appear fragmented
+- **Inaccurate Analytics**: Conversion rates and ROI calculations will be wrong
+
 ## Best Practices
 
 ### 1. Initialize Early
