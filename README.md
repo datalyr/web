@@ -504,127 +504,171 @@ export default function RootLayout({ children }) {
 }
 ```
 
-## Authentication & Server-Side Tracking
+## Authentication & Attribution Tracking
 
-### ⚠️ Critical: Server-Side Identification for Authentication
+### ⚠️ Critical: Client-Side Identification for Attribution
 
-When implementing authentication flows (login, signup, OAuth), you **MUST** call identify on the server-side before redirecting. Client-side identification during auth flows is unreliable and will cause attribution data loss.
+When implementing authentication flows (login, signup, OAuth), you **MUST** call identify on the client-side (browser) to preserve attribution data. Server-side identification creates new sessions and loses all attribution context.
 
-#### The Problem
-
-```javascript
-// ❌ WRONG - Client-side only (unreliable for auth flows)
-function LoginPage() {
-  const handleLogin = async () => {
-    await login(email, password);
-    datalyr.identify(userId); // May not execute before redirect!
-    router.push('/dashboard'); // User redirects, identify never completes
-  };
-}
-```
-
-#### The Solution
+#### The Problem with Server-Side Identify
 
 ```javascript
-// ✅ CORRECT - Server-side identification
-// Next.js Server Action example
-async function loginAction(email: string, password: string) {
+// ❌ WRONG - Server-side identify breaks attribution
+app.post('/api/login', async (req, res) => {
   const user = await authenticate(email, password);
   
-  // Critical: Identify BEFORE redirect
-  await fetch('https://datalyr.com/api/v1/events', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.DATALYR_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      event_name: '$identify',
-      user_id: user.id,
-      workspace_id: process.env.DATALYR_WORKSPACE_ID,
-      properties: {
-        email: user.email,
-        source: 'login'
-      }
-    })
+  // This creates a NEW session without attribution data!
+  await serverAnalytics.identify({
+    userId: user.id,
+    traits: { email: user.email }
   });
   
-  redirect('/dashboard');
-}
-
-// For signup
-async function signupAction(email: string, password: string) {
-  const user = await createUser(email, password);
-  
-  // Identify new user server-side
-  await identifyUserServer(user.id, {
-    email: user.email,
-    created_at: new Date().toISOString(),
-    source: 'signup'
-  });
-  
-  redirect('/onboarding');
-}
+  res.json({ userId: user.id });
+});
+// Result: Lost UTM params, fbclid, gclid, referrer - all gone!
 ```
 
-### Why Server-Side Identification Matters
+#### The Correct Solution
 
-1. **Attribution Tracking**: Links anonymous visitors who clicked ads (with fbclid, gclid, etc.) to authenticated users
-2. **Cross-Device Tracking**: Connects users across different devices and browsers
-3. **Reliability**: Guarantees execution before redirects, unlike client-side
-4. **OAuth Compatibility**: Works with complex OAuth redirect chains
+```javascript
+// ✅ CORRECT - Client-side identification preserves attribution
+// React/Next.js example
+function LoginPage() {
+  const handleLogin = async () => {
+    // 1. Authenticate on server
+    const response = await fetch('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password })
+    });
+    
+    const { userId, email, name } = await response.json();
+    
+    // 2. Identify in browser - this preserves attribution!
+    datalyr.identify(userId, {
+      email: email,
+      name: name,
+      login_method: 'email'
+    });
+    
+    // 3. Then redirect
+    router.push('/dashboard');
+  };
+}
+
+// Server endpoint - NO identify, just auth
+app.post('/api/login', async (req, res) => {
+  const user = await authenticate(email, password);
+  
+  // Just return user data for client-side identify
+  res.json({
+    userId: user.id,
+    email: user.email,
+    name: user.name
+  });
+});
+```
+
+### Why Client-Side Identification Matters
+
+1. **Attribution Preserved**: UTM params, fbclid, gclid, referrer all stay linked to the user
+2. **Session Continuity**: Links anonymous session (with all its context) to identified user
+3. **Cookie Access**: Can read and maintain browser session data
+4. **Accurate Journey**: Tracks the complete anonymous → identified user journey
 
 ### Implementation Checklist
 
-Ensure you call identify server-side in ALL these scenarios:
+Ensure you call identify **client-side** in these scenarios:
 
-- [ ] **Email Signup**: Call identify when creating new accounts
-- [ ] **Email Login**: Call identify for returning users
-- [ ] **OAuth Signup**: Call identify in OAuth callback for new users
-- [ ] **OAuth Login**: Call identify in OAuth callback for existing users  
-- [ ] **Magic Links**: Call identify when validating magic link tokens
-- [ ] **Password Reset**: Call identify after successful password reset
-- [ ] **Session Restore**: Call identify when validating existing sessions on app load
+- [ ] **After Signup Success**: When account creation API returns success
+- [ ] **After Login Success**: When authentication API returns success
+- [ ] **After OAuth Redirect**: When returning from OAuth provider
+- [ ] **After Magic Link Click**: When magic link is validated
+- [ ] **On App Load**: If user session exists, re-identify
+- [ ] **After Email Verification**: When user verifies their email
+- [ ] **Session Restore**: When detecting existing authenticated session
 
 ### Example: Complete OAuth Implementation
 
 ```javascript
-// app/auth/callback/route.ts
+// Client-side: After OAuth redirect
+useEffect(() => {
+  // Check if we just came back from OAuth
+  if (window.location.search.includes('oauth=success')) {
+    // Get user data from your API/session
+    fetch('/api/me')
+      .then(res => res.json())
+      .then(user => {
+        // Identify in browser - preserves attribution!
+        datalyr.identify(user.id, {
+          email: user.email,
+          name: user.name,
+          auth_method: 'google',
+          signup_source: localStorage.getItem('signup_source') || 'organic'
+        });
+        
+        // Track the appropriate event
+        if (user.isNewUser) {
+          datalyr.track('Signup Completed', { method: 'oauth' });
+        } else {
+          datalyr.track('Login Successful', { method: 'oauth' });
+        }
+      });
+  }
+}, []);
+
+// Server-side: OAuth callback - NO identify!
 export async function GET(request: Request) {
   const { user } = await validateOAuthCallback(request);
   
   const existingUser = await getUserByEmail(user.email);
   
   if (existingUser) {
-    // Existing user logging in
-    await identifyUserServer(existingUser.id, {
-      email: existingUser.email,
-      source: 'oauth_login',
-      provider: 'google'
-    });
-    await trackEventServer('login', { method: 'oauth' });
+    // Set session, but DON'T identify
+    await createSession(existingUser.id);
+    return redirect('/dashboard?oauth=success');
   } else {
-    // New user signing up
+    // Create user, but DON'T identify
     const newUser = await createUser(user);
-    await identifyUserServer(newUser.id, {
-      email: newUser.email,
-      source: 'oauth_signup',
-      provider: 'google'
-    });
-    await trackEventServer('signup', { method: 'oauth' });
+    await createSession(newUser.id);
+    return redirect('/dashboard?oauth=success&new=true');
   }
-  
-  return redirect('/dashboard');
 }
 ```
 
-### What Happens Without Server-Side Identify
+### Server-Side Events (Different from Identify!)
 
-Without proper server-side identification:
-- **Lost Attribution**: Ad clicks (fbclid, gclid) won't be associated with conversions
-- **Broken Cross-Device**: Users on multiple devices won't be linked
-- **Incomplete Funnels**: User journeys will appear fragmented
-- **Inaccurate Analytics**: Conversion rates and ROI calculations will be wrong
+Use server-side for **tracking events** with userId (not identify):
+
+```javascript
+// ✅ CORRECT - Server-side events with userId
+// Stripe webhook example
+app.post('/webhook/stripe', async (req, res) => {
+  const event = stripe.webhooks.constructEvent(req.body, sig, secret);
+  
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    
+    // Track purchase event with userId (NOT identify)
+    await analytics.track({
+      userId: session.client_reference_id,  // Your user ID
+      event: 'Purchase Completed',
+      properties: {
+        amount: session.amount_total / 100,
+        currency: session.currency,
+        plan: session.metadata.plan
+      }
+    });
+  }
+});
+```
+
+### What Happens with Server-Side Identify (Wrong!)
+
+If you identify server-side:
+- **Lost Attribution**: New session created, no UTM params or click IDs
+- **Broken Journey**: Can't link anonymous browsing to identified user
+- **Multiple Sessions**: Each server identify creates disconnected session
+- **No Context**: Missing referrer, landing page, device info
 
 ## Best Practices
 
@@ -679,15 +723,20 @@ datalyr.track('Product Viewed', {
 });
 ```
 
-### 4. Identify Users After Authentication
-Call identify as soon as you know who the user is:
+### 4. ALWAYS Identify in the Browser (Not Server)
+This is critical for attribution:
 
 ```javascript
-// After login
+// ✅ CORRECT - Browser identification
 async function handleLogin(email, password) {
-  const user = await loginUser(email, password);
+  const response = await fetch('/api/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password })
+  });
   
-  // Identify immediately after login
+  const user = await response.json();
+  
+  // Identify in browser - preserves attribution!
   datalyr.identify(user.id, {
     email: user.email,
     name: user.name,
@@ -695,13 +744,13 @@ async function handleLogin(email, password) {
   });
 }
 
-// After signup
-async function handleSignup(data) {
-  const user = await createUser(data);
+// ❌ WRONG - Server identification
+// This breaks attribution tracking!
+app.post('/api/login', async (req, res) => {
+  const user = await authenticate(req.body);
   
-  datalyr.identify(user.id, {
-    email: data.email,
-    name: data.name,
+  // DON'T DO THIS - Creates new session
+  await serverAnalytics.identify(user.id, {
     signup_date: new Date().toISOString()
   });
   
