@@ -202,8 +202,42 @@ export function isDoNotTrackEnabled(): boolean {
  * Check if Global Privacy Control is enabled
  */
 export function isGlobalPrivacyControlEnabled(): boolean {
-  return (navigator as any).globalPrivacyControl === true || 
+  return (navigator as any).globalPrivacyControl === true ||
          (window as any).globalPrivacyControl === true;
+}
+
+/**
+ * Get root domain for cross-subdomain tracking
+ */
+export function getRootDomain(): string {
+  const hostname = window.location.hostname;
+
+  // Handle localhost and IP addresses
+  if (hostname === 'localhost' ||
+      hostname.match(/^[0-9]{1,3}\./) || // IPv4
+      hostname.match(/^\[?[0-9a-fA-F:]+\]?$/)) { // IPv6
+    return hostname;
+  }
+
+  // Get root domain (last two parts: example.com)
+  const parts = hostname.split('.');
+  if (parts.length >= 2) {
+    // Handle .co.uk, .com.au, etc
+    const tld = parts[parts.length - 1];
+    const sld = parts[parts.length - 2];
+
+    // Common two-part TLDs
+    const twoPartTlds = ['co.uk', 'com.au', 'co.nz', 'co.jp', 'co.in', 'co.za'];
+    const lastTwo = `${sld}.${tld}`;
+
+    if (twoPartTlds.includes(lastTwo) && parts.length >= 3) {
+      return '.' + parts.slice(-3).join('.');
+    }
+
+    return '.' + parts.slice(-2).join('.');
+  }
+
+  return hostname;
 }
 
 /**

@@ -140,7 +140,15 @@ class CookieStorage {
     const value = `; ${document.cookie}`;
     const parts = value.split(`; ${name}=`);
     if (parts.length === 2) {
-      return parts.pop()?.split(';').shift() || null;
+      const rawValue = parts.pop()?.split(';').shift() || null;
+      if (rawValue) {
+        try {
+          return decodeURIComponent(rawValue);
+        } catch {
+          // Return raw value if decoding fails (backwards compatibility)
+          return rawValue;
+        }
+      }
     }
     return null;
   }

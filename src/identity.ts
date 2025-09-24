@@ -3,8 +3,8 @@
  * Handles anonymous_id, user_id, and identity resolution
  */
 
-import { storage } from './storage';
-import { generateUUID } from './utils';
+import { storage, cookies } from './storage';
+import { generateUUID, getRootDomain } from './utils';
 
 export class IdentityManager {
   private anonymousId: string;
@@ -20,14 +20,66 @@ export class IdentityManager {
    * Get or create anonymous ID (device/browser identifier)
    */
   private getOrCreateAnonymousId(): string {
-    let anonymousId = storage.get('dl_anonymous_id');
-    
-    if (!anonymousId) {
-      anonymousId = `anon_${generateUUID()}`;
+    // 1. Check root domain cookie first (works across subdomains)
+    let anonymousId = cookies.get('__dl_visitor_id');
+
+    if (anonymousId) {
+      // Found in cookie - sync to localStorage
       storage.set('dl_anonymous_id', anonymousId);
+      return anonymousId;
     }
-    
+
+    // 2. Check localStorage (fallback for cookie issues)
+    anonymousId = storage.get('dl_anonymous_id');
+
+    if (anonymousId) {
+      // Found in localStorage - set root domain cookie
+      this.setRootDomainCookie('__dl_visitor_id', anonymousId);
+      return anonymousId;
+    }
+
+    // 3. Generate new ID
+    anonymousId = `anon_${generateUUID()}`;
+
+    // 4. Store in both cookie (primary) and localStorage (backup)
+    this.setRootDomainCookie('__dl_visitor_id', anonymousId);
+    storage.set('dl_anonymous_id', anonymousId);
+
     return anonymousId;
+  }
+
+  /**
+   * Set a root domain cookie for cross-subdomain tracking
+   */
+  private setRootDomainCookie(name: string, value: string): void {
+    try {
+      const rootDomain = getRootDomain();
+      const secure = location.protocol === 'https:' ? '; Secure' : '';
+      const encodedValue = encodeURIComponent(value);
+
+      // Set cookie with root domain, 1 year expiry
+      document.cookie = `${name}=${encodedValue}; domain=${rootDomain}; path=/; max-age=31536000; SameSite=Lax${secure}`;
+
+      // Verify cookie was set successfully (cookies.get already decodes)
+      const verifyValue = cookies.get(name);
+      if (verifyValue === value) {
+        console.log(`[Datalyr] Set root domain cookie: ${name} on domain: ${rootDomain}`);
+      } else {
+        // Fallback: try without domain (current subdomain only)
+        document.cookie = `${name}=${encodedValue}; path=/; max-age=31536000; SameSite=Lax${secure}`;
+        console.log(`[Datalyr] Set cookie without domain (fallback): ${name}`);
+      }
+    } catch (e) {
+      console.error('[Datalyr] Error setting root domain cookie:', e);
+      // Still try to set without domain as fallback
+      try {
+        const secure = location.protocol === 'https:' ? '; Secure' : '';
+        const encodedValue = encodeURIComponent(value);
+        document.cookie = `${name}=${encodedValue}; path=/; max-age=31536000; SameSite=Lax${secure}`;
+      } catch (fallbackError) {
+        console.error('[Datalyr] Failed to set cookie even without domain:', fallbackError);
+      }
+    }
   }
 
   /**
@@ -134,10 +186,13 @@ export class IdentityManager {
     this.userId = null;
     storage.remove('dl_user_id');
     storage.remove('dl_user_traits');
-    
+
     // Generate new anonymous ID for privacy
     this.anonymousId = `anon_${generateUUID()}`;
     storage.set('dl_anonymous_id', this.anonymousId);
+
+    // Update root domain cookie with new ID
+    this.setRootDomainCookie('__dl_visitor_id', this.anonymousId);
   }
 
   /**
