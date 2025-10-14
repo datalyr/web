@@ -183,13 +183,7 @@ class Datalyr {
     if (!this.shouldTrack()) return;
 
     try {
-      // Collect heavy fingerprint on first event (lazy loading)
-      if (!this.heavyFingerprintCollected && this.config.enableFingerprinting) {
-        this.heavyFingerprintCollected = true;
-        this.fingerprint.collectHeavyFingerprint().catch(err => {
-          this.log('Heavy fingerprint collection failed:', err);
-        });
-      }
+      // PRIVACY: Heavy fingerprinting removed - using minimal fingerprinting only
 
       // Update session activity
       this.session.updateActivity(eventName);

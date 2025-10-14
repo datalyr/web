@@ -164,53 +164,14 @@ export interface DatalyrPlugin {
 }
 
 // Fingerprint data collected from browser
+// PRIVACY: Minimal data collection only (matches browser tag approach)
 export interface FingerprintData {
-  // Basic browser data
-  userAgent?: string | null;
-  userAgentData?: {
-    brands?: any[];
-    mobile?: boolean;
-    platform?: string | null;
-  };
-  language?: string | null;
-  languages?: string[] | null;
-  platform?: string | null;
-  cookieEnabled?: boolean | null;
-  doNotTrack?: string | null;
-  
-  // Hardware (coarsened for privacy)
-  hardwareConcurrency?: string | number | null;
-  deviceMemory?: string | number | null;
-  maxTouchPoints?: string | null;
-  
-  // Screen (coarsened)
-  screenResolution?: string | null;
-  colorDepth?: number | null;
-  pixelRatio?: string | null;
-  
-  // Timezone
+  // Minimal fingerprinting for attribution
   timezone?: string | null;
-  timezoneOffset?: number | null;
-  
-  // Canvas (disabled by default for privacy)
-  canvasEnabled?: boolean;
-  
-  // WebGL (lazy loaded)
-  webglVendor?: string | null;
-  webglRenderer?: string | null;
-  
-  // Audio (lazy loaded)
-  audioSampleRate?: number | null;
-  audioState?: string | null;
-  audioMaxChannels?: number | null;
-  
-  // Plugins (basic info only)
-  pluginsCount?: number | null;
-  
-  // Storage
-  localStorageAvailable?: boolean;
-  sessionStorageAvailable?: boolean;
-  indexedDBAvailable?: boolean;
+  language?: string | null;
+  screen_bucket?: string | null;  // Coarse screen size (rounded to 100px)
+  dnt?: boolean | null;            // Do Not Track / Global Privacy Control
+  userAgent?: string | null;       // CRITICAL: For device/browser/OS detection
 }
 
 // Internal event payload structure
