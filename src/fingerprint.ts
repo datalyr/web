@@ -39,13 +39,25 @@ export class FingerprintCollector {
    * Matches browser tag minimal fingerprinting approach
    */
   private collectMinimal(): FingerprintData {
-    return {
+    const fp: FingerprintData = {
       timezone: this.getTimezone(),
       language: navigator.language || null,
       screen_bucket: this.getScreenBucket(),
       dnt: (navigator.doNotTrack === '1' || (window as any).globalPrivacyControl === true) || null,
       userAgent: navigator.userAgent || null
     };
+
+    // User-Agent Client Hints (modern browsers)
+    if ('userAgentData' in navigator) {
+      const uaData = (navigator as any).userAgentData;
+      fp.userAgentData = {
+        brands: uaData.brands || [],
+        mobile: uaData.mobile || false,
+        platform: uaData.platform || null
+      };
+    }
+
+    return fp;
   }
 
   /**
@@ -63,6 +75,16 @@ export class FingerprintCollector {
       fingerprint.screen_bucket = this.getScreenBucket();
       fingerprint.dnt = (navigator.doNotTrack === '1' || (window as any).globalPrivacyControl === true) || null;
       fingerprint.userAgent = navigator.userAgent || null;
+
+      // User-Agent Client Hints (modern browsers)
+      if ('userAgentData' in navigator) {
+        const uaData = (navigator as any).userAgentData;
+        fingerprint.userAgentData = {
+          brands: uaData.brands || [],
+          mobile: uaData.mobile || false,
+          platform: uaData.platform || null
+        };
+      }
 
     } catch (e) {
       console.warn('[Datalyr] Error collecting fingerprint:', e);

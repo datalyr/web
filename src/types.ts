@@ -172,6 +172,11 @@ export interface FingerprintData {
   screen_bucket?: string | null;  // Coarse screen size (rounded to 100px)
   dnt?: boolean | null;            // Do Not Track / Global Privacy Control
   userAgent?: string | null;       // CRITICAL: For device/browser/OS detection
+  userAgentData?: {                // Modern User-Agent Client Hints API
+    brands: Array<{ brand: string; version: string }>;
+    mobile: boolean;
+    platform: string | null;
+  } | null;
 }
 
 // Internal event payload structure
