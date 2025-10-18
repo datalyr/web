@@ -21,6 +21,76 @@ The official Datalyr Web SDK for browser-based analytics. Track user behavior, m
 - 🔌 **Extensible** - Plugin system for custom functionality
 - 📦 **Container Scripts** - Securely manage third-party pixels and tracking scripts
 
+## Choosing the Right Installation Method
+
+Datalyr offers two installation methods. Choose based on your needs:
+
+### Script Tag (Recommended for Most Cases)
+
+**Use when:** Simple setup, zero bundle size, no build step needed
+
+```html
+<script defer src="https://track.datalyr.com/container.js"
+        data-workspace-id="YOUR_WORKSPACE_ID"></script>
+```
+
+**Pros:**
+- ✅ Zero bundle size (external script)
+- ✅ No npm install needed
+- ✅ Works in any HTML page
+- ✅ Automatic initialization
+- ✅ Perfect for Next.js, React, Vue
+
+**API Usage:**
+```javascript
+// Available globally after script loads
+window.datalyr.track('event_name', { key: 'value' })
+window.datalyr.identify('user_123', { email: 'user@example.com' })
+window.datalyr.getVisitorId()
+```
+
+[See Script Tag Documentation →](https://docs.datalyr.com/installation/script-tag)
+
+---
+
+### NPM Package (For TypeScript/Bundlers)
+
+**Use when:** You need TypeScript support, ES modules, or tree-shaking
+
+```bash
+npm install @datalyr/web
+```
+
+**Pros:**
+- ✅ Full TypeScript definitions
+- ✅ ES module imports
+- ✅ Tree-shaking support
+- ✅ Better IDE autocomplete
+
+**API Usage:**
+```javascript
+import datalyr from '@datalyr/web'
+
+datalyr.init({ workspaceId: 'YOUR_WORKSPACE_ID' })
+datalyr.track('event_name', { key: 'value' })
+datalyr.identify('user_123', { email: 'user@example.com' })
+```
+
+---
+
+### ⚠️ Important: Don't Mix Both Methods
+
+Choose **one** installation method. Using both can cause conflicts:
+
+```html
+<!-- ❌ DON'T DO THIS -->
+<script src="https://track.datalyr.com/container.js"></script>
+<script>
+  import datalyr from '@datalyr/web'  // Both methods at once!
+  datalyr.init({...})
+</script>
+```
+
 ## Installation
 
 ```bash
@@ -65,19 +135,17 @@ import datalyr from '@datalyr/web';
 // Initialize the SDK with configuration
 datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
-  
+
   // Optional configuration
-  // endpoint: 'https://custom.endpoint.com',  // Optional: Custom endpoint
   debug: false,                             // Enable debug logging
-  // batchSize: 10,                           // Optional: Events per batch
-  // flushInterval: 5000,                     // Optional: Flush interval (ms)
   sessionTimeout: 1800000,                 // 30 minutes
   privacyMode: 'standard',                 // 'standard' or 'strict'
   respectDoNotTrack: false,                // Honor browser DNT
   respectGlobalPrivacyControl: true,       // Honor GPC
   cookieDomain: 'auto',                    // Auto-detect for subdomains
   trackSPA: true,                          // Track SPA route changes
-  trackPageViews: true                     // Track initial page view
+  trackPageViews: true,                    // Track initial page view
+  enableContainer: true                    // Enable container script loading
 });
 ```
 
@@ -202,11 +270,11 @@ datalyr.setConsent({
 // Get current session ID
 const sessionId = datalyr.getSessionId();
 
-// Manually end session
-datalyr.endSession();
-
 // Start new session
 datalyr.startNewSession();
+
+// Get session data
+const sessionData = datalyr.getSessionData();
 ```
 
 ## Advanced Features
@@ -221,7 +289,7 @@ datalyr.track('Purchase', { value: 99.99 });
 datalyr.track('Signup', { plan: 'premium' });
 datalyr.track('Subscribe', { plan: 'annual' });
 
-// E-commerce events  
+// E-commerce events
 datalyr.track('Add to Cart', { product_id: 'SKU-123' });
 datalyr.track('Begin Checkout', { cart_value: 199.99 });
 ```
@@ -365,19 +433,19 @@ import datalyr from '@datalyr/web';
 // Create a plugin
 const myPlugin = {
   name: 'my-plugin',
-  
+
   initialize(datalyr) {
     console.log('Plugin initialized');
   },
-  
+
   track(eventName, properties) {
     console.log('Event tracked:', eventName);
   },
-  
+
   identify(userId, traits) {
     console.log('User identified:', userId);
   },
-  
+
   page(properties) {
     console.log('Page tracked');
   }
@@ -435,13 +503,13 @@ function App() {
       workspaceId: 'YOUR_WORKSPACE_ID'
     });
   }, []);
-  
+
   const handleClick = () => {
     datalyr.track('Button Clicked', {
       button_name: 'CTA'
     });
   };
-  
+
   return <button onClick={handleClick}>Click Me</button>;
 }
 ```
@@ -481,10 +549,19 @@ import datalyr from '@datalyr/web';
 export function AnalyticsProvider({ children }) {
   useEffect(() => {
     datalyr.init({
-      workspaceId: process.env.NEXT_PUBLIC_DATALYR_WORKSPACE_ID
+      workspaceId: process.env.NEXT_PUBLIC_DATALYR_WORKSPACE_ID,
+      debug: process.env.NODE_ENV === 'development'
     });
+
+    // Verify initialization
+    console.log('✅ Datalyr initialized');
+    console.log('Session ID:', datalyr.getSessionId());
+    console.log('Anonymous ID:', datalyr.getAnonymousId());
+
+    // Track initial page view
+    datalyr.page();
   }, []);
-  
+
   return children;
 }
 
@@ -516,13 +593,13 @@ When implementing authentication flows (login, signup, OAuth), you **MUST** call
 // ❌ WRONG - Server-side identify breaks attribution
 app.post('/api/login', async (req, res) => {
   const user = await authenticate(email, password);
-  
+
   // This creates a NEW session without attribution data!
   await serverAnalytics.identify({
     userId: user.id,
     traits: { email: user.email }
   });
-  
+
   res.json({ userId: user.id });
 });
 // Result: Lost UTM params, fbclid, gclid, referrer - all gone!
@@ -540,16 +617,16 @@ function LoginPage() {
       method: 'POST',
       body: JSON.stringify({ email, password })
     });
-    
+
     const { userId, email, name } = await response.json();
-    
+
     // 2. Identify in browser - this preserves attribution!
     datalyr.identify(userId, {
       email: email,
       name: name,
       login_method: 'email'
     });
-    
+
     // 3. Then redirect
     router.push('/dashboard');
   };
@@ -558,7 +635,7 @@ function LoginPage() {
 // Server endpoint - NO identify, just auth
 app.post('/api/login', async (req, res) => {
   const user = await authenticate(email, password);
-  
+
   // Just return user data for client-side identify
   res.json({
     userId: user.id,
@@ -605,7 +682,7 @@ useEffect(() => {
           auth_method: 'google',
           signup_source: localStorage.getItem('signup_source') || 'organic'
         });
-        
+
         // Track the appropriate event
         if (user.isNewUser) {
           datalyr.track('Signup Completed', { method: 'oauth' });
@@ -619,9 +696,9 @@ useEffect(() => {
 // Server-side: OAuth callback - NO identify!
 export async function GET(request: Request) {
   const { user } = await validateOAuthCallback(request);
-  
+
   const existingUser = await getUserByEmail(user.email);
-  
+
   if (existingUser) {
     // Set session, but DON'T identify
     await createSession(existingUser.id);
@@ -644,10 +721,10 @@ Use server-side for **tracking events** with userId (not identify):
 // Stripe webhook example
 app.post('/webhook/stripe', async (req, res) => {
   const event = stripe.webhooks.constructEvent(req.body, sig, secret);
-  
+
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
-    
+
     // Track purchase event with userId (NOT identify)
     await analytics.track({
       userId: session.client_reference_id,  // Your user ID
@@ -733,9 +810,9 @@ async function handleLogin(email, password) {
     method: 'POST',
     body: JSON.stringify({ email, password })
   });
-  
+
   const user = await response.json();
-  
+
   // Identify in browser - preserves attribution!
   datalyr.identify(user.id, {
     email: user.email,
@@ -748,16 +825,14 @@ async function handleLogin(email, password) {
 // This breaks attribution tracking!
 app.post('/api/login', async (req, res) => {
   const user = await authenticate(req.body);
-  
+
   // DON'T DO THIS - Creates new session
   await serverAnalytics.identify(user.id, {
     signup_date: new Date().toISOString()
   });
-  
-  datalyr.track('Signup Completed', {
-    method: 'email'
-  });
-}
+
+  res.json({ success: true });
+});
 ```
 
 ### 5. Handle Errors Gracefully
@@ -775,30 +850,148 @@ window.addEventListener('error', (event) => {
 });
 ```
 
+## Troubleshooting
+
+### Events Not Showing in Dashboard?
+
+**Step 1: Verify SDK is initialized**
+```javascript
+import datalyr from '@datalyr/web'
+
+// Check these return values
+console.log('Anonymous ID:', datalyr.getAnonymousId())  // Should return "anon_xxxxx"
+console.log('Session ID:', datalyr.getSessionId())      // Should return "sess_xxxxx"
+```
+
+If these return `undefined`, the SDK isn't initialized properly.
+
+**Step 2: Check for errors**
+```javascript
+console.log('Errors:', datalyr.getErrors())  // Should be empty [] or show errors
+```
+
+**Step 3: Enable debug mode**
+```javascript
+datalyr.init({
+  workspaceId: 'YOUR_WORKSPACE_ID',
+  debug: true  // Shows [Datalyr] logs in console
+})
+```
+
+**Step 4: Verify network requests**
+1. Open DevTools → Network tab
+2. Filter by "ingest"
+3. Track a test event: `datalyr.track('test', {})`
+4. You should see POST to `ingest.datalyr.com`
+
+### Common Errors
+
+**"Cannot find module '@datalyr/web'"**
+- Run `npm install @datalyr/web`
+- Restart your dev server
+
+**"process.env.NEXT_PUBLIC_DATALYR_WORKSPACE_ID is undefined"**
+- Create `.env.local` file in project root
+- Add: `NEXT_PUBLIC_DATALYR_WORKSPACE_ID=your_id`
+- Restart dev server (required for env changes)
+
+**"datalyr.getAnonymousId() returns undefined"**
+- You're calling it during SSR (server-side rendering)
+- Make sure you're in a Client Component with `'use client'`
+- Call it inside `useEffect` or after component mounts
+
+**Events tracked but not in dashboard**
+- Verify workspace ID matches your dashboard
+- Events may take 1-2 minutes to appear
+- Check Network tab - requests should return 200 OK
+- Check if ad blocker is enabled (disable it)
+
+### Script Tag vs SDK Confusion
+
+**If you're using the script tag:**
+```javascript
+// Check if loaded
+window.datalyr._isLoaded        // Should be true
+window.datalyr.getVisitorId()   // Should return ID
+
+// Use object methods, not function calls
+window.datalyr.track('event', {})     // ✅ Correct
+window.datalyr("track", "event", {})  // ❌ Wrong
+```
+
+**If you're using the NPM SDK:**
+```javascript
+import datalyr from '@datalyr/web'
+
+// Check if loaded
+datalyr.getAnonymousId()  // Should return ID
+datalyr.getSessionId()    // Should return ID
+```
+
 ## Migration from Script Tag
 
-If you're currently using the Datalyr script tag, migration is straightforward:
+If you're currently using the Datalyr script tag and want to switch to the NPM package:
 
 ### Before (Script Tag):
 ```html
-<script>
-  window.datalyr = window.datalyr || [];
-  window.datalyr.push(['init', { workspace_id: 'YOUR_WORKSPACE_ID' }]);
-  window.datalyr.push(['track', 'Button Clicked']);
-</script>
-<script async src="https://cdn.datalyr.io/datalyr.js"></script>
+<!-- In your HTML -->
+<script defer src="https://track.datalyr.com/container.js"
+        data-workspace-id="YOUR_WORKSPACE_ID"></script>
 ```
 
-### After (Web SDK):
 ```javascript
+// In your JavaScript
+window.datalyr.track('Button Clicked', {
+  button_name: 'Sign Up'
+});
+
+window.datalyr.identify('user_123', {
+  email: 'user@example.com'
+});
+```
+
+### After (NPM SDK):
+```javascript
+// Remove the script tag from your HTML
+
+// Install the package
+// npm install @datalyr/web
+
+// In your app initialization
 import datalyr from '@datalyr/web';
 
 datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID'
 });
 
-datalyr.track('Button Clicked');
+// In your components
+datalyr.track('Button Clicked', {
+  button_name: 'Sign Up'
+});
+
+datalyr.identify('user_123', {
+  email: 'user@example.com'
+});
 ```
+
+**Note:** Most users should stay with the script tag unless they specifically need TypeScript support or ES module imports. The script tag has zero bundle size and works perfectly with Next.js, React, and Vue.
+
+## API Comparison: Script Tag vs NPM SDK
+
+| Feature | Script Tag | NPM SDK |
+|---------|-----------|---------|
+| **Installation** | Add `<script>` to HTML | `npm install @datalyr/web` |
+| **Bundle Size** | 0 (external) | ~15KB |
+| **TypeScript** | No types | ✅ Full types |
+| **Import** | `window.datalyr` | `import datalyr from '@datalyr/web'` |
+| **Initialize** | Automatic | `datalyr.init({...})` |
+| **Track Event** | `window.datalyr.track(...)` | `datalyr.track(...)` |
+| **Identify** | `window.datalyr.identify(...)` | `datalyr.identify(...)` |
+| **Get Visitor ID** | `window.datalyr.getVisitorId()` | `datalyr.getAnonymousId()` |
+| **Get Session** | `window.datalyr._getSessionId()` | `datalyr.getSessionId()` |
+| **Check Loaded** | `window.datalyr._isLoaded` | `datalyr.getAnonymousId() !== undefined` |
+
+Both methods use the same tracking backend and provide identical attribution tracking.
 
 ## Browser Support
 
@@ -823,7 +1016,7 @@ For older browsers, the SDK will gracefully degrade with fallback implementation
 The SDK is designed with privacy in mind:
 
 - **GDPR Compliant**: Built-in consent management
-- **CCPA Support**: "Do Not Sell" preference support  
+- **CCPA Support**: "Do Not Sell" preference support
 - **Cookie Control**: Configurable cookie settings
 - **Data Minimization**: Collect only what you need
 - **User Rights**: Easy opt-out and data deletion
@@ -841,8 +1034,9 @@ datalyr.init({
 });
 
 // Check console for detailed logs:
+// [Datalyr] SDK initialized
 // [Datalyr] Event tracked: Button Clicked
-// [Datalyr] Events sent successfully
+// [Datalyr] Batch sent successfully: 5 events
 ```
 
 ## API Reference
@@ -883,6 +1077,8 @@ datalyr.init({
 | `getUserId()` | Get user ID |
 | `getDistinctId()` | Get distinct ID |
 | `getSessionId()` | Get session ID |
+| `getSessionData()` | Get session data |
+| `getErrors()` | Get SDK errors |
 | `loadScript(scriptId)` | Manually trigger a container script |
 | `getLoadedScripts()` | Get list of loaded container scripts |
 | `destroy()` | Clean up resources |
