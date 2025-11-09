@@ -62,12 +62,9 @@ export class IdentityManager {
 
       // Verify cookie was set successfully (cookies.get already decodes)
       const verifyValue = cookies.get(name);
-      if (verifyValue === value) {
-        console.log(`[Datalyr] Set root domain cookie: ${name} on domain: ${rootDomain}`);
-      } else {
+      if (verifyValue !== value) {
         // Fallback: try without domain (current subdomain only)
         document.cookie = `${name}=${encodedValue}; path=/; max-age=31536000; SameSite=Lax${secure}`;
-        console.log(`[Datalyr] Set cookie without domain (fallback): ${name}`);
       }
     } catch (e) {
       console.error('[Datalyr] Error setting root domain cookie:', e);

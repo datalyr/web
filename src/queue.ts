@@ -35,6 +35,8 @@ export class EventQueue {
   private recentEventIds = new Set<string>();
   private MAX_RECENT_EVENT_IDS = 1000;
   private OFFLINE_QUEUE_KEY = 'dl_offline_queue';
+  private flushLock = false; // FIXED (DATA-03): Mutex to prevent race conditions
+  private offlineQueueLock = false; // FIXED (DATA-03): Separate lock for offline queue operations
 
   constructor(config: any) {
     this.config = {
@@ -66,7 +68,7 @@ export class EventQueue {
    * Add event to queue
    */
   enqueue(event: IngestEventPayload): void {
-    const eventName = event.eventName;
+    const eventName = event.event_name; // Use snake_case
 
     // Check for duplicates (within 500ms window)
     if (this.isDuplicateEvent(event)) {
@@ -74,10 +76,19 @@ export class EventQueue {
       return;
     }
 
-    // Critical events bypass queue
+    // CRITICAL FIX (CRITICAL-05): Critical events need proper error handling
+    // Instead of calling sendBatch() without await, we add them to queue
+    // with immediate flush AND move to offline queue on failure
     if (this.config.criticalEvents.includes(eventName)) {
       this.log('Critical event, sending immediately:', eventName);
-      this.sendBatch([event]);
+
+      // Send immediately with proper error handling
+      this.sendBatch([event]).catch((error) => {
+        this.log('Critical event send failed, adding to offline queue:', eventName, error);
+        // Move to offline queue to ensure it's not lost
+        this.moveToOfflineQueue([event]);
+      });
+
       return;
     }
 
@@ -93,15 +104,17 @@ export class EventQueue {
 
   /**
    * Check if event is duplicate
+   * Fixed Issue #32: Use content-based hash instead of UUID
    */
   private isDuplicateEvent(event: IngestEventPayload): boolean {
-    const eventId = event.eventId;
-    
-    if (this.recentEventIds.has(eventId)) {
+    // Create content-based hash from eventName + timestamp + key properties
+    const contentHash = this.createEventHash(event);
+
+    if (this.recentEventIds.has(contentHash)) {
       return true;
     }
 
-    this.recentEventIds.add(eventId);
+    this.recentEventIds.add(contentHash);
 
     // Clean up old event IDs
     if (this.recentEventIds.size > this.MAX_RECENT_EVENT_IDS) {
@@ -116,6 +129,26 @@ export class EventQueue {
     }
 
     return false;
+  }
+
+  /**
+   * Create content-based hash for duplicate detection (Issue #32)
+   */
+  private createEventHash(event: IngestEventPayload): string {
+    const content = [
+      event.event_name, // Use snake_case
+      event.timestamp,
+      JSON.stringify(event.event_data || {}) // Use snake_case
+    ].join('|');
+
+    // Simple hash function
+    let hash = 0;
+    for (let i = 0; i < content.length; i++) {
+      const char = content.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    return hash.toString(36);
   }
 
   /**
@@ -147,20 +180,29 @@ export class EventQueue {
 
   /**
    * Flush the queue
+   * FIXED (DATA-03): Enhanced protection against concurrent flushes
    */
   async flush(): Promise<void> {
-    // Prevent concurrent flushes
-    if (this.flushPromise) {
-      return this.flushPromise;
+    // FIXED (DATA-03): Check both promise and lock for concurrent flush protection
+    if (this.flushPromise || this.flushLock) {
+      return this.flushPromise || Promise.resolve();
     }
 
-    this.flushPromise = this._flush();
-    await this.flushPromise;
-    this.flushPromise = null;
+    // Acquire lock
+    this.flushLock = true;
+
+    try {
+      this.flushPromise = this._flush();
+      await this.flushPromise;
+    } finally {
+      this.flushPromise = null;
+      this.flushLock = false;
+    }
   }
 
   /**
    * Internal flush implementation
+   * FIXED (CRITICAL-06): Don't remove events from queue until send succeeds
    */
   private async _flush(): Promise<void> {
     // Clear timer
@@ -181,16 +223,21 @@ export class EventQueue {
       return;
     }
 
-    // Get events to send
-    const events = this.queue.splice(0, this.config.batchSize);
-    
+    // CRITICAL FIX: Use slice() to COPY events, don't remove yet
+    // Only remove after successful send to prevent data loss
+    const batchSize = Math.min(this.config.batchSize, this.queue.length);
+    const events = this.queue.slice(0, batchSize);
+
     try {
       await this.sendBatch(events);
+      // SUCCESS: Now it's safe to remove events from queue
+      this.queue.splice(0, batchSize);
+      this.log(`Successfully sent and removed ${batchSize} events from queue`);
     } catch (error) {
       this.log('Failed to send batch:', error);
-      // Move to offline queue for retry
-      this.offlineQueue.push(...events);
-      this.saveOfflineQueue();
+      // Don't remove from queue - events stay for retry
+      // Move to offline queue for persistent storage
+      this.moveToOfflineQueue(events);
     }
   }
 
@@ -224,12 +271,16 @@ export class EventQueue {
         if (response.status === 429) {
           const retryAfter = parseInt(response.headers.get('Retry-After') || '60');
           this.log(`Rate limited, retrying after ${retryAfter}s`);
-          
+
+          // FIXED (CRITICAL-06): Don't unshift() - events are still in queue!
+          // With the new fix, events aren't removed until success, so they're
+          // already in the queue. Just schedule a retry flush.
           setTimeout(() => {
-            this.queue.unshift(...events);
+            this.flush();
           }, retryAfter * 1000);
-          
-          return;
+
+          // Throw to trigger catch block which moves events to offline queue
+          throw new Error(`Rate limited (429), retry after ${retryAfter}s`);
         }
 
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -299,11 +350,41 @@ export class EventQueue {
 
   /**
    * Move events to offline queue
+   * Fixed Issue #33: Enforce size limit when adding, not just when saving
+   * FIXED (DATA-03): Added mutex lock to prevent race conditions
+   * FIXED (CRITICAL-06): Can now accept specific events or move entire queue
    */
-  private moveToOfflineQueue(): void {
-    this.offlineQueue.push(...this.queue);
-    this.queue = [];
-    this.saveOfflineQueue();
+  private moveToOfflineQueue(events?: IngestEventPayload[]): void {
+    // FIXED (DATA-03): Check if offline queue operation already in progress
+    if (this.offlineQueueLock) {
+      console.warn('[Datalyr Queue] Offline queue operation already in progress');
+      return;
+    }
+
+    // Acquire lock
+    this.offlineQueueLock = true;
+
+    try {
+      if (events) {
+        // Move specific events to offline queue
+        this.offlineQueue.push(...events);
+      } else {
+        // Move entire queue to offline queue
+        this.offlineQueue.push(...this.queue);
+        this.queue = [];
+      }
+
+      // Issue #33: Enforce limit here, not just in saveOfflineQueue
+      if (this.offlineQueue.length > this.config.maxOfflineQueueSize) {
+        const excess = this.offlineQueue.length - this.config.maxOfflineQueueSize;
+        this.offlineQueue.splice(0, excess); // Remove oldest events
+      }
+
+      this.saveOfflineQueue();
+    } finally {
+      // Always release lock
+      this.offlineQueueLock = false;
+    }
   }
 
   /**

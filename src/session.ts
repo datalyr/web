@@ -14,8 +14,9 @@ export class SessionManager {
   private SESSION_KEY = 'dl_session_data';
   private activityCheckInterval: ReturnType<typeof setInterval> | null = null;
   private activityListeners: Array<{ event: string; handler: EventListener }> = [];
+  private sessionCreationLock = false; // FIXED (DATA-02): Mutex to prevent race conditions
 
-  constructor(timeout = 30 * 60 * 1000) { // 30 minutes default
+  constructor(timeout = 60 * 60 * 1000) { // 60 minutes default (matches docs)
     this.sessionTimeout = timeout;
     this.initSession();
     this.setupActivityMonitor();
@@ -49,23 +50,75 @@ export class SessionManager {
 
   /**
    * Create a new session
+   *
+   * FIXED (DATA-02): Added mutex lock to prevent race conditions
    */
   createNewSession(): string {
-    const now = Date.now();
-    this.sessionId = `sess_${generateUUID()}`;
-    
-    this.sessionData = {
-      id: this.sessionId,
-      startTime: now,
-      lastActivity: now,
-      pageViews: 0,
-      events: 0,
-      duration: 0,
-      isActive: true
-    };
+    // FIXED (DATA-02): Check if session creation already in progress
+    if (this.sessionCreationLock) {
+      // Wait for ongoing session creation
+      console.log('[Datalyr Session] Session creation already in progress, returning existing ID');
+      return this.sessionId || '';
+    }
 
-    this.incrementSessionCount();
-    this.saveSession();
+    // Acquire lock
+    this.sessionCreationLock = true;
+
+    try {
+      const now = Date.now();
+      this.sessionId = `sess_${generateUUID()}`;
+
+      this.sessionData = {
+        id: this.sessionId,
+        startTime: now,
+        lastActivity: now,
+        pageViews: 0,
+        events: 0,
+        duration: 0,
+        isActive: true
+      };
+
+      this.saveSession();
+      // Issue #25: Increment AFTER session created successfully
+      this.incrementSessionCount();
+
+      return this.sessionId;
+    } finally {
+      // Always release lock
+      this.sessionCreationLock = false;
+    }
+  }
+
+  /**
+   * Rotate session ID (security measure)
+   *
+   * FIXED (DATA-05): Called when user identifies to prevent session fixation attacks
+   * Keeps session data but generates new session ID
+   */
+  rotateSessionId(): string {
+    const now = Date.now();
+    const oldSessionId = this.sessionId;
+
+    // Generate new session ID
+    this.sessionId = `sess_${generateUUID()}`;
+
+    // Preserve session data but update ID
+    if (this.sessionData) {
+      this.sessionData.id = this.sessionId;
+      this.sessionData.lastActivity = now;
+      this.saveSession();
+
+      // Clean up old session data
+      if (oldSessionId) {
+        storage.remove(`dl_session_${oldSessionId}_attribution`);
+      }
+
+      console.log(`[Datalyr Session] Rotated session ID from ${oldSessionId} to ${this.sessionId}`);
+    } else {
+      // No existing session, create new one
+      this.createNewSession();
+    }
+
     return this.sessionId;
   }
 
@@ -88,21 +141,25 @@ export class SessionManager {
 
   /**
    * Update session activity
+   * FIXED (CRITICAL-04): Check session validity BEFORE updating lastActivity
+   * This ensures sessions actually timeout after the configured period
    */
   updateActivity(eventType?: string): void {
     const now = Date.now();
-    
-    // Check if we need a new session
+
+    // CRITICAL FIX: Check session validity BEFORE updating lastActivity
+    // If we update lastActivity first, sessions will never timeout!
     if (!this.sessionData || !this.isSessionValid(this.sessionData, now)) {
       this.createNewSession();
       return;
     }
 
+    // Session is valid - update activity timestamp
     this.lastActivity = now;
     this.sessionData.lastActivity = now;
     this.sessionData.duration = now - this.sessionData.startTime;
 
-    // Update counters
+    // Update counters (only if session is valid)
     if (eventType === 'pageview' || eventType === 'page_view') {
       this.sessionData.pageViews++;
     }
@@ -123,6 +180,7 @@ export class SessionManager {
 
   /**
    * End the current session
+   * Fixed Issue #23: Stop activity monitor when session ends
    */
   endSession(): void {
     if (this.sessionData) {
@@ -131,6 +189,8 @@ export class SessionManager {
     }
     this.sessionId = null;
     this.sessionData = null;
+    // Issue #23: Clean up activity monitor when session ends
+    this.destroy();
   }
 
   /**
@@ -158,10 +218,10 @@ export class SessionManager {
 
   /**
    * Store session attribution
+   * Fixed Issue #24: Use single key instead of one per session
    */
   storeAttribution(attribution: Attribution): void {
-    const key = `dl_session_${this.sessionId}_attribution`;
-    storage.set(key, {
+    storage.set('dl_current_session_attribution', {
       ...attribution,
       sessionId: this.sessionId,
       timestamp: Date.now()
@@ -170,12 +230,23 @@ export class SessionManager {
 
   /**
    * Get session attribution
+   * Fixed Issue #24: Use single key instead of one per session
+   * FIXED (CRITICAL-04): Verify session is still active before returning attribution
    */
   getAttribution(): Attribution | null {
     if (!this.sessionId) return null;
-    
-    const key = `dl_session_${this.sessionId}_attribution`;
-    return storage.get(key);
+
+    // CRITICAL FIX: Verify session is still active
+    if (!this.isSessionActive()) {
+      return null;
+    }
+
+    const data = storage.get('dl_current_session_attribution');
+    // Only return if it matches current session
+    if (data && data.sessionId === this.sessionId) {
+      return data;
+    }
+    return null;
   }
 
   /**

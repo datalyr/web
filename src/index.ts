@@ -8,8 +8,10 @@ import { SessionManager } from './session';
 import { AttributionManager } from './attribution';
 import { EventQueue } from './queue';
 import { FingerprintCollector } from './fingerprint';
-import { storage, cookies, CookieStorage } from './storage';
+import { storage, CookieStorage } from './storage';
 import { ContainerManager } from './container';
+import { dataEncryption } from './encryption'; // SEC-03 Fix
+import { AutoIdentifyManager } from './auto-identify';
 import {
   generateUUID,
   sanitizeEventData,
@@ -45,17 +47,23 @@ class Datalyr {
   private fingerprint!: FingerprintCollector;
   private cookies!: CookieStorage;
   private container?: ContainerManager;
+  private autoIdentify?: AutoIdentifyManager;
   private superProperties: Record<string, any> = {};
   private userProperties: Record<string, any> = {};
   private optedOut = false;
   private initialized = false;
   private errors: ErrorInfo[] = [];
   private MAX_ERRORS = 50;
-  private heavyFingerprintCollected = false;
+  // Store original history methods for cleanup (Issue #15)
+  private originalPushState?: typeof history.pushState;
+  private originalReplaceState?: typeof history.replaceState;
+  private popstateHandler?: EventListener;
+  private hashchangeHandler?: EventListener;
+  // FIXED (ISSUE-01): Async initialization promise to prevent race conditions
+  private initializationPromise: Promise<void> | null = null;
 
   constructor() {
-    // Check for opt-out cookie on instantiation using default cookie instance
-    this.optedOut = cookies.get('__dl_opt_out') === 'true';
+    // Opt-out check moved to init() after cookies configured (Issue #14)
   }
 
   /**
@@ -81,9 +89,9 @@ class Datalyr {
       flushAt: 10,
       criticalEvents: undefined,
       highPriorityEvents: undefined,
-      sessionTimeout: 30 * 60 * 1000,
+      sessionTimeout: 60 * 60 * 1000, // 60 minutes (increased from 30 for OAuth flows)
       trackSessions: true,
-      attributionWindow: 30 * 24 * 60 * 60 * 1000,
+      attributionWindow: 90 * 24 * 60 * 60 * 1000, // 90 days (increased from 30 for B2B sales cycles)
       trackedParams: [],
       respectDoNotTrack: false,
       respectGlobalPrivacyControl: true,
@@ -113,6 +121,12 @@ class Datalyr {
       secure: this.config.secureCookie
     });
 
+    // Migrate legacy storage keys (fixes double-prefix issue)
+    storage.migrateFromLegacyPrefix();
+
+    // Check opt-out AFTER cookies configured (Issue #14)
+    this.optedOut = this.cookies.get('__dl_opt_out') === 'true';
+
     // Initialize modules
     this.identity = new IdentityManager();
     this.session = new SessionManager(this.config.sessionTimeout);
@@ -130,32 +144,9 @@ class Datalyr {
     const sessionId = this.session.getSessionId();
     this.identity.setSessionId(sessionId);
 
-    // Load stored user properties
-    this.userProperties = storage.get('dl_user_traits', {});
-
-    // Setup SPA tracking if enabled
-    if (this.config.trackSPA) {
-      this.setupSPATracking();
-    }
-
-    // Initialize container manager if enabled
-    if (this.config.enableContainer !== false) {
-      this.container = new ContainerManager({
-        workspaceId: this.config.workspaceId,
-        endpoint: this.config.endpoint,
-        debug: this.config.debug
-      });
-      
-      // Initialize container asynchronously
-      this.container.init().catch(error => {
-        this.log('Container initialization failed:', error);
-      });
-    }
-
-    // Track initial page view if enabled
-    if (this.config.trackPageViews) {
-      this.page();
-    }
+    // FIXED (ISSUE-01): Start async initialization immediately but don't block constructor
+    // This allows encryption to initialize before any events are tracked
+    this.initializeAsync();
 
     // Setup page unload handler
     this.setupUnloadHandler();
@@ -167,6 +158,8 @@ class Datalyr {
           plugin.initialize(this);
           this.log(`Plugin initialized: ${plugin.name}`);
         } catch (error) {
+          // Issue #16: Always warn about plugin failures, even when debug is false
+          console.warn(`[Datalyr] Plugin '${plugin.name}' failed to initialize:`, error);
           this.trackError(error as Error, { plugin: plugin.name });
         }
       }
@@ -177,9 +170,107 @@ class Datalyr {
   }
 
   /**
+   * Complete async initialization (encryption, user properties, container, page view)
+   *
+   * FIXED (ISSUE-01): Separated async initialization to prevent race conditions
+   * Encryption must complete before first events are tracked
+   */
+  private async initializeAsync(): Promise<void> {
+    if (this.initializationPromise) {
+      return this.initializationPromise;
+    }
+
+    this.initializationPromise = (async () => {
+      try {
+        // SEC-03 Fix: Initialize encryption for PII data
+        const deviceId = this.identity.getAnonymousId();
+        await dataEncryption.initialize(this.config.workspaceId, deviceId);
+
+        // Load encrypted user properties
+        this.userProperties = await storage.getEncrypted('dl_user_traits', {});
+        this.log('Encryption initialized, user properties loaded');
+
+        // Setup SPA tracking if enabled
+        if (this.config.trackSPA) {
+          this.setupSPATracking();
+        }
+
+        // Initialize container manager if enabled
+        if (this.config.enableContainer !== false) {
+          this.container = new ContainerManager({
+            workspaceId: this.config.workspaceId,
+            endpoint: this.config.endpoint,
+            debug: this.config.debug
+          });
+
+          // Initialize container asynchronously
+          await this.container.init().catch(error => {
+            this.log('Container initialization failed:', error);
+          });
+        }
+
+        // Initialize auto-identify if explicitly enabled (opt-in)
+        if (this.config.autoIdentify === true) {
+          this.autoIdentify = new AutoIdentifyManager({
+            enabled: true,
+            captureFromForms: this.config.autoIdentifyForms,
+            captureFromAPI: this.config.autoIdentifyAPI,
+            captureFromShopify: this.config.autoIdentifyShopify,
+            trustedDomains: this.config.autoIdentifyTrustedDomains,
+            debug: this.config.debug
+          });
+
+          // Setup auto-identify callback
+          this.autoIdentify.initialize((email: string, source: string) => {
+            this.log(`Auto-identified user: ${email} from ${source}`);
+
+            // Track auto-identify event
+            this.track('$auto_identify', {
+              email,
+              source,
+              timestamp: Date.now()
+            });
+
+            // Automatically call identify with email
+            this.identify(email, { email });
+          });
+        }
+
+        // Track initial page view if enabled (AFTER encryption ready)
+        if (this.config.trackPageViews) {
+          this.page();
+        }
+
+        this.log('Async initialization complete');
+      } catch (error) {
+        console.error('[Datalyr] Async initialization failed:', error);
+        // Fallback: Load unencrypted and continue
+        this.userProperties = storage.get('dl_user_traits', {});
+      }
+    })();
+
+    return this.initializationPromise;
+  }
+
+  /**
+   * Wait for async initialization to complete
+   * FIXED (ISSUE-01): Public method to await full initialization
+   */
+  async ready(): Promise<void> {
+    if (!this.initialized) {
+      throw new Error('[Datalyr] SDK not initialized. Call init() first.');
+    }
+    return this.initializationPromise || Promise.resolve();
+  }
+
+  /**
    * Track an event
    */
   track(eventName: string, properties: EventProperties = {}): void {
+    if (!this.initialized) {
+      console.warn('[Datalyr] SDK not initialized. Call init() first.');
+      return;
+    }
     if (!this.shouldTrack()) return;
 
     try {
@@ -222,6 +313,10 @@ class Datalyr {
    * Identify a user
    */
   identify(userId: string, traits: UserTraits = {}): void {
+    if (!this.initialized) {
+      console.warn('[Datalyr] SDK not initialized. Call init() first.');
+      return;
+    }
     if (!this.shouldTrack()) return;
     if (!userId) {
       console.warn('[Datalyr] identify() called without userId');
@@ -229,12 +324,25 @@ class Datalyr {
     }
 
     try {
+      // FIXED (DATA-05): Rotate session ID on identify to prevent session fixation
+      if (this.session) {
+        this.session.rotateSessionId();
+      }
+
       // Update identity
       const identityLink = this.identity.identify(userId, traits);
 
-      // Store user properties
+      // SEC-03 Fix: Store user properties encrypted (contains PII)
+      // FIXED (H2): Fail loudly instead of silent fallback to unencrypted
       this.userProperties = { ...this.userProperties, ...traits };
-      storage.set('dl_user_traits', this.userProperties);
+      storage.setEncrypted('dl_user_traits', this.userProperties).catch(error => {
+        console.error('[Datalyr] Failed to encrypt user traits - NOT storing unencrypted PII:', error);
+        console.error('[Datalyr] User traits will only persist in memory until page reload');
+        // DO NOT fallback to unencrypted storage - this would expose PII
+        // This is a breaking change from the previous silent fallback behavior
+        // If encryption fails, user traits are only stored in memory (this.userProperties)
+        // and will be lost on page reload - but PII is NOT exposed in localStorage
+      });
 
       // Track $identify event
       this.track('$identify', {
@@ -265,6 +373,10 @@ class Datalyr {
    * Track a page view
    */
   page(properties: PageProperties = {}): void {
+    if (!this.initialized) {
+      console.warn('[Datalyr] SDK not initialized. Call init() first.');
+      return;
+    }
     if (!this.shouldTrack()) return;
 
     const pageData: PageProperties = {
@@ -318,6 +430,10 @@ class Datalyr {
    * Associate user with a group/account
    */
   group(groupId: string, traits: Record<string, any> = {}): void {
+    if (!this.initialized) {
+      console.warn('[Datalyr] SDK not initialized. Call init() first.');
+      return;
+    }
     this.track('$group', {
       group_id: groupId,
       traits
@@ -328,6 +444,10 @@ class Datalyr {
    * Alias one ID to another
    */
   alias(userId: string, previousId?: string): void {
+    if (!this.initialized) {
+      console.warn('[Datalyr] SDK not initialized. Call init() first.');
+      return;
+    }
     const aliasData = this.identity.alias(userId, previousId);
     this.track('$alias', aliasData);
   }
@@ -336,6 +456,10 @@ class Datalyr {
    * Reset the current user
    */
   reset(): void {
+    if (!this.initialized) {
+      console.warn('[Datalyr] SDK not initialized. Call init() first.');
+      return;
+    }
     this.identity.reset();
     this.userProperties = {};
     storage.remove('dl_user_traits');
@@ -414,8 +538,12 @@ class Datalyr {
    * Opt out of tracking
    */
   optOut(): void {
+    if (!this.initialized) {
+      console.warn('[Datalyr] SDK not initialized. Call init() first.');
+      return;
+    }
     this.optedOut = true;
-    cookies.set('__dl_opt_out', 'true', this.config.cookieExpires);
+    this.cookies.set('__dl_opt_out', 'true', this.config.cookieExpires);
     this.queue.clear();
     this.log('User opted out');
   }
@@ -424,8 +552,12 @@ class Datalyr {
    * Opt in to tracking
    */
   optIn(): void {
+    if (!this.initialized) {
+      console.warn('[Datalyr] SDK not initialized. Call init() first.');
+      return;
+    }
     this.optedOut = false;
-    cookies.set('__dl_opt_out', 'false', this.config.cookieExpires);
+    this.cookies.set('__dl_opt_out', 'false', this.config.cookieExpires);
     this.log('User opted in');
   }
 
@@ -498,8 +630,7 @@ class Datalyr {
     if (this.config.enableFingerprinting) {
       const fingerprintData = this.fingerprint.collect();
       Object.assign(eventData, {
-        fingerprint: fingerprintData,
-        device_fingerprint: fingerprintData // Snake case alias
+        device_fingerprint: fingerprintData // Use snake_case only (matches backend)
       });
     }
 
@@ -515,45 +646,39 @@ class Datalyr {
       viewport_height: window.innerHeight
     });
 
-    // Create payload with both camelCase and snake_case fields
+    // Create payload using snake_case only (matches backend API and production script)
     const identityFields = this.identity.getIdentityFields();
     const eventId = generateUUID();
-    
+
     // Ensure we have all required identity fields
     const distinctId = identityFields.distinct_id;
     const anonymousId = identityFields.anonymous_id;
     const visitorId = identityFields.visitor_id || anonymousId;
     const sessionId = identityFields.session_id;
-    
+
     const payload: IngestEventPayload = {
-      // Required fields
-      workspaceId: this.config.workspaceId,
-      workspace_id: this.config.workspaceId, // Snake case alias
-      eventId: eventId,
-      event_id: eventId, // Snake case alias (same ID)
-      eventName,
-      event_name: eventName, // Snake case alias
-      eventData,
-      event_data: eventData, // Snake case alias
+      // Required fields (snake_case only - no duplication)
+      workspace_id: this.config.workspaceId,
+      event_id: eventId,
+      event_name: eventName,
+      event_data: eventData,
       source: 'web',
       timestamp: new Date().toISOString(),
-      
-      // Identity fields (explicit to satisfy TypeScript)
+
+      // Identity fields (snake_case only)
       distinct_id: distinctId,
       anonymous_id: anonymousId,
       visitor_id: visitorId,
-      visitorId: visitorId,
       user_id: identityFields.user_id,
       canonical_id: identityFields.canonical_id,
-      sessionId: sessionId,
       session_id: sessionId,
-      
+
       // Resolution metadata
       resolution_method: 'browser_sdk',
       resolution_confidence: 1.0,
-      
+
       // SDK metadata
-      sdk_version: '1.0.0',
+      sdk_version: '1.1.0',
       sdk_name: 'datalyr-web-sdk'
     };
 
@@ -584,40 +709,52 @@ class Datalyr {
 
   /**
    * Setup SPA tracking
+   * Fixed Issue #15: Store original methods for cleanup
+   * Fixed CRITICAL-03: Clear attribution cache on navigation to prevent stale data
    */
   private setupSPATracking(): void {
-    // Store original methods
-    const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
+    // Store original methods for cleanup
+    this.originalPushState = history.pushState;
+    this.originalReplaceState = history.replaceState;
     const self = this;
 
     // Override pushState
     history.pushState = function(...args) {
-      originalPushState.apply(history, args);
+      self.originalPushState!.apply(history, args);
       setTimeout(() => {
+        // Clear attribution cache to capture fresh URL params
+        self.attribution.clearCache();
         self.page();
       }, 0);
     };
 
     // Override replaceState
     history.replaceState = function(...args) {
-      originalReplaceState.apply(history, args);
+      self.originalReplaceState!.apply(history, args);
       setTimeout(() => {
+        // Clear attribution cache to capture fresh URL params
+        self.attribution.clearCache();
         self.page();
       }, 0);
     };
 
     // Listen for popstate
-    window.addEventListener('popstate', () => {
+    this.popstateHandler = () => {
       setTimeout(() => {
-        this.page();
+        // Clear attribution cache to capture fresh URL params
+        self.attribution.clearCache();
+        self.page();
       }, 0);
-    });
+    };
+    window.addEventListener('popstate', this.popstateHandler);
 
     // Listen for hashchange
-    window.addEventListener('hashchange', () => {
-      this.page();
-    });
+    this.hashchangeHandler = () => {
+      // Clear attribution cache to capture fresh URL params
+      self.attribution.clearCache();
+      self.page();
+    };
+    window.addEventListener('hashchange', this.hashchangeHandler);
   }
 
   /**
@@ -739,22 +876,51 @@ class Datalyr {
    * Destroy the SDK instance and cleanup resources
    */
   destroy(): void {
+    // Restore original history methods (Issue #15)
+    if (this.originalPushState) {
+      history.pushState = this.originalPushState;
+    }
+    if (this.originalReplaceState) {
+      history.replaceState = this.originalReplaceState;
+    }
+
+    // Remove event listeners (Issue #15)
+    if (this.popstateHandler) {
+      window.removeEventListener('popstate', this.popstateHandler);
+    }
+    if (this.hashchangeHandler) {
+      window.removeEventListener('hashchange', this.hashchangeHandler);
+    }
+
     // Clean up queue
     if (this.queue) {
       this.queue.destroy();
     }
-    
+
     // Clean up session
     if (this.session) {
       this.session.destroy();
     }
-    
+
+    // FIXED (ISSUE-02): Clean up sandboxed iframes to prevent memory leaks
+    if (this.container) {
+      this.container.cleanupAllIframes();
+    }
+
+    // Clean up auto-identify
+    if (this.autoIdentify) {
+      this.autoIdentify.destroy();
+    }
+
+    // SEC-03 Fix: Clean up encryption keys
+    dataEncryption.destroy();
+
     // Clear any remaining data
     this.superProperties = {};
     this.userProperties = {};
     this.errors = [];
     this.initialized = false;
-    
+
     this.log('SDK destroyed');
   }
 }

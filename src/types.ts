@@ -20,11 +20,11 @@ export interface DatalyrConfig {
   highPriorityEvents?: string[];       // Default: ['add_to_cart', 'begin_checkout', 'view_item', 'search']
   
   // Session
-  sessionTimeout?: number;              // Default: 30 minutes
+  sessionTimeout?: number;              // Default: 60 minutes (increased from 30 for OAuth flows)
   trackSessions?: boolean;              // Default: true
   
   // Attribution
-  attributionWindow?: number;           // Default: 30 days
+  attributionWindow?: number;           // Default: 90 days (increased from 30 for B2B sales cycles)
   trackedParams?: string[];             // Additional URL params to track
   
   // Privacy
@@ -54,10 +54,17 @@ export interface DatalyrConfig {
   
   // Container Scripts
   enableContainer?: boolean;             // Default: true - Load third-party scripts
-  
+
+  // Auto-Identify (opt-in feature for convenience)
+  autoIdentify?: boolean;                // Default: false - Set true to automatically identify users
+  autoIdentifyForms?: boolean;           // Default: true - Capture email from forms (when autoIdentify enabled)
+  autoIdentifyAPI?: boolean;             // Default: true - Capture email from API requests/responses (when autoIdentify enabled)
+  autoIdentifyShopify?: boolean;         // Default: true - Capture email from Shopify endpoints (when autoIdentify enabled)
+  autoIdentifyTrustedDomains?: string[]; // Default: [] - Additional domains to trust for API capture
+
   // Fallback endpoints for resilience
   fallbackEndpoints?: string[];         // Additional endpoints to try
-  
+
   // Plugins
   plugins?: DatalyrPlugin[];
 }
@@ -180,31 +187,26 @@ export interface FingerprintData {
 }
 
 // Internal event payload structure
+// NOTE: Uses snake_case to match backend API and production tracking script
 export interface IngestEventPayload {
-  // Required identifiers
-  workspaceId: string;
-  workspace_id?: string;  // Alternative format
-  
-  // Identity fields (Mixpanel model)
+  // Required identifiers (snake_case only)
+  workspace_id: string;
+
+  // Identity fields (Mixpanel model - snake_case only)
   distinct_id: string;
   anonymous_id: string;
   user_id?: string;
-  
-  // Legacy compatibility
+
+  // Legacy compatibility (snake_case only)
   visitor_id: string;
-  visitorId: string;
   canonical_id: string;
-  
-  // Event data (both formats for compatibility)
-  eventId: string;
-  event_id?: string;
-  eventName: string;
-  event_name?: string;
-  eventData: Record<string, any>;
-  event_data?: Record<string, any>;
-  
-  // Session (both formats)
-  sessionId: string;
+
+  // Event data (snake_case only - no duplication)
+  event_id: string;
+  event_name: string;
+  event_data: Record<string, any>;
+
+  // Session (snake_case only)
   session_id: string;
   
   // Attribution (will be in eventData but also top-level for queries)

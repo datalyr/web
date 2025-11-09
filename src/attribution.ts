@@ -10,6 +10,7 @@ import type { Attribution, TouchPoint } from './types';
 export class AttributionManager {
   private attributionWindow: number;
   private trackedParams: string[];
+  private queryParamsCache: Record<string, string> | null = null;
   private UTM_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
   // Updated to match dl.js - includes ALL ad platform click IDs
   private CLICK_IDS = [
@@ -43,16 +44,30 @@ export class AttributionManager {
     attributionWindow?: number;
     trackedParams?: string[];
   } = {}) {
-    this.attributionWindow = options.attributionWindow || 30 * 24 * 60 * 60 * 1000; // 30 days
+    this.attributionWindow = options.attributionWindow || 90 * 24 * 60 * 60 * 1000; // 90 days (increased from 30 for B2B sales cycles)
     // Merge default tracked params with user-provided ones
     this.trackedParams = [...this.DEFAULT_TRACKED_PARAMS, ...(options.trackedParams || [])];
+  }
+
+  /**
+   * Clear query params cache (called on page navigation)
+   * FIXED: Prevents stale attribution data on SPA navigation
+   */
+  clearCache(): void {
+    this.queryParamsCache = null;
   }
 
   /**
    * Capture current attribution from URL
    */
   captureAttribution(): Attribution {
-    const params = getAllQueryParams();
+    // Cache query params to avoid multiple parses within same page load (Issue #3)
+    // NOTE: Cache is cleared on page navigation to prevent stale data
+    const params = this.queryParamsCache || getAllQueryParams();
+    if (!this.queryParamsCache) {
+      this.queryParamsCache = params;
+    }
+
     const attribution: Attribution = {
       timestamp: Date.now()
     };
@@ -108,40 +123,70 @@ export class AttributionManager {
   }
 
   /**
-   * Store first touch attribution
+   * Store first touch attribution with 90-day expiration
+   *
+   * FIXED (DATA-01): Removed paid priority logic that was corrupting first-touch attribution.
+   * First-touch is now IMMUTABLE except for expiration - this ensures accurate revenue attribution.
    */
   storeFirstTouch(attribution: Attribution): void {
     const existing = storage.get('dl_first_touch');
+
+    let shouldStore = false;
+
     if (!existing) {
+      // No existing attribution - store first touch
+      shouldStore = true;
+    } else if (existing.expires_at && Date.now() >= existing.expires_at) {
+      // Existing attribution expired - replace it
+      shouldStore = true;
+    }
+    // REMOVED PAID PRIORITY LOGIC - First-touch must be immutable for accurate attribution
+    // If there's existing valid attribution, keep it (true first-touch strategy)
+
+    if (shouldStore) {
       storage.set('dl_first_touch', {
         ...attribution,
-        timestamp: Date.now()
+        captured_at: Date.now(),
+        expires_at: Date.now() + this.attributionWindow
       });
     }
   }
 
   /**
    * Get first touch attribution
+   * Checks expiry and removes if expired (Issue #4)
    */
   getFirstTouch(): Attribution | null {
-    return storage.get('dl_first_touch');
+    const data = storage.get('dl_first_touch');
+    if (data && data.expires_at && Date.now() >= data.expires_at) {
+      storage.remove('dl_first_touch');
+      return null;
+    }
+    return data;
   }
 
   /**
-   * Store last touch attribution
+   * Store last touch attribution with 90-day expiration
    */
   storeLastTouch(attribution: Attribution): void {
     storage.set('dl_last_touch', {
       ...attribution,
-      timestamp: Date.now()
+      captured_at: Date.now(),
+      expires_at: Date.now() + this.attributionWindow
     });
   }
 
   /**
    * Get last touch attribution
+   * Checks expiry and removes if expired (Issue #4)
    */
   getLastTouch(): Attribution | null {
-    return storage.get('dl_last_touch');
+    const data = storage.get('dl_last_touch');
+    if (data && data.expires_at && Date.now() >= data.expires_at) {
+      storage.remove('dl_last_touch');
+      return null;
+    }
+    return data;
   }
 
   /**
@@ -226,17 +271,19 @@ export class AttributionManager {
 
   /**
    * Check if we have a specific click ID in current params
+   * Uses cached params to avoid multiple URL parses (Issue #3)
    */
   private hasClickId(clickIdType: string): boolean {
-    const params = getAllQueryParams();
+    const params = this.queryParamsCache || getAllQueryParams();
     return !!params[clickIdType];
   }
 
   /**
    * Get current fbclid from URL if present
+   * Uses cached params to avoid multiple URL parses (Issue #3)
    */
   private getCurrentFbclid(): string | null {
-    const params = getAllQueryParams();
+    const params = this.queryParamsCache || getAllQueryParams();
     return params.fbclid || null;
   }
 
@@ -247,8 +294,28 @@ export class AttributionManager {
     const firstTouch = this.getFirstTouch();
     const lastTouch = this.getLastTouch();
     const journey = this.getJourney();
-    const current = this.captureAttribution();
-    
+    let current = this.captureAttribution();
+
+    // CRITICAL FIX: If current session has no attribution (direct/organic),
+    // fallback to persistent attribution from localStorage (90-day window)
+    const hasCurrentAttribution = !!(
+      current.source || current.medium || current.clickId || current.campaign
+    );
+
+    if (!hasCurrentAttribution && firstTouch) {
+      // Check if persistent attribution is still valid
+      if (!firstTouch.expires_at || Date.now() < firstTouch.expires_at) {
+        // Use persistent attribution but keep current page context
+        current = {
+          ...firstTouch,
+          referrer: current.referrer,
+          referrerHost: current.referrerHost,
+          landingPage: current.landingPage,
+          landingPath: current.landingPath
+        };
+      }
+    }
+
     // Capture advertising cookies automatically
     const adCookies = this.captureAdCookies();
 

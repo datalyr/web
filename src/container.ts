@@ -52,6 +52,9 @@ export class ContainerManager {
   private endpoint: string;
   private debug: boolean;
   private initialized = false;
+  private sandboxedIframes: HTMLIFrameElement[] = []; // FIXED (ISSUE-02): Track iframes for cleanup
+  private iframeCleanupTimeouts = new Map<HTMLIFrameElement, number>(); // FIXED (ISSUE-02): Track cleanup timeouts
+  private messageHandler: ((event: MessageEvent) => void) | null = null; // FIXED (ISSUE-02): Track message listener
 
   constructor(options: {
     workspaceId: string;
@@ -62,10 +65,29 @@ export class ContainerManager {
     // Container scripts use the same endpoint as tracking (ingest)
     this.endpoint = options.endpoint || 'https://ingest.datalyr.com';
     this.debug = options.debug || false;
-    
+
     // Load session scripts from storage
     const sessionScripts = storage.get('dl_session_scripts', []);
     this.sessionLoadedScripts = new Set(sessionScripts);
+
+    // FIXED (ISSUE-02): Set up postMessage listener for iframe cleanup
+    this.messageHandler = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'datalyr_script_complete') {
+        const scriptId = event.data.scriptId;
+        this.log('Received script completion signal:', scriptId);
+
+        // Find and clean up the corresponding iframe
+        const iframe = this.sandboxedIframes.find(
+          iframe => iframe.dataset.datalyrScript === scriptId
+        );
+
+        if (iframe) {
+          this.cleanupIframe(iframe);
+        }
+      }
+    };
+
+    window.addEventListener('message', this.messageHandler);
   }
 
   /**
@@ -253,24 +275,127 @@ export class ContainerManager {
   }
 
   /**
-   * Load inline JavaScript
+   * Load inline JavaScript in sandboxed iframe
+   * SECURITY: User-provided scripts run in isolated context to prevent XSS
+   * FIXED (ISSUE-02): Added cleanup mechanism to prevent memory leaks
    */
   private loadInlineScript(script: ContainerScript): void {
-    // Basic XSS protection - ensure content doesn't contain obvious malicious patterns
-    if (this.containsMaliciousPatterns(script.content)) {
-      this.log('Blocked potentially malicious inline script:', script.id);
-      return;
+    // SECURITY FIX: Run in sandboxed iframe instead of main page context
+    // This prevents access to parent window, cookies, and localStorage
+
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.setAttribute('sandbox', 'allow-scripts'); // Minimal permissions
+    iframe.dataset.datalyrScript = script.id;
+
+    // FIXED (ISSUE-02): Track iframe for cleanup
+    this.sandboxedIframes.push(iframe);
+
+    // Create isolated script context with completion signal
+    const iframeDoc = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="UTF-8">
+        </head>
+        <body>
+          <script>
+            // User-provided script runs here in isolation
+            try {
+              ${script.content}
+            } catch (error) {
+              console.error('[Datalyr Container] Script execution error:', error);
+            }
+
+            // FIXED (ISSUE-02): Signal completion for cleanup
+            // Scripts have 5 seconds to execute before iframe is removed
+            setTimeout(function() {
+              try {
+                parent.postMessage({ type: 'datalyr_script_complete', scriptId: '${script.id}' }, '*');
+              } catch (e) {
+                // Ignore postMessage errors from sandbox
+              }
+            }, 5000);
+          </script>
+        </body>
+      </html>
+    `;
+
+    document.body.appendChild(iframe);
+
+    // Write content to iframe (safe because sandbox prevents parent access)
+    if (iframe.contentDocument) {
+      iframe.contentDocument.open();
+      iframe.contentDocument.write(iframeDoc);
+      iframe.contentDocument.close();
     }
-    
-    const scriptElement = document.createElement('script');
-    scriptElement.textContent = script.content;
-    scriptElement.dataset.datalyrScript = script.id;
-    scriptElement.setAttribute('data-nonce', this.generateNonce());
-    document.head.appendChild(scriptElement);
+
+    // FIXED (ISSUE-02): Remove iframe after execution (30 seconds max as fallback)
+    // If script completes in 5s, postMessage will trigger early cleanup
+    const timeoutId = window.setTimeout(() => {
+      this.cleanupIframe(iframe);
+    }, 30000);
+
+    // Store timeout ID for cleanup
+    this.iframeCleanupTimeouts.set(iframe, timeoutId);
+
+    this.log('Loaded inline script in sandbox:', script.id);
   }
 
   /**
-   * Load external JavaScript
+   * Clean up a sandboxed iframe
+   * FIXED (ISSUE-02): Prevents memory leaks from iframe accumulation
+   */
+  private cleanupIframe(iframe: HTMLIFrameElement): void {
+    try {
+      // FIXED (ISSUE-02): Clear pending timeout to prevent duplicate cleanup
+      const timeoutId = this.iframeCleanupTimeouts.get(iframe);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        this.iframeCleanupTimeouts.delete(iframe);
+      }
+
+      // Remove from tracking array
+      const index = this.sandboxedIframes.indexOf(iframe);
+      if (index > -1) {
+        this.sandboxedIframes.splice(index, 1);
+      }
+
+      // Remove from DOM
+      if (iframe.parentNode) {
+        iframe.parentNode.removeChild(iframe);
+        this.log('Cleaned up sandboxed iframe:', iframe.dataset.datalyrScript);
+      }
+    } catch (error) {
+      this.log('Error cleaning up iframe:', error);
+    }
+  }
+
+  /**
+   * Clean up all sandboxed iframes
+   * FIXED (ISSUE-02): Called on SDK destroy to prevent memory leaks
+   */
+  public cleanupAllIframes(): void {
+    // Clean up all iframes
+    const iframes = [...this.sandboxedIframes]; // Copy array since we're modifying it
+    iframes.forEach(iframe => this.cleanupIframe(iframe));
+
+    // FIXED (ISSUE-02): Remove message listener to prevent memory leak
+    if (this.messageHandler) {
+      window.removeEventListener('message', this.messageHandler);
+      this.messageHandler = null;
+    }
+
+    // Clear any remaining timeouts
+    this.iframeCleanupTimeouts.forEach(timeoutId => clearTimeout(timeoutId));
+    this.iframeCleanupTimeouts.clear();
+
+    this.log(`Cleaned up ${iframes.length} sandboxed iframes`);
+  }
+
+  /**
+   * Load external JavaScript with SRI validation
+   * SECURITY (Phase 1.2): SRI is now REQUIRED for external scripts
    */
   private loadExternalScript(script: ContainerScript): void {
     // Validate URL before loading
@@ -278,22 +403,34 @@ export class ContainerManager {
       this.log('Blocked invalid script URL:', script.content);
       return;
     }
-    
+
+    // SECURITY FIX: Require SRI (Subresource Integrity) for external scripts
+    if (!script.settings?.integrity) {
+      console.error(
+        `[Datalyr Container] SECURITY: External script "${script.id}" blocked - missing SRI hash.\n` +
+        `All external scripts MUST include an integrity hash to prevent CDN compromise attacks.\n` +
+        `Generate SRI hash at: https://www.srihash.org/\n` +
+        `Example: { integrity: "sha384-..." }`
+      );
+      return;
+    }
+
     const scriptElement = document.createElement('script');
     scriptElement.src = script.content;
     scriptElement.dataset.datalyrScript = script.id;
-    
+
     // Apply settings
     if (script.settings) {
+      scriptElement.integrity = script.settings.integrity; // REQUIRED
+      scriptElement.crossOrigin = script.settings.crossorigin || 'anonymous'; // Required for SRI
+
       if (script.settings.async !== false) scriptElement.async = true;
       if (script.settings.defer) scriptElement.defer = true;
-      if (script.settings.integrity) scriptElement.integrity = script.settings.integrity;
-      if (script.settings.crossorigin) scriptElement.crossOrigin = script.settings.crossorigin;
     } else {
-      // Default to async for better performance
+      // This should never happen now that integrity is required
       scriptElement.async = true;
     }
-    
+
     document.head.appendChild(scriptElement);
   }
 
@@ -440,24 +577,28 @@ export class ContainerManager {
    * Track event to all initialized pixels
    */
   trackToPixels(eventName: string, properties: any = {}): void {
+    // Sanitize inputs to prevent XSS
+    const sanitizedEventName = this.sanitizeEventName(eventName);
+    const sanitizedProperties = this.sanitizeProperties(properties);
+
     // Track to Meta Pixel
     if (this.pixels?.meta?.enabled && (window as any).fbq) {
       try {
-        (window as any).fbq('track', eventName, properties);
+        (window as any).fbq('track', sanitizedEventName, sanitizedProperties);
       } catch (error) {
         this.log('Error tracking Meta Pixel event:', error);
       }
     }
-    
+
     // Track to Google Tag
     if (this.pixels?.google?.enabled && (window as any).gtag) {
       try {
-        (window as any).gtag('event', eventName, properties);
+        (window as any).gtag('event', sanitizedEventName, sanitizedProperties);
       } catch (error) {
         this.log('Error tracking Google Tag event:', error);
       }
     }
-    
+
     // Track to TikTok Pixel
     if (this.pixels?.tiktok?.enabled && (window as any).ttq) {
       try {
@@ -470,9 +611,9 @@ export class ContainerManager {
           'Search': 'Search',
           'Lead': 'SubmitForm'
         };
-        
-        const tiktokEvent = tiktokEventMap[eventName] || eventName;
-        (window as any).ttq.track(tiktokEvent, properties);
+
+        const tiktokEvent = tiktokEventMap[sanitizedEventName] || sanitizedEventName;
+        (window as any).ttq.track(tiktokEvent, sanitizedProperties);
       } catch (error) {
         this.log('Error tracking TikTok Pixel event:', error);
       }
@@ -497,54 +638,25 @@ export class ContainerManager {
   }
 
   /**
-   * Extract app endpoint from ingest endpoint
+   * SECURITY MODEL (Phase 1.1 Fix):
+   *
+   * Inline scripts run in sandboxed iframes with 'allow-scripts' only.
+   * This prevents:
+   * - Access to parent window/document
+   * - Access to cookies and localStorage
+   * - Cross-origin requests
+   * - Popup creation
+   * - Form submission
+   *
+   * External scripts MUST have SRI (Subresource Integrity) hashes.
+   * This prevents:
+   * - CDN compromise attacks
+   * - Man-in-the-middle script injection
+   * - Unauthorized script modifications
+   *
+   * Previous regex-based validation was removed because it's trivially bypassable.
+   * Sandboxing provides defense-in-depth regardless of script content.
    */
-  private extractAppEndpoint(endpoint?: string): string {
-    if (!endpoint) {
-      return 'https://app.datalyr.com';
-    }
-    
-    // If it's already an app endpoint, use it
-    if (endpoint.includes('app.datalyr.com')) {
-      return endpoint;
-    }
-    
-    // Convert ingest endpoint to app endpoint
-    if (endpoint.includes('ingest.datalyr.com')) {
-      return 'https://app.datalyr.com';
-    }
-    
-    // For local development
-    if (endpoint.includes('localhost') || endpoint.includes('127.0.0.1')) {
-      // Assume app is on port 3000 if ingest is on 3001
-      return endpoint.replace(':3001', ':3000').replace('/ingest', '');
-    }
-    
-    // For custom endpoints, try to extract the base domain
-    try {
-      const url = new URL(endpoint);
-      return `${url.protocol}//${url.hostname}${url.port ? ':' + url.port : ''}`;
-    } catch {
-      return 'https://app.datalyr.com';
-    }
-  }
-
-  /**
-   * Check for malicious patterns in inline scripts
-   */
-  private containsMaliciousPatterns(content: string): boolean {
-    // Basic patterns that might indicate malicious content
-    const dangerousPatterns = [
-      /<script[^>]*>/gi,  // Script tags within content
-      /document\.cookie/gi,  // Direct cookie access
-      /eval\s*\(/gi,  // eval usage
-      /Function\s*\(/gi,  // Function constructor
-      /innerHTML\s*=/gi,  // Direct innerHTML assignment
-      /document\.write/gi,  // document.write usage
-    ];
-    
-    return dangerousPatterns.some(pattern => pattern.test(content));
-  }
 
   /**
    * Validate script URL
@@ -570,12 +682,71 @@ export class ContainerManager {
   }
 
   /**
-   * Generate a nonce for CSP
+   * Sanitize event name - whitelist alphanumeric, underscore, dollar sign
    */
-  private generateNonce(): string {
-    const array = new Uint8Array(16);
-    crypto.getRandomValues(array);
-    return btoa(String.fromCharCode(...array));
+  private sanitizeEventName(eventName: string): string {
+    if (typeof eventName !== 'string') {
+      return 'unknown_event';
+    }
+    // Allow alphanumeric, underscore, dollar sign, and spaces
+    return eventName.replace(/[^a-zA-Z0-9_$ ]/g, '').substring(0, 100);
+  }
+
+  /**
+   * Recursively sanitize properties object
+   */
+  private sanitizeProperties(properties: any): any {
+    if (properties === null || properties === undefined) {
+      return {};
+    }
+
+    if (typeof properties !== 'object') {
+      return this.sanitizeValue(properties);
+    }
+
+    if (Array.isArray(properties)) {
+      return properties.map(item => this.sanitizeValue(item));
+    }
+
+    const sanitized: Record<string, any> = {};
+    for (const [key, value] of Object.entries(properties)) {
+      // Sanitize key
+      const sanitizedKey = key.replace(/[^a-zA-Z0-9_]/g, '').substring(0, 100);
+      if (sanitizedKey) {
+        sanitized[sanitizedKey] = this.sanitizeValue(value);
+      }
+    }
+
+    return sanitized;
+  }
+
+  /**
+   * Sanitize individual value
+   */
+  private sanitizeValue(value: any): any {
+    if (value === null || value === undefined) {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      // Remove potential XSS patterns
+      return value
+        .replace(/<script[^>]*>.*?<\/script>/gi, '')
+        .replace(/<[^>]+>/g, '')
+        .replace(/javascript:/gi, '')
+        .replace(/on\w+\s*=/gi, '')
+        .substring(0, 1000);
+    }
+
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return value;
+    }
+
+    if (typeof value === 'object') {
+      return this.sanitizeProperties(value);
+    }
+
+    return String(value).substring(0, 1000);
   }
 
   /**

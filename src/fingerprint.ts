@@ -9,8 +9,6 @@ import type { FingerprintData } from './types';
 export class FingerprintCollector {
   private privacyMode: 'standard' | 'strict';
   private enableFingerprinting: boolean;
-  private heavyFingerprintDone = false;
-  private fingerprintCache: Partial<FingerprintData> = {};
 
   constructor(options: {
     privacyMode?: 'standard' | 'strict';
