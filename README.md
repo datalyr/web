@@ -45,7 +45,7 @@ npm install @datalyr/web
 ### Script Tag
 
 ```html
-<script defer src="https://track.datalyr.com/container.js"
+<script defer src="https://track.datalyr.com/dl.js"
         data-workspace-id="YOUR_WORKSPACE_ID"></script>
 ```
 
@@ -449,7 +449,20 @@ datalyr.page('Product Details', {
 
 ## Container Scripts
 
-The SDK can load and manage third-party tracking scripts:
+Container scripts manage third-party tracking pixels (Meta, Google, TikTok) configured in your Datalyr dashboard.
+
+### Script Tag Installation
+
+For container scripts, use the container endpoint:
+
+```html
+<script defer src="https://track.datalyr.com/container.js"
+        data-workspace-id="YOUR_WORKSPACE_ID"></script>
+```
+
+This loads your configured pixels and tracking scripts automatically.
+
+### NPM SDK with Containers
 
 ```javascript
 datalyr.init({
@@ -457,9 +470,19 @@ datalyr.init({
   enableContainer: true  // Default: true
 });
 
-// Container scripts are loaded based on your dashboard configuration
-// Supports: Meta (Facebook), Google, TikTok pixels
+// Manually trigger a script
+datalyr.loadScript('custom-script-id');
+
+// Get loaded scripts
+const scripts = datalyr.getLoadedScripts();
 ```
+
+### Supported Pixels
+
+- Meta (Facebook) Pixel
+- Google Analytics / Google Ads
+- TikTok Pixel
+- Custom scripts and tracking pixels
 
 Security features:
 - HTTPS-only script loading

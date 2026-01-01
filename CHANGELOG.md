@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.1] - 2025-01
+
+### Changed
+- Complete README rewrite to match iOS/React Native SDK documentation style
+- Fixed script tag URL from container.js to dl.js
+
 ## [1.2.0] - 2025-01
 
 ### Changed
