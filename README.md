@@ -9,17 +9,17 @@ The official Datalyr Web SDK for browser-based analytics. Track user behavior, m
 
 ## Features
 
-- 🚀 **Zero Configuration** - Start tracking with just your workspace ID
-- 📦 **Lightweight** - ~15KB minified + gzipped with zero dependencies
-- 🔒 **Privacy First** - GDPR compliant with built-in consent management
-- 🎯 **Smart Batching** - Optimized network usage with intelligent event queuing
-- 📱 **Cross-Platform** - Works on all modern browsers including mobile
-- 🔄 **Offline Support** - Events are queued and sent when connection restored
-- 🏷️ **Attribution Tracking** - Automatic UTM and click ID capture
-- 🔍 **Session Management** - Automatic session tracking with configurable timeout
-- 🎨 **TypeScript Support** - Full type definitions included
-- 🔌 **Extensible** - Plugin system for custom functionality
-- 📦 **Container Scripts** - Securely manage third-party pixels and tracking scripts
+- **Zero Configuration** - Start tracking with just your workspace ID
+- **Lightweight** - ~15KB minified + gzipped with zero dependencies
+- **Privacy First** - GDPR compliant with built-in consent management
+- **Smart Batching** - Optimized network usage with intelligent event queuing
+- **Cross-Platform** - Works on all modern browsers including mobile
+- **Offline Support** - Events are queued and sent when connection restored
+- **Attribution Tracking** - Automatic UTM and click ID capture
+- **Session Management** - Automatic session tracking with configurable timeout
+- **TypeScript Support** - Full type definitions included
+- **Extensible** - Plugin system for custom functionality
+- **Container Scripts** - Securely manage third-party pixels and tracking scripts
 
 ## Choosing the Right Installation Method
 
@@ -35,11 +35,11 @@ Datalyr offers two installation methods. Choose based on your needs:
 ```
 
 **Pros:**
-- ✅ Zero bundle size (external script)
-- ✅ No npm install needed
-- ✅ Works in any HTML page
-- ✅ Automatic initialization
-- ✅ Perfect for Next.js, React, Vue
+- Zero bundle size (external script)
+- No npm install needed
+- Works in any HTML page
+- Automatic initialization
+- Perfect for Next.js, React, Vue
 
 **API Usage:**
 ```javascript
@@ -62,10 +62,10 @@ npm install @datalyr/web
 ```
 
 **Pros:**
-- ✅ Full TypeScript definitions
-- ✅ ES module imports
-- ✅ Tree-shaking support
-- ✅ Better IDE autocomplete
+- Full TypeScript definitions
+- ES module imports
+- Tree-shaking support
+- Better IDE autocomplete
 
 **API Usage:**
 ```javascript
@@ -78,12 +78,12 @@ datalyr.identify('user_123', { email: 'user@example.com' })
 
 ---
 
-### ⚠️ Important: Don't Mix Both Methods
+### Important: Don't Mix Both Methods
 
 Choose **one** installation method. Using both can cause conflicts:
 
 ```html
-<!-- ❌ DON'T DO THIS -->
+<!-- DON'T DO THIS -->
 <script src="https://track.datalyr.com/container.js"></script>
 <script>
   import datalyr from '@datalyr/web'  // Both methods at once!
@@ -417,11 +417,11 @@ The container manager supports:
 - **Frequency control**: Once per session, once per page, or always
 
 **Security Features:**
-- ✅ HTTPS-only script loading (except localhost)
-- ✅ XSS protection with pattern detection
-- ✅ URL validation and protocol blocking
-- ✅ CSP nonce support for inline scripts
-- ✅ Automatic async loading for better performance
+- HTTPS-only script loading (except localhost)
+- XSS protection with pattern detection
+- URL validation and protocol blocking
+- CSP nonce support for inline scripts
+- Automatic async loading for better performance
 
 ### Plugins
 
@@ -554,7 +554,7 @@ export function AnalyticsProvider({ children }) {
     });
 
     // Verify initialization
-    console.log('✅ Datalyr initialized');
+    console.log('Datalyr initialized');
     console.log('Session ID:', datalyr.getSessionId());
     console.log('Anonymous ID:', datalyr.getAnonymousId());
 
@@ -583,7 +583,7 @@ export default function RootLayout({ children }) {
 
 ## Authentication & Attribution Tracking
 
-### ⚠️ Critical: Client-Side Identification for Attribution
+### Critical: Client-Side Identification for Attribution
 
 When implementing authentication flows (login, signup, OAuth), you **MUST** call identify on the client-side (browser) to preserve attribution data. Server-side identification creates new sessions and loses all attribution context.
 
@@ -1095,4 +1095,4 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-Built with ❤️ by the Datalyr team
+Built by the Datalyr team
