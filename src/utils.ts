@@ -226,8 +226,36 @@ export function getRootDomain(): string {
     const tld = parts[parts.length - 1];
     const sld = parts[parts.length - 2];
 
-    // Common two-part TLDs
-    const twoPartTlds = ['co.uk', 'com.au', 'co.nz', 'co.jp', 'co.in', 'co.za'];
+    // Common two-part TLDs (country-specific domains)
+    // Note: The CookieStorage.getAutoDomain() probe method handles unknown TLDs dynamically,
+    // but this list provides faster resolution for known patterns
+    const twoPartTlds = [
+      // United Kingdom
+      'co.uk', 'org.uk', 'net.uk', 'ac.uk', 'gov.uk', 'me.uk',
+      // Australia
+      'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
+      // New Zealand
+      'co.nz', 'net.nz', 'org.nz', 'govt.nz',
+      // Japan
+      'co.jp', 'ne.jp', 'or.jp', 'ac.jp', 'go.jp',
+      // India
+      'co.in', 'net.in', 'org.in', 'gov.in', 'ac.in',
+      // South Africa
+      'co.za', 'net.za', 'org.za', 'gov.za',
+      // Brazil
+      'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br',
+      // South Korea
+      'co.kr', 'ne.kr', 'or.kr', 'go.kr', 'ac.kr',
+      // China
+      'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn',
+      // Other Asia-Pacific
+      'co.id', 'co.th', 'com.sg', 'com.my', 'com.ph', 'com.vn',
+      'com.tw', 'com.hk',
+      // Latin America
+      'com.mx', 'com.ar', 'com.co', 'com.pe', 'com.cl',
+      // Europe
+      'co.il', 'co.at', 'co.hu', 'co.pl'
+    ];
     const lastTwo = `${sld}.${tld}`;
 
     if (twoPartTlds.includes(lastTwo) && parts.length >= 3) {

@@ -20,6 +20,22 @@ export class IdentityManager {
    * Get or create anonymous ID (device/browser identifier)
    */
   private getOrCreateAnonymousId(): string {
+    // 0. Check URL parameter first (cross-domain linking via _dl_vid)
+    // This enables tracking continuity when users navigate between different root domains
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlVisitorId = urlParams.get('_dl_vid');
+      if (urlVisitorId && urlVisitorId.startsWith('anon_')) {
+        // Valid visitor ID from URL - use it and persist
+        this.setRootDomainCookie('__dl_visitor_id', urlVisitorId);
+        storage.set('dl_anonymous_id', urlVisitorId);
+        return urlVisitorId;
+      }
+    } catch (e) {
+      // URL parsing failed - continue with cookie/localStorage checks
+      console.warn('[Datalyr] Failed to parse URL for _dl_vid:', e);
+    }
+
     // 1. Check root domain cookie first (works across subdomains)
     let anonymousId = cookies.get('__dl_visitor_id');
 
