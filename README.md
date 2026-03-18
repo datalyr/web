@@ -19,6 +19,7 @@ Browser analytics and attribution SDK for web applications. Track events, identi
 - [Attribution](#attribution)
   - [Automatic Capture](#automatic-capture)
   - [Custom Parameters](#custom-parameters)
+- [Web-to-App Attribution](#web-to-app-attribution)
 - [Event Queue](#event-queue)
 - [Offline Support](#offline-support)
 - [Privacy and Consent](#privacy-and-consent)
@@ -337,6 +338,50 @@ datalyr.init({
   trackedParams: ['ref', 'affiliate_id', 'promo_code']
 });
 ```
+
+---
+
+## Web-to-App Attribution
+
+Track users who click a "Download App" button on your website and attribute their app install back to the original ad click.
+
+### How It Works
+
+1. User clicks an ad → lands on your prelander page (web SDK loaded, captures `fbclid`, UTMs, IP)
+2. User clicks "Download App" → `trackAppDownloadClick()` fires event with full attribution
+3. User installs from App Store / Play Store
+4. First app open → mobile SDK recovers the web attribution:
+   - **Android**: Deterministic match via Play Store `referrer` URL parameter (~95% accuracy)
+   - **iOS**: IP-based match against recent web events within 24 hours (~90%+ accuracy)
+
+### Usage
+
+```javascript
+// On your prelander "Download" button click handler
+document.querySelector('#download-btn').addEventListener('click', () => {
+  datalyr.trackAppDownloadClick({
+    targetPlatform: 'ios',  // or 'android'
+    appStoreUrl: 'https://apps.apple.com/app/your-app/id123456789',
+  });
+});
+```
+
+For Android, pass the Play Store URL and the SDK will automatically encode attribution params into the `referrer` parameter:
+
+```javascript
+datalyr.trackAppDownloadClick({
+  targetPlatform: 'android',
+  appStoreUrl: 'https://play.google.com/store/apps/details?id=com.yourapp',
+});
+```
+
+The method fires a `$app_download_click` event (with all attribution data), flushes the event queue via `sendBeacon`, then redirects the user to the store URL.
+
+### Requirements
+
+- Web SDK must be initialized on the prelander page
+- Mobile SDK (`@datalyr/react-native` or `@datalyr/swift`) must be installed in the app
+- Attribution is recovered automatically on first app launch — no additional mobile code needed
 
 ---
 

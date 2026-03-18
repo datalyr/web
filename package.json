@@ -1,6 +1,6 @@
 {
   "name": "@datalyr/web",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "Datalyr Web SDK - Modern attribution tracking for web applications",
   "main": "dist/datalyr.js",
   "module": "dist/datalyr.esm.js",
