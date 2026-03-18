@@ -310,6 +310,58 @@ class Datalyr {
   }
 
   /**
+   * Track an app download click and redirect to the app store.
+   * Fires a $app_download_click event with full attribution data,
+   * then redirects the user to the appropriate store URL.
+   * For Android, encodes attribution params into the Play Store referrer
+   * so the mobile SDK can retrieve them deterministically after install.
+   */
+  trackAppDownloadClick(options: {
+    targetPlatform: 'ios' | 'android';
+    appStoreUrl: string;
+  }): void {
+    if (!this.initialized) {
+      console.warn('[Datalyr] SDK not initialized. Call init() first.');
+      return;
+    }
+    if (!this.shouldTrack()) return;
+
+    // Fire the event with target platform info — attribution data is
+    // automatically merged by createEventPayload via getAttributionData()
+    this.track('$app_download_click', {
+      target_platform: options.targetPlatform,
+      app_store_url: options.appStoreUrl,
+    });
+
+    // Flush immediately via sendBeacon before page navigates away
+    this.queue.forceFlush();
+
+    // For Android: append referrer param to Play Store URL with click attribution
+    if (options.targetPlatform === 'android' && options.appStoreUrl.includes('play.google.com')) {
+      const lastTouch = this.attribution.getLastTouch();
+      const referrerParams = new URLSearchParams();
+      if (lastTouch?.clickId) referrerParams.set('dl_click_id', lastTouch.clickId);
+      if (lastTouch?.clickIdType) referrerParams.set('dl_click_id_type', lastTouch.clickIdType);
+      if (lastTouch?.source) referrerParams.set('utm_source', lastTouch.source);
+      if (lastTouch?.medium) referrerParams.set('utm_medium', lastTouch.medium);
+      if (lastTouch?.campaign) referrerParams.set('utm_campaign', lastTouch.campaign);
+      if (lastTouch?.content) referrerParams.set('utm_content', lastTouch.content);
+      if (lastTouch?.term) referrerParams.set('utm_term', lastTouch.term);
+
+      try {
+        const url = new URL(options.appStoreUrl);
+        url.searchParams.set('referrer', referrerParams.toString());
+        window.location.href = url.toString();
+      } catch {
+        // If URL parsing fails, redirect without referrer
+        window.location.href = options.appStoreUrl;
+      }
+    } else {
+      window.location.href = options.appStoreUrl;
+    }
+  }
+
+  /**
    * Identify a user
    */
   identify(userId: string, traits: UserTraits = {}): void {
