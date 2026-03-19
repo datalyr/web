@@ -116,7 +116,7 @@ Every event includes:
   workspace_id: 'wk_xxxxx',
   source: 'web',
   timestamp: '2024-01-15T10:30:00Z',
-  sdk_version: '1.2.1',
+  sdk_version: '1.3.0',
   sdk_name: 'datalyr-web-sdk'
 }
 ```
@@ -145,8 +145,8 @@ datalyr.init({
   flushAt?: number,                         // Default: 10 - Flush when N events queued
 
   // Priority events (bypass normal batching)
-  criticalEvents?: string[],               // e.g. ['purchase', 'signup', 'subscribe', 'lead', 'conversion']
-  highPriorityEvents?: string[],           // e.g. ['add_to_cart', 'begin_checkout', 'view_item', 'search']
+  criticalEvents?: string[],               // Default: undefined (disabled). Events flushed immediately.
+  highPriorityEvents?: string[],           // Default: undefined (disabled). Events given queue priority.
 
   // Session
   sessionTimeout?: number,                  // Default: 3600000 (60 min)

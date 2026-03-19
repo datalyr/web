@@ -730,7 +730,7 @@ class Datalyr {
       resolution_confidence: 1.0,
 
       // SDK metadata
-      sdk_version: '1.2.1',
+      sdk_version: '1.3.0',
       sdk_name: 'datalyr-web-sdk'
     };
 
