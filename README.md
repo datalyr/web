@@ -1,6 +1,6 @@
 # @datalyr/web
 
-Browser analytics and attribution SDK for web applications. Track events, identify users, and capture attribution data across your website.
+Browser SDK for event tracking, user identity, and attribution. Version 1.3.0.
 
 ## Table of Contents
 
@@ -8,27 +8,20 @@ Browser analytics and attribution SDK for web applications. Track events, identi
 - [Quick Start](#quick-start)
 - [How It Works](#how-it-works)
 - [Configuration](#configuration)
-- [Event Tracking](#event-tracking)
-  - [Custom Events](#custom-events)
-  - [Page Views](#page-views)
-  - [E-Commerce Events](#e-commerce-events)
-- [User Identity](#user-identity)
-  - [Anonymous ID](#anonymous-id)
-  - [Identifying Users](#identifying-users)
-  - [User Properties](#user-properties)
-- [Attribution](#attribution)
-  - [Automatic Capture](#automatic-capture)
-  - [Custom Parameters](#custom-parameters)
+- [API Reference](#api-reference)
+  - [Event Tracking](#event-tracking)
+  - [User Identity](#user-identity)
+  - [Session](#session)
+  - [Attribution](#attribution)
+  - [Super Properties](#super-properties)
+  - [Privacy and Consent](#privacy-and-consent)
+  - [Queue and Network](#queue-and-network)
+  - [Container Scripts](#container-scripts)
+  - [Debugging](#debugging)
+  - [Lifecycle](#lifecycle)
 - [Web-to-App Attribution](#web-to-app-attribution)
-- [Event Queue](#event-queue)
-- [Offline Support](#offline-support)
-- [Privacy and Consent](#privacy-and-consent)
 - [SPA Support](#spa-support)
-- [Container Scripts](#container-scripts)
 - [Framework Integration](#framework-integration)
-  - [React](#react)
-  - [Vue](#vue)
-  - [Next.js](#nextjs)
 - [TypeScript](#typescript)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
@@ -37,7 +30,7 @@ Browser analytics and attribution SDK for web applications. Track events, identi
 
 ## Installation
 
-### NPM Package
+### NPM
 
 ```bash
 npm install @datalyr/web
@@ -50,7 +43,16 @@ npm install @datalyr/web
         data-workspace-id="YOUR_WORKSPACE_ID"></script>
 ```
 
-The script tag loads externally (zero bundle size) and auto-initializes. Use `window.datalyr` to access the SDK.
+The script tag loads externally (zero bundle size) and auto-initializes. Access the SDK via `window.datalyr`.
+
+Choose one installation method. Using both causes conflicts.
+
+| Feature | Script Tag | NPM |
+|---------|-----------|-----|
+| Bundle Size | 0 (external) | ~15KB |
+| TypeScript | No | Yes |
+| Access | `window.datalyr` | `import datalyr` |
+| Initialize | Automatic | `datalyr.init()` |
 
 ---
 
@@ -59,10 +61,12 @@ The script tag loads externally (zero bundle size) and auto-initializes. Use `wi
 ```javascript
 import datalyr from '@datalyr/web';
 
-// Initialize
 datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID'
 });
+
+// Wait for async initialization (encryption, container, initial page view)
+await datalyr.ready();
 
 // Track events
 datalyr.track('button_clicked', { button: 'signup' });
@@ -70,23 +74,19 @@ datalyr.track('button_clicked', { button: 'signup' });
 // Identify users
 datalyr.identify('user_123', { email: 'user@example.com' });
 
-// Track page views
-datalyr.page('Pricing', { variant: 'A' });
+// Track page views (page name goes in properties)
+datalyr.page({ title: 'Pricing', variant: 'A' });
 ```
 
 ---
 
 ## How It Works
 
-The SDK collects events and sends them to the Datalyr backend for analytics and attribution.
-
-### Data Flow
-
-1. Events are created with `track()`, `page()`, or `identify()`
-2. Each event includes device info, session data, and attribution parameters
-3. Events are queued locally and sent in batches
-4. If offline, events are stored and sent when connectivity returns
-5. Events are processed server-side for analytics and attribution reporting
+1. Events are created with `track()`, `page()`, `identify()`, etc.
+2. Each event includes device context, session data, and attribution parameters.
+3. Events are queued locally and sent in batches.
+4. If the browser is offline, events are stored and sent when connectivity returns.
+5. Events are processed server-side for analytics and attribution reporting.
 
 ### Event Payload
 
@@ -94,25 +94,30 @@ Every event includes:
 
 ```javascript
 {
-  event: 'purchase',              // Event name
-  properties: { ... },            // Custom properties
+  event_name: 'purchase',
+  event_data: { ... },           // Custom + attribution + session properties
 
   // Identity
-  anonymous_id: 'anon_xxxxx',     // Persistent browser ID
-  user_id: 'user_123',            // Set after identify()
-  session_id: 'sess_xxxxx',       // Current session
+  anonymous_id: 'anon_xxxxx',    // Persistent browser ID
+  distinct_id: 'user_123',       // user_id if identified, else anonymous_id
+  user_id: 'user_123',           // Set after identify()
+  session_id: 'sess_xxxxx',      // Current session
 
-  // Context
-  page_url: 'https://example.com/pricing',
-  page_title: 'Pricing',
+  // Context (in event_data)
+  url: 'https://example.com/pricing',
+  title: 'Pricing',
   referrer: 'https://google.com',
 
-  // Attribution (if captured)
+  // Attribution (in event_data, if captured)
   utm_source: 'facebook',
   fbclid: 'abc123',
 
-  // Timestamps
+  // Metadata
+  workspace_id: 'wk_xxxxx',
+  source: 'web',
   timestamp: '2024-01-15T10:30:00Z',
+  sdk_version: '1.2.1',
+  sdk_name: 'datalyr-web-sdk'
 }
 ```
 
@@ -120,53 +125,94 @@ Every event includes:
 
 ## Configuration
 
-```javascript
+All properties of `DatalyrConfig`:
+
+```typescript
 datalyr.init({
   // Required
   workspaceId: string,
 
-  // Features
-  debug?: boolean,                       // Console logging
-  trackPageViews?: boolean,              // Track initial page view (default: true)
-  trackSPA?: boolean,                    // Track SPA route changes (default: true)
+  // Endpoint
+  endpoint?: string,                        // Default: 'https://ingest.datalyr.com'
+  fallbackEndpoints?: string[],             // Default: [] - Additional endpoints to try on failure
 
-  // Event Queue
-  batchSize?: number,                    // Events per batch (default: 10)
-  flushInterval?: number,                // Send interval ms (default: 5000)
+  // Debugging
+  debug?: boolean,                          // Default: false - Enable console logging
+
+  // Batching
+  batchSize?: number,                       // Default: 10 - Events per batch
+  flushInterval?: number,                   // Default: 5000 - Flush interval in ms
+  flushAt?: number,                         // Default: 10 - Flush when N events queued
+
+  // Priority events (bypass normal batching)
+  criticalEvents?: string[],               // e.g. ['purchase', 'signup', 'subscribe', 'lead', 'conversion']
+  highPriorityEvents?: string[],           // e.g. ['add_to_cart', 'begin_checkout', 'view_item', 'search']
 
   // Session
-  sessionTimeout?: number,               // Session timeout ms (default: 1800000 / 30 min)
+  sessionTimeout?: number,                  // Default: 3600000 (60 min)
+  trackSessions?: boolean,                  // Default: true
+
+  // Attribution
+  attributionWindow?: number,               // Default: 7776000000 (90 days)
+  trackedParams?: string[],                 // Default: [] - Additional URL params to capture
 
   // Privacy
-  privacyMode?: 'standard' | 'strict',   // Privacy level (default: 'standard')
-  respectDoNotTrack?: boolean,           // Honor browser DNT (default: false)
-  respectGlobalPrivacyControl?: boolean, // Honor GPC (default: true)
+  respectDoNotTrack?: boolean,              // Default: false - Honor browser DNT header
+  respectGlobalPrivacyControl?: boolean,    // Default: true - Honor GPC signal
+  privacyMode?: 'standard' | 'strict',     // Default: 'standard' - 'strict' limits data collection
 
-  // Cookies
-  cookieDomain?: string | 'auto',        // Cookie domain (default: 'auto')
+  // Cookies / Storage
+  cookieDomain?: string | 'auto',           // Default: 'auto'
+  cookieExpires?: number,                   // Default: 365 (days)
+  secureCookie?: boolean | 'auto',          // Default: 'auto'
+  sameSite?: 'Strict' | 'Lax' | 'None',    // Default: 'Lax'
+  cookiePrefix?: string,                    // Default: '__dl_'
 
-  // Container
-  enableContainer?: boolean,             // Load container scripts (default: true)
+  // Performance
+  enablePerformanceTracking?: boolean,      // Default: true - Collect navigation timing metrics
+  enableFingerprinting?: boolean,           // Default: true - Minimal device fingerprinting (standard mode only)
 
-  // Custom
-  trackedParams?: string[],              // Additional URL params to track
-  plugins?: Plugin[],                    // Custom plugins
+  // Retry / Offline
+  maxRetries?: number,                      // Default: 5
+  retryDelay?: number,                      // Default: 1000 (ms)
+  maxOfflineQueueSize?: number,             // Default: 100
+
+  // SPA
+  trackSPA?: boolean,                       // Default: true - Auto-track route changes
+  trackPageViews?: boolean,                 // Default: true - Auto-track initial page view
+
+  // Container scripts
+  enableContainer?: boolean,                // Default: true - Load third-party scripts from dashboard
+
+  // Auto-Identify (opt-in)
+  autoIdentify?: boolean,                   // Default: false - Automatically identify users
+  autoIdentifyForms?: boolean,              // Default: true - Capture email from forms (when autoIdentify enabled)
+  autoIdentifyAPI?: boolean,                // Default: true - Capture email from API responses (when autoIdentify enabled)
+  autoIdentifyShopify?: boolean,            // Default: true - Capture email from Shopify endpoints (when autoIdentify enabled)
+  autoIdentifyTrustedDomains?: string[],    // Default: [] - Additional domains to trust for API capture
+
+  // Plugins
+  plugins?: DatalyrPlugin[],                // Default: [] - Custom plugin instances
 });
 ```
 
 ---
 
-## Event Tracking
+## API Reference
 
-### Custom Events
+### Event Tracking
 
-Track any action on your website:
+#### `track(eventName, properties?)`
+
+Track a custom event.
+
+```typescript
+track(eventName: string, properties?: EventProperties): void
+```
 
 ```javascript
-// Simple event
 datalyr.track('signup_started');
 
-// Event with properties
 datalyr.track('product_viewed', {
   product_id: 'SKU123',
   product_name: 'Blue Shirt',
@@ -174,148 +220,235 @@ datalyr.track('product_viewed', {
   currency: 'USD',
   category: 'Apparel',
 });
-
-// Event with value
-datalyr.track('level_completed', {
-  level: 5,
-  score: 1250,
-  time_seconds: 120,
-});
 ```
 
-### Page Views
+#### `page(properties?)`
 
-Track navigation:
+Track a page view. The page `title`, `url`, `path`, `search`, and `referrer` are captured automatically. Pass `properties` to add or override values.
+
+```typescript
+page(properties?: PageProperties): void
+```
 
 ```javascript
-// Track current page
+// Track current page (all properties auto-captured)
 datalyr.page();
 
-// Track with name
-datalyr.page('Pricing');
+// Override title, add custom properties
+datalyr.page({ title: 'Pricing', variant: 'A' });
 
-// Track with properties
-datalyr.page('Product Details', {
-  product_id: 'SKU123',
-  source: 'search',
-});
+// Add custom properties
+datalyr.page({ product_id: 'SKU123', source: 'search' });
 ```
 
-### E-Commerce Events
+Note: `page()` does not accept a name string as the first argument. To set the page name, pass it as `title` in the properties object.
 
-Standard e-commerce tracking:
+#### `screen(screenName, properties?)`
+
+Track a screen view. Intended for SPAs or hybrid apps.
+
+```typescript
+screen(screenName: string, properties?: Record<string, any>): void
+```
 
 ```javascript
-// View product
-datalyr.track('Product Viewed', {
-  product_id: 'SKU123',
-  product_name: 'Blue Shirt',
-  price: 29.99,
-  currency: 'USD'
-});
+datalyr.screen('Dashboard');
+datalyr.screen('Product Details', { product_id: 'SKU123' });
+```
 
-// Add to cart
-datalyr.track('Add to Cart', {
-  product_id: 'SKU123',
-  quantity: 1,
-  price: 29.99
-});
+Internally fires a `screen_view` event with `screen_name` set.
 
-// Start checkout
-datalyr.track('Checkout Started', {
-  cart_value: 59.98,
-  currency: 'USD',
-  item_count: 2
-});
+#### `trackAppDownloadClick(options)`
 
-// Complete purchase
-datalyr.track('Purchase', {
-  order_id: 'ORD-456',
-  total: 59.98,
-  currency: 'USD',
-  items: [
-    { product_id: 'SKU123', quantity: 2, price: 29.99 }
-  ]
+Track an app download click, then redirect to the app store. Fires a `$app_download_click` event with full attribution, flushes via `sendBeacon`, and redirects.
+
+```typescript
+trackAppDownloadClick(options: {
+  targetPlatform: 'ios' | 'android';
+  appStoreUrl: string;
+}): void
+```
+
+```javascript
+datalyr.trackAppDownloadClick({
+  targetPlatform: 'ios',
+  appStoreUrl: 'https://apps.apple.com/app/your-app/id123456789',
 });
 ```
+
+For Android Play Store URLs, attribution parameters are automatically encoded into the `referrer` query parameter for deterministic install attribution.
 
 ---
 
-## User Identity
+### User Identity
 
-### Anonymous ID
+#### `identify(userId, traits?)`
 
-Every visitor gets a persistent anonymous ID on first visit:
+Link the anonymous visitor to a known user. Rotates the session ID on call (prevents session fixation). User traits are encrypted at rest.
 
-```javascript
-const anonymousId = datalyr.getAnonymousId();
-// 'anon_a1b2c3d4e5f6'
+```typescript
+identify(userId: string, traits?: UserTraits): void
 ```
-
-This ID:
-- Persists across browser sessions
-- Links events before and after user identification
-- Can be passed to your backend for server-side attribution
-
-### Identifying Users
-
-Link the anonymous ID to a known user:
 
 ```javascript
 datalyr.identify('user_123', {
-  email: 'user@example.com',
-});
-```
-
-After `identify()`:
-- All future events include `user_id`
-- Historical anonymous events can be linked server-side
-- Attribution data is preserved on the user
-
-### User Properties
-
-Pass any user attributes:
-
-```javascript
-datalyr.identify('user_123', {
-  // Standard fields
   email: 'user@example.com',
   name: 'John Doe',
-  phone: '+1234567890',
-
-  // Custom fields
   plan: 'premium',
   company: 'Acme Inc',
-  signup_date: '2024-01-15',
 });
 ```
 
-### Logout
+#### `alias(userId, previousId?)`
 
-Clear user data on logout:
+Create an alias linking one user ID to another. If `previousId` is omitted, the current anonymous ID is used.
+
+```typescript
+alias(userId: string, previousId?: string): void
+```
+
+```javascript
+datalyr.alias('user_123', 'temp_user_456');
+```
+
+#### `group(groupId, traits?)`
+
+Associate the current user with a group or account.
+
+```typescript
+group(groupId: string, traits?: Record<string, any>): void
+```
+
+```javascript
+datalyr.group('company_abc', { name: 'Acme Inc', plan: 'enterprise' });
+```
+
+#### `reset()`
+
+Clear user identity and start a new session. The anonymous ID is preserved.
 
 ```javascript
 datalyr.reset();
 ```
 
-This:
-- Clears the user ID
-- Starts a new session
-- Keeps the anonymous ID (same browser)
+#### `getAnonymousId()`
+
+Returns the persistent anonymous ID assigned on first visit.
+
+```typescript
+getAnonymousId(): string
+```
+
+#### `getUserId()`
+
+Returns the current user ID set by `identify()`, or `null` if not identified.
+
+```typescript
+getUserId(): string | null
+```
+
+#### `getDistinctId()`
+
+Returns the distinct ID. This is `userId` if identified, otherwise `anonymousId`.
+
+```typescript
+getDistinctId(): string
+```
 
 ---
 
-## Attribution
+### Session
 
-### Automatic Capture
+#### `getSessionId()`
 
-The SDK captures attribution from URLs and referrers:
+Returns the current session ID.
 
-```javascript
-const attribution = datalyr.getAttributionData();
+```typescript
+getSessionId(): string
 ```
 
-Captured parameters:
+#### `startNewSession()`
+
+Force-start a new session. Returns the new session ID.
+
+```typescript
+startNewSession(): string
+```
+
+```javascript
+const newSessionId = datalyr.startNewSession();
+```
+
+#### `getSessionData()`
+
+Returns the current session metadata, or `null` if no active session.
+
+```typescript
+getSessionData(): SessionData | null
+```
+
+```typescript
+interface SessionData {
+  id: string;
+  startTime: number;
+  lastActivity: number;
+  pageViews: number;
+  events: number;
+  duration: number;
+  isActive: boolean;
+}
+```
+
+#### `ready()`
+
+Returns a promise that resolves when async initialization is complete (encryption, container loading, initial page view).
+
+```typescript
+ready(): Promise<void>
+```
+
+```javascript
+datalyr.init({ workspaceId: 'YOUR_WORKSPACE_ID' });
+await datalyr.ready();
+// Encryption is initialized, container is loaded, safe to track
+```
+
+---
+
+### Attribution
+
+#### `getAttribution()`
+
+Returns the current captured attribution data.
+
+```typescript
+getAttribution(): Attribution
+```
+
+```javascript
+const attribution = datalyr.getAttribution();
+console.log(attribution.source, attribution.medium, attribution.campaign);
+```
+
+```typescript
+interface Attribution {
+  source?: string | null;
+  medium?: string | null;
+  campaign?: string | null;
+  term?: string | null;
+  content?: string | null;
+  clickId?: string | null;
+  clickIdType?: string | null;   // 'fbclid', 'gclid', etc.
+  referrer?: string | null;
+  referrerHost?: string | null;
+  landingPage?: string | null;
+  landingPath?: string | null;
+  timestamp?: number;
+  [key: string]: any;            // Custom tracked params
+}
+```
+
+Captured automatically from URLs:
 
 | Type | Parameters |
 |------|------------|
@@ -323,217 +456,313 @@ Captured parameters:
 | Click IDs | `fbclid`, `gclid`, `ttclid`, `twclid`, `li_fat_id`, `msclkid` |
 | Referrer | `referrer`, `landing_page` |
 
-Attribution is automatically included in all events and supports:
-- First-touch attribution (90-day window)
-- Last-touch attribution
-- Customer journey tracking (up to 30 touchpoints)
+Attribution supports first-touch (90-day window), last-touch, and journey tracking.
 
-### Custom Parameters
+#### `setAttribution(attribution)`
 
-Track additional URL parameters:
+Manually set or override attribution data.
+
+```typescript
+setAttribution(attribution: Partial<Attribution>): void
+```
 
 ```javascript
-datalyr.init({
-  workspaceId: 'YOUR_WORKSPACE_ID',
-  trackedParams: ['ref', 'affiliate_id', 'promo_code']
+datalyr.setAttribution({
+  source: 'partner',
+  medium: 'referral',
+  campaign: 'spring_promo',
 });
+```
+
+#### `getJourney()`
+
+Returns the customer journey as an array of touchpoints (up to 30).
+
+```typescript
+getJourney(): TouchPoint[]
+```
+
+```typescript
+interface TouchPoint {
+  timestamp: number;
+  source?: string;
+  medium?: string;
+  campaign?: string;
+  sessionId: string;
+}
 ```
 
 ---
 
-## Web-to-App Attribution
+### Super Properties
 
-Track users who click a "Download App" button on your website and attribute their app install back to the original ad click.
+Super properties are included with every subsequent event.
 
-### How It Works
+#### `setSuperProperties(properties)`
 
-1. User clicks an ad → lands on your prelander page (web SDK loaded, captures `fbclid`, UTMs, IP)
-2. User clicks "Download App" → `trackAppDownloadClick()` fires event with full attribution
-3. User installs from App Store / Play Store
-4. First app open → mobile SDK recovers the web attribution:
-   - **Android**: Deterministic match via Play Store `referrer` URL parameter (~95% accuracy)
-   - **iOS**: IP-based match against recent web events within 24 hours (~90%+ accuracy)
+Merge properties into the super properties store.
 
-### Usage
-
-```javascript
-// On your prelander "Download" button click handler
-document.querySelector('#download-btn').addEventListener('click', () => {
-  datalyr.trackAppDownloadClick({
-    targetPlatform: 'ios',  // or 'android'
-    appStoreUrl: 'https://apps.apple.com/app/your-app/id123456789',
-  });
-});
+```typescript
+setSuperProperties(properties: Record<string, any>): void
 ```
 
-For Android, pass the Play Store URL and the SDK will automatically encode attribution params into the `referrer` parameter:
-
 ```javascript
-datalyr.trackAppDownloadClick({
-  targetPlatform: 'android',
-  appStoreUrl: 'https://play.google.com/store/apps/details?id=com.yourapp',
-});
+datalyr.setSuperProperties({ app_version: '2.1.0', environment: 'production' });
 ```
 
-The method fires a `$app_download_click` event (with all attribution data), flushes the event queue via `sendBeacon`, then redirects the user to the store URL.
+#### `unsetSuperProperty(propertyName)`
 
-### Requirements
+Remove a single super property by key.
 
-- Web SDK must be initialized on the prelander page
-- Mobile SDK (`@datalyr/react-native` or `@datalyr/swift`) must be installed in the app
-- Attribution is recovered automatically on first app launch — no additional mobile code needed
-
----
-
-## Event Queue
-
-Events are batched for efficiency.
-
-### Configuration
-
-```javascript
-datalyr.init({
-  workspaceId: 'YOUR_WORKSPACE_ID',
-  batchSize: 10,           // Send when 10 events queued
-  flushInterval: 5000,     // Or every 5 seconds
-});
+```typescript
+unsetSuperProperty(propertyName: string): void
 ```
 
-### Manual Flush
-
-Send all queued events immediately:
-
 ```javascript
-await datalyr.flush();
+datalyr.unsetSuperProperty('environment');
 ```
 
-### Priority Events
+#### `getSuperProperties()`
 
-Important events like `Purchase`, `Signup`, and `Subscribe` are automatically prioritized for faster delivery.
+Returns a copy of the current super properties.
 
----
-
-## Offline Support
-
-When the browser is offline:
-- Events are stored locally
-- Queue persists across page refreshes
-- Events are sent when connectivity returns
-
-```javascript
-// Events work seamlessly offline
-datalyr.track('Button Clicked'); // Automatically queued if offline
-
-// Manually flush when ready
-await datalyr.flush();
+```typescript
+getSuperProperties(): Record<string, any>
 ```
 
 ---
 
-## Privacy and Consent
+### Privacy and Consent
 
-### Opt Out
+#### `optOut()`
+
+Opt the user out of all tracking. Clears the event queue and persists the preference in a cookie.
 
 ```javascript
-// Opt user out of tracking
 datalyr.optOut();
-
-// Opt user back in
-datalyr.optIn();
-
-// Check status
-const isOptedOut = datalyr.isOptedOut();
 ```
 
-### Consent Preferences
+#### `optIn()`
+
+Opt the user back in.
+
+```javascript
+datalyr.optIn();
+```
+
+#### `isOptedOut()`
+
+Returns `true` if the user has opted out.
+
+```typescript
+isOptedOut(): boolean
+```
+
+#### `setConsent(consent)`
+
+Set granular consent preferences.
+
+```typescript
+setConsent(consent: ConsentConfig): void
+```
 
 ```javascript
 datalyr.setConsent({
   analytics: true,
   marketing: false,
   preferences: true,
-  sale: false  // CCPA "Do Not Sell"
+  sale: false       // CCPA "Do Not Sell"
 });
 ```
 
-### Privacy Modes
+```typescript
+interface ConsentConfig {
+  analytics?: boolean;
+  marketing?: boolean;
+  preferences?: boolean;
+  sale?: boolean;
+}
+```
+
+#### Privacy Modes
 
 ```javascript
-// Standard mode (default)
-datalyr.init({
-  workspaceId: 'YOUR_WORKSPACE_ID',
-  privacyMode: 'standard'
-});
+// Standard mode (default) - normal fingerprinting + tracking
+datalyr.init({ workspaceId: '...', privacyMode: 'standard' });
 
-// Strict mode - minimal data collection
-datalyr.init({
-  workspaceId: 'YOUR_WORKSPACE_ID',
-  privacyMode: 'strict'
-});
+// Strict mode - minimal data collection, no fingerprinting
+datalyr.init({ workspaceId: '...', privacyMode: 'strict' });
 ```
+
+The SDK also respects `respectDoNotTrack` and `respectGlobalPrivacyControl` config flags.
 
 ---
 
-## SPA Support
+### Queue and Network
 
-For single-page applications:
+#### `flush()`
+
+Manually flush the event queue. Returns a promise that resolves when all queued events are sent.
+
+```typescript
+flush(): Promise<void>
+```
 
 ```javascript
-datalyr.init({
-  workspaceId: 'YOUR_WORKSPACE_ID',
-  trackSPA: true  // Auto-track route changes (default: true)
-});
-
-// Manual route tracking
-datalyr.page('Product Details', {
-  product_id: 'SKU-123'
-});
+await datalyr.flush();
 ```
+
+#### `getNetworkStatus()`
+
+Returns the current network status as tracked by the SDK.
+
+```typescript
+getNetworkStatus(): NetworkStatus
+```
+
+```typescript
+interface NetworkStatus {
+  isOnline: boolean;
+  lastOfflineAt: number | null;
+  lastOnlineAt: number | null;
+}
+```
+
+Events are automatically stored when offline and sent when connectivity returns.
 
 ---
 
-## Container Scripts
+### Container Scripts
 
 Container scripts manage third-party tracking pixels (Meta, Google, TikTok) configured in your Datalyr dashboard.
 
-### Script Tag Installation
+#### `loadScript(scriptId)`
 
-For container scripts, use the container endpoint:
+Trigger a container script by ID.
+
+```typescript
+loadScript(scriptId: string): void
+```
+
+```javascript
+datalyr.loadScript('custom-script-id');
+```
+
+#### `getLoadedScripts()`
+
+Returns an array of loaded script IDs.
+
+```typescript
+getLoadedScripts(): string[]
+```
+
+Container script tag installation (loads pixels from your dashboard config):
 
 ```html
 <script defer src="https://track.datalyr.com/container.js"
         data-workspace-id="YOUR_WORKSPACE_ID"></script>
 ```
 
-This loads your configured pixels and tracking scripts automatically.
+---
 
-### NPM SDK with Containers
+### Debugging
+
+#### `getErrors()`
+
+Returns an array of SDK errors (up to 50 most recent).
+
+```typescript
+getErrors(): ErrorInfo[]
+```
+
+```typescript
+interface ErrorInfo {
+  message: string;
+  stack?: string;
+  context?: any;
+  timestamp: string;
+  url: string;
+}
+```
+
+```javascript
+console.log(datalyr.getErrors());
+```
+
+Enable `debug: true` in config to log all SDK activity to the console.
+
+---
+
+### Lifecycle
+
+#### `destroy()`
+
+Tear down the SDK instance. Restores patched `history.pushState` / `replaceState`, removes event listeners, cleans up the queue, session, container iframes, auto-identify listeners, and encryption keys. Resets all in-memory state.
+
+```typescript
+destroy(): void
+```
+
+```javascript
+datalyr.destroy();
+```
+
+---
+
+## Web-to-App Attribution
+
+Track users who click a "Download App" button on your website and attribute their app install back to the original web session.
+
+### Flow
+
+1. User clicks an ad and lands on your page (web SDK captures `fbclid`, UTMs, etc.)
+2. User clicks "Download App" -- `trackAppDownloadClick()` fires with full attribution
+3. User installs from App Store / Play Store
+4. First app open -- mobile SDK recovers the web attribution:
+   - **Android**: Deterministic match via Play Store `referrer` parameter (~95% accuracy)
+   - **iOS**: IP-based match against recent web events within 24 hours (~90%+ accuracy)
+
+### Usage
+
+```javascript
+document.querySelector('#download-btn').addEventListener('click', () => {
+  datalyr.trackAppDownloadClick({
+    targetPlatform: 'ios',
+    appStoreUrl: 'https://apps.apple.com/app/your-app/id123456789',
+  });
+});
+```
+
+```javascript
+// Android - attribution params auto-encoded into Play Store referrer
+datalyr.trackAppDownloadClick({
+  targetPlatform: 'android',
+  appStoreUrl: 'https://play.google.com/store/apps/details?id=com.yourapp',
+});
+```
+
+### Requirements
+
+- Web SDK initialized on the prelander page
+- Mobile SDK (`@datalyr/react-native` or `@datalyr/swift`) installed in the app
+- Attribution is recovered automatically on first app launch
+
+---
+
+## SPA Support
+
+Route changes are tracked automatically when `trackSPA: true` (the default). The SDK patches `history.pushState`, `history.replaceState`, and listens for `popstate` and `hashchange` events. Attribution cache is cleared on each navigation so new URL parameters are captured.
 
 ```javascript
 datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
-  enableContainer: true  // Default: true
+  trackSPA: true,        // default
+  trackPageViews: true,  // auto-track initial page view, default
 });
 
-// Manually trigger a script
-datalyr.loadScript('custom-script-id');
-
-// Get loaded scripts
-const scripts = datalyr.getLoadedScripts();
+// Manual page tracking
+datalyr.page({ title: 'Product Details', product_id: 'SKU-123' });
 ```
-
-### Supported Pixels
-
-- Meta (Facebook) Pixel
-- Google Analytics / Google Ads
-- TikTok Pixel
-- Custom scripts and tracking pixels
-
-Security features:
-- HTTPS-only script loading
-- XSS protection
-- URL validation
-- CSP nonce support
 
 ---
 
@@ -547,13 +776,11 @@ import datalyr from '@datalyr/web';
 
 function App() {
   useEffect(() => {
-    datalyr.init({
-      workspaceId: 'YOUR_WORKSPACE_ID'
-    });
+    datalyr.init({ workspaceId: 'YOUR_WORKSPACE_ID' });
   }, []);
 
   const handleClick = () => {
-    datalyr.track('Button Clicked', { button_name: 'CTA' });
+    datalyr.track('button_clicked', { button_name: 'CTA' });
   };
 
   return <button onClick={handleClick}>Click Me</button>;
@@ -568,13 +795,11 @@ import { onMounted } from 'vue';
 import datalyr from '@datalyr/web';
 
 onMounted(() => {
-  datalyr.init({
-    workspaceId: 'YOUR_WORKSPACE_ID'
-  });
+  datalyr.init({ workspaceId: 'YOUR_WORKSPACE_ID' });
 });
 
 const trackClick = () => {
-  datalyr.track('Button Clicked');
+  datalyr.track('button_clicked');
 };
 </script>
 
@@ -585,34 +810,32 @@ const trackClick = () => {
 
 ### Next.js
 
-```jsx
+```tsx
 // app/providers.tsx
 'use client';
 
 import { useEffect } from 'react';
 import datalyr from '@datalyr/web';
 
-export function AnalyticsProvider({ children }) {
+export function AnalyticsProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     datalyr.init({
-      workspaceId: process.env.NEXT_PUBLIC_DATALYR_WORKSPACE_ID,
-      debug: process.env.NODE_ENV === 'development'
+      workspaceId: process.env.NEXT_PUBLIC_DATALYR_WORKSPACE_ID!,
+      debug: process.env.NODE_ENV === 'development',
     });
   }, []);
 
-  return children;
+  return <>{children}</>;
 }
 
 // app/layout.tsx
 import { AnalyticsProvider } from './providers';
 
-export default function RootLayout({ children }) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html>
       <body>
-        <AnalyticsProvider>
-          {children}
-        </AnalyticsProvider>
+        <AnalyticsProvider>{children}</AnalyticsProvider>
       </body>
     </html>
   );
@@ -623,26 +846,56 @@ export default function RootLayout({ children }) {
 
 ## TypeScript
 
-```typescript
-import datalyr, { EventProperties, UserTraits } from '@datalyr/web';
+All types are exported from the package:
 
-// Type-safe event properties
+```typescript
+import datalyr from '@datalyr/web';
+import type {
+  DatalyrConfig,
+  EventProperties,
+  UserTraits,
+  PageProperties,
+  SessionData,
+  Attribution,
+  TouchPoint,
+  ConsentConfig,
+  DatalyrPlugin,
+  FingerprintData,
+  IngestEventPayload,
+  IngestBatchPayload,
+  NetworkStatus,
+  ErrorInfo,
+  PerformanceMetrics,
+} from '@datalyr/web';
+```
+
+```typescript
 const properties: EventProperties = {
   product_id: 'SKU-123',
   price: 99.99,
-  quantity: 2
+  quantity: 2,
 };
+datalyr.track('product_added', properties);
 
-datalyr.track('Product Added', properties);
-
-// Type-safe user traits
 const traits: UserTraits = {
   email: 'user@example.com',
   name: 'John Doe',
-  plan: 'premium'
+  plan: 'premium',
 };
-
 datalyr.identify('user_123', traits);
+```
+
+### Plugin Interface
+
+```typescript
+interface DatalyrPlugin {
+  name: string;
+  initialize(datalyr: any): void;
+  page?(properties: PageProperties): void;
+  track?(eventName: string, properties: EventProperties): void;
+  identify?(userId: string, traits: UserTraits): void;
+  loaded?(): void;
+}
 ```
 
 ---
@@ -651,49 +904,51 @@ datalyr.identify('user_123', traits);
 
 ### Events not appearing
 
-1. Check workspace ID is correct
-2. Enable `debug: true`
-3. Verify `datalyr.getAnonymousId()` returns a value
-4. Check Network tab for requests to `ingest.datalyr.com`
-5. Disable ad blockers
+1. Verify `workspaceId` is correct.
+2. Set `debug: true` and check the console.
+3. Confirm `datalyr.getAnonymousId()` returns a value.
+4. Check the Network tab for requests to `ingest.datalyr.com`.
+5. Disable ad blockers or privacy extensions.
 
 ### SDK not initialized
 
 ```javascript
-// Check initialization
 console.log('Anonymous ID:', datalyr.getAnonymousId());
 console.log('Session ID:', datalyr.getSessionId());
+console.log('User ID:', datalyr.getUserId());
+console.log('Network:', datalyr.getNetworkStatus());
 console.log('Errors:', datalyr.getErrors());
 ```
 
-If these return `undefined`, the SDK isn't initialized.
+If these return `undefined`, the SDK is not initialized. Call `datalyr.init()` first.
 
-### Next.js SSR issues
+### Async initialization
 
-Make sure you're calling SDK methods client-side only:
+`init()` returns synchronously, but encryption and container loading happen asynchronously. If you need to ensure everything is ready before tracking:
+
+```javascript
+datalyr.init({ workspaceId: '...' });
+await datalyr.ready();
+datalyr.track('post_init_event');
+```
+
+### Next.js SSR
+
+SDK methods only work in the browser. Always call them inside `useEffect` or other client-side hooks:
 
 ```jsx
 'use client';
-
 import { useEffect } from 'react';
 import datalyr from '@datalyr/web';
 
 useEffect(() => {
-  // SDK methods only work in browser
   datalyr.init({ workspaceId: '...' });
 }, []);
 ```
 
 ### Script tag vs NPM
 
-Choose one installation method. Using both causes conflicts.
-
-| Feature | Script Tag | NPM |
-|---------|-----------|-----|
-| Bundle Size | 0 (external) | ~15KB |
-| TypeScript | No | Yes |
-| Access | `window.datalyr` | `import datalyr` |
-| Initialize | Automatic | `datalyr.init()` |
+Use one installation method, not both. Using both creates duplicate instances.
 
 ---
 
