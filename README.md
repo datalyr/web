@@ -1,6 +1,6 @@
 # @datalyr/web
 
-Browser SDK for event tracking, user identity, and attribution. Version 1.3.0.
+Browser SDK for event tracking, user identity, and attribution. Version 1.4.0.
 
 ## Table of Contents
 
@@ -116,7 +116,7 @@ Every event includes:
   workspace_id: 'wk_xxxxx',
   source: 'web',
   timestamp: '2024-01-15T10:30:00Z',
-  sdk_version: '1.3.0',
+  sdk_version: '1.4.0',
   sdk_name: 'datalyr-web-sdk'
 }
 ```
