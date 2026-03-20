@@ -256,7 +256,7 @@ datalyr.screen('Dashboard');
 datalyr.screen('Product Details', { product_id: 'SKU123' });
 ```
 
-Internally fires a `screen_view` event with `screen_name` set.
+Internally fires a `pageview` event with the `screen` property set.
 
 #### `trackAppDownloadClick(options)`
 

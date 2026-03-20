@@ -469,11 +469,13 @@ class Datalyr {
   }
 
   /**
-   * Track a screen view (for SPAs)
+   * Track a screen view (for SPAs).
+   * Fires a `pageview` event with a `screen` property, consistent with
+   * the React Native and iOS SDKs.
    */
   screen(screenName: string, properties: Record<string, any> = {}): void {
-    this.track('screen_view', {
-      screen_name: screenName,
+    this.track('pageview', {
+      screen: screenName,
       ...properties
     });
   }
