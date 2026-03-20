@@ -474,6 +474,12 @@ class Datalyr {
    * the React Native and iOS SDKs.
    */
   screen(screenName: string, properties: Record<string, any> = {}): void {
+    if (!this.initialized) {
+      console.warn('[Datalyr] SDK not initialized. Call init() first.');
+      return;
+    }
+    if (!this.shouldTrack()) return;
+
     this.track('pageview', {
       screen: screenName,
       ...properties
