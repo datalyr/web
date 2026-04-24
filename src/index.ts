@@ -535,6 +535,60 @@ class Datalyr {
   }
 
   /**
+   * Get the current visitor ID (alias for getAnonymousId).
+   * Matches the `visitor_id` terminology used in the dashboard, schema,
+   * and integration guides — pass this to Stripe's `client_reference_id`
+   * or webhook metadata for first-party attribution.
+   */
+  getVisitorId(): string {
+    return this.identity.getAnonymousId();
+  }
+
+  /**
+   * Returns a metadata bundle ready to pass to Stripe so the webhook can
+   * deterministically link the payment back to this browser session (90%+
+   * attribution match vs. 70-85% email-only).
+   *
+   * Usage (Stripe Checkout Session):
+   *   stripe.checkout.sessions.create({
+   *     ...datalyr.getStripeMetadata(),
+   *     line_items: [...],
+   *   })
+   *
+   * Usage (PaymentIntent / Subscription / Customer):
+   *   stripe.paymentIntents.create({
+   *     amount, currency,
+   *     metadata: datalyr.getStripeMetadata().metadata,
+   *   })
+   *
+   * The server-side Datalyr webhook reads `client_reference_id` on Checkout
+   * and `metadata.visitor_id` on every other Stripe object.
+   */
+  getStripeMetadata(): { client_reference_id: string; metadata: { visitor_id: string } } {
+    const visitorId = this.identity.getAnonymousId();
+    return {
+      client_reference_id: visitorId,
+      metadata: { visitor_id: visitorId },
+    };
+  }
+
+  /**
+   * Returns a metadata object ready to attach to a Whop checkout configuration.
+   * Whop inherits checkout-configuration metadata onto payments and memberships
+   * (https://docs.whop.com/api-reference/checkout-configurations/), so Datalyr
+   * can read `metadata.visitor_id` off every resulting webhook event.
+   *
+   * Usage:
+   *   whop.checkoutConfigurations.create({
+   *     plan_id,
+   *     metadata: datalyr.getWhopCheckoutMetadata(),
+   *   })
+   */
+  getWhopCheckoutMetadata(): { visitor_id: string } {
+    return { visitor_id: this.identity.getAnonymousId() };
+  }
+
+  /**
    * Get the current user ID
    */
   getUserId(): string | null {
