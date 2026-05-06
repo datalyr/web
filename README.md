@@ -438,7 +438,7 @@ interface Attribution {
   term?: string | null;
   content?: string | null;
   clickId?: string | null;
-  clickIdType?: string | null;   // 'fbclid', 'gclid', etc.
+  clickIdType?: string | null;   // 'fbclid', 'gclid', 'oppref', etc.
   referrer?: string | null;
   referrerHost?: string | null;
   landingPage?: string | null;
@@ -453,7 +453,7 @@ Captured automatically from URLs:
 | Type | Parameters |
 |------|------------|
 | UTM | `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term` |
-| Click IDs | `fbclid`, `gclid`, `ttclid`, `twclid`, `li_fat_id`, `msclkid` |
+| Click IDs | `fbclid`, `gclid`, `ttclid`, `oppref`, `twclid`, `li_fat_id`, `msclkid` |
 | Referrer | `referrer`, `landing_page` |
 
 Attribution supports first-touch (90-day window), last-touch, and journey tracking.
