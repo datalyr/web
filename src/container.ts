@@ -613,7 +613,14 @@ export class ContainerManager {
           contact: 'Contact',
           schedule: 'Schedule',
         };
-        const metaEvent = metaEventMap[String(eventName).toLowerCase()] || sanitizedEventName;
+        // Source of truth: the workspace's Meta conversion-rule map (from
+        // /container-scripts, keyed by the exact trigger event name) — this is what
+        // the server-side CAPI sends, so it guarantees event_name dedup alignment.
+        // Fall back to the static default map, then the sanitized raw name.
+        const ruleEventMap = (this.pixels?.meta as any)?.event_mappings as Record<string, string> | undefined;
+        const metaEvent = ruleEventMap?.[eventName]
+          || metaEventMap[String(eventName).toLowerCase()]
+          || sanitizedEventName;
 
         // Pass the shared eventID so this Pixel event dedupes against the
         // server-side CAPI event carrying the same event_id.
