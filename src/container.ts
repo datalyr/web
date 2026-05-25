@@ -580,6 +580,11 @@ export class ContainerManager {
    * Track event to all initialized pixels
    */
   trackToPixels(eventName: string, properties: any = {}, eventId?: string): void {
+    // Datalyr-internal events ($identify, $group, $alias, $auto_identify,
+    // $app_download_click, …) are not conversions — never forward them to ad
+    // pixels. (Previously they fired as noise custom events with the $ stripped.)
+    if (eventName.startsWith('$')) return;
+
     // Sanitize inputs to prevent XSS
     const sanitizedEventName = this.sanitizeEventName(eventName);
     const sanitizedProperties = this.sanitizeProperties(properties);
