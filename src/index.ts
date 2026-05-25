@@ -279,15 +279,22 @@ class Datalyr {
       // Update session activity
       this.session.updateActivity(eventName);
 
+      // Generate the event_id ONCE here so the same value is used for both the
+      // ingested event (→ CAPI dedup key in the postback worker) and the browser
+      // Meta Pixel co-fire below. Sharing it is what lets Meta dedupe the Pixel
+      // event against the server-side CAPI event (dedup = event_id + event_name).
+      const eventId = generateUUID();
+
       // Create event payload
-      const payload = this.createEventPayload(eventName, properties);
+      const payload = this.createEventPayload(eventName, properties, eventId);
 
       // Queue event
       this.queue.enqueue(payload);
 
-      // Track to third-party pixels if container is initialized
+      // Track to third-party pixels if container is initialized.
+      // Pass the shared eventId so the Meta Pixel fires with the same { eventID }.
       if (this.container) {
-        this.container.trackToPixels(eventName, properties);
+        this.container.trackToPixels(eventName, properties, eventId);
       }
 
       // Call plugin handlers
@@ -723,7 +730,7 @@ class Datalyr {
   /**
    * Create event payload
    */
-  private createEventPayload(eventName: string, properties: Record<string, any>): IngestEventPayload {
+  private createEventPayload(eventName: string, properties: Record<string, any>, eventIdArg?: string): IngestEventPayload {
     // Sanitize and merge properties
     const sanitizedProperties = sanitizeEventData(properties);
     const eventData = deepMerge(
@@ -762,7 +769,9 @@ class Datalyr {
 
     // Create payload using snake_case only (matches backend API and production script)
     const identityFields = this.identity.getIdentityFields();
-    const eventId = generateUUID();
+    // Use the caller-provided event_id (shared with the Meta Pixel co-fire for
+    // dedup); fall back to a fresh UUID for any direct caller that omits it.
+    const eventId = eventIdArg ?? generateUUID();
 
     // Ensure we have all required identity fields
     const distinctId = identityFields.distinct_id;
