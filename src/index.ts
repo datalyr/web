@@ -860,8 +860,8 @@ class Datalyr {
       resolution_method: 'browser_sdk',
       resolution_confidence: 1.0,
 
-      // SDK metadata
-      sdk_version: '1.4.1',
+      // SDK metadata (keep in sync with package.json version)
+      sdk_version: '1.6.0',
       sdk_name: 'datalyr-web-sdk'
     };
 
