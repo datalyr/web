@@ -490,10 +490,13 @@ export class ContainerManager {
         s.parentNode.insertBefore(t, s);
       })(window, document, 'script', 'https://connect.facebook.net/en_US/fbevents.js');
       
-      // Initialize pixel
+      // Initialize pixel only — do NOT fire PageView here. The SDK's own pageview
+      // tracking (track('pageview')) routes through trackToPixels and fires a single
+      // mapped PageView with a shared eventID. Firing it again here produced TWO
+      // PageViews per load (one un-deduped). Note: if the host app disables pageview
+      // tracking entirely, no PageView is sent — which is the correct outcome.
       (window as any).fbq('init', config.pixel_id);
-      (window as any).fbq('track', 'PageView');
-      
+
       this.log('Meta Pixel initialized:', config.pixel_id);
     } catch (error) {
       this.log('Error initializing Meta Pixel:', error);
@@ -576,7 +579,12 @@ export class ContainerManager {
   /**
    * Track event to all initialized pixels
    */
-  trackToPixels(eventName: string, properties: any = {}): void {
+  trackToPixels(eventName: string, properties: any = {}, eventId?: string): void {
+    // Datalyr-internal events ($identify, $group, $alias, $auto_identify,
+    // $app_download_click, …) are not conversions — never forward them to ad
+    // pixels. (Previously they fired as noise custom events with the $ stripped.)
+    if (eventName.startsWith('$')) return;
+
     // Sanitize inputs to prevent XSS
     const sanitizedEventName = this.sanitizeEventName(eventName);
     const sanitizedProperties = this.sanitizeProperties(properties);
@@ -584,7 +592,43 @@ export class ContainerManager {
     // Track to Meta Pixel
     if (this.pixels?.meta?.enabled && (window as any).fbq) {
       try {
-        (window as any).fbq('track', sanitizedEventName, sanitizedProperties);
+        // Map our event name to Meta's standard event vocabulary so the browser
+        // Pixel fires e.g. "Purchase", not "purchase". This MUST match the
+        // platform_standard_event the postback worker sends server-side, or Meta
+        // won't dedupe (dedup = event_name + event_id). These defaults mirror the
+        // server-side auto-detect map; custom rule choices may not line up.
+        const metaEventMap: Record<string, string> = {
+          page_view: 'PageView', pageview: 'PageView',
+          view_content: 'ViewContent', product_viewed: 'ViewContent', view_item: 'ViewContent',
+          add_to_cart: 'AddToCart', product_added: 'AddToCart',
+          add_to_wishlist: 'AddToWishlist',
+          initiate_checkout: 'InitiateCheckout', begin_checkout: 'InitiateCheckout', checkout_started: 'InitiateCheckout',
+          add_payment_info: 'AddPaymentInfo',
+          purchase: 'Purchase', order_completed: 'Purchase', order_paid: 'Purchase',
+          lead: 'Lead',
+          complete_registration: 'CompleteRegistration', sign_up: 'CompleteRegistration', signup: 'CompleteRegistration',
+          search: 'Search',
+          subscribe: 'Subscribe', subscription_created: 'Subscribe',
+          start_trial: 'StartTrial', trial_started: 'StartTrial',
+          contact: 'Contact',
+          schedule: 'Schedule',
+        };
+        // Source of truth: the workspace's Meta conversion-rule map (from
+        // /container-scripts, keyed by the exact trigger event name) — this is what
+        // the server-side CAPI sends, so it guarantees event_name dedup alignment.
+        // Fall back to the static default map, then the sanitized raw name.
+        const ruleEventMap = (this.pixels?.meta as any)?.event_mappings as Record<string, string> | undefined;
+        const metaEvent = ruleEventMap?.[eventName]
+          || metaEventMap[String(eventName).toLowerCase()]
+          || sanitizedEventName;
+
+        // Pass the shared eventID so this Pixel event dedupes against the
+        // server-side CAPI event carrying the same event_id.
+        if (eventId) {
+          (window as any).fbq('track', metaEvent, sanitizedProperties, { eventID: eventId });
+        } else {
+          (window as any).fbq('track', metaEvent, sanitizedProperties);
+        }
       } catch (error) {
         this.log('Error tracking Meta Pixel event:', error);
       }

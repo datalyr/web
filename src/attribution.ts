@@ -254,10 +254,13 @@ export class AttributionManager {
       cookies.set('_fbp', adCookies._fbp, 90);
     }
     
-    // Generate _fbc if we have fbclid but no _fbc
+    // Generate _fbc if we have fbclid but no _fbc.
+    // Meta's fbc format is `fb.{subdomainIndex}.{creationTime}.{fbclid}` where
+    // creationTime is UNIX time in MILLISECONDS (matches the _fbp generation above
+    // and the real _fbc cookie the Meta Pixel writes). Do NOT use seconds here.
     const fbclid = this.getCurrentFbclid();
     if (fbclid && !adCookies._fbc) {
-      const timestamp = Math.floor(Date.now() / 1000);
+      const timestamp = Date.now();
       adCookies._fbc = `fb.1.${timestamp}.${fbclid}`;
       // Optionally set the cookie for future use
       cookies.set('_fbc', adCookies._fbc, 90);

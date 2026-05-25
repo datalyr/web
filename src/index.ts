@@ -236,6 +236,16 @@ class Datalyr {
           });
         }
 
+        // Stamp attribution signals into the Shopify cart (OPT-IN, default off).
+        // Lets server-side order webhooks recover the browser visitor + Meta click
+        // signals (the postback webhook reads these as note_attributes). Inert unless
+        // enabled; best-effort and never blocks init.
+        if (this.config.shopifyCartAttributes === true) {
+          this.syncShopifyCartAttributes().catch((error) => {
+            this.log('Shopify cart attribute sync failed:', error);
+          });
+        }
+
         // Track initial page view if enabled (AFTER encryption ready)
         if (this.config.trackPageViews) {
           this.page();
@@ -279,15 +289,22 @@ class Datalyr {
       // Update session activity
       this.session.updateActivity(eventName);
 
+      // Generate the event_id ONCE here so the same value is used for both the
+      // ingested event (→ CAPI dedup key in the postback worker) and the browser
+      // Meta Pixel co-fire below. Sharing it is what lets Meta dedupe the Pixel
+      // event against the server-side CAPI event (dedup = event_id + event_name).
+      const eventId = generateUUID();
+
       // Create event payload
-      const payload = this.createEventPayload(eventName, properties);
+      const payload = this.createEventPayload(eventName, properties, eventId);
 
       // Queue event
       this.queue.enqueue(payload);
 
-      // Track to third-party pixels if container is initialized
+      // Track to third-party pixels if container is initialized.
+      // Pass the shared eventId so the Meta Pixel fires with the same { eventID }.
       if (this.container) {
-        this.container.trackToPixels(eventName, properties);
+        this.container.trackToPixels(eventName, properties, eventId);
       }
 
       // Call plugin handlers
@@ -721,9 +738,59 @@ class Datalyr {
   }
 
   /**
+   * Stamp Datalyr attribution signals into the Shopify cart as cart attributes.
+   * Cart attributes become `order.note_attributes` with the same names, which the
+   * server-side order webhook reads to recover the browser visitor_id + Meta click
+   * signals (_fbc/_fbp/fbclid) — enabling accurate Meta CAPI attribution for orders.
+   *
+   * Opt-in (config.shopifyCartAttributes), best-effort, runs once during init.
+   * Merges via Shopify's /cart/update.js (does not clobber other cart attributes).
+   */
+  private async syncShopifyCartAttributes(): Promise<void> {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+
+    const isShopify = !!(
+      (window as any).Shopify ||
+      document.querySelector('meta[name="shopify-checkout-api-token"]') ||
+      window.location.hostname.includes(".myshopify.com")
+    );
+    if (!isShopify) return;
+
+    const attribution = this.attribution.getAttributionData();
+    const fbclid =
+      attribution.clickIdType === "fbclid" ? attribution.clickId : null;
+
+    // Cookies are freshest (the real Meta Pixel may have just written them);
+    // fall back to whatever the SDK captured in attribution.
+    const attributes: Record<string, string> = {};
+    const visitorId = this.identity.getAnonymousId();
+    const fbc = this.cookies.get("_fbc") || (attribution as any)._fbc;
+    const fbp = this.cookies.get("_fbp") || (attribution as any)._fbp;
+    if (visitorId) attributes._datalyr_visitor_id = visitorId;
+    if (fbc) attributes._datalyr_fbc = String(fbc);
+    if (fbp) attributes._datalyr_fbp = String(fbp);
+    if (fbclid) attributes._datalyr_fbclid = String(fbclid);
+
+    if (Object.keys(attributes).length === 0) return;
+
+    try {
+      await fetch("/cart/update.js", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ attributes }),
+      });
+      this.log("Shopify cart attributes stamped:", Object.keys(attributes));
+    } catch (error) {
+      // Never let cart sync affect tracking — swallow (e.g. no cart yet / CSP).
+      this.log("Shopify /cart/update.js failed:", error);
+    }
+  }
+
+  /**
    * Create event payload
    */
-  private createEventPayload(eventName: string, properties: Record<string, any>): IngestEventPayload {
+  private createEventPayload(eventName: string, properties: Record<string, any>, eventIdArg?: string): IngestEventPayload {
     // Sanitize and merge properties
     const sanitizedProperties = sanitizeEventData(properties);
     const eventData = deepMerge(
@@ -762,7 +829,9 @@ class Datalyr {
 
     // Create payload using snake_case only (matches backend API and production script)
     const identityFields = this.identity.getIdentityFields();
-    const eventId = generateUUID();
+    // Use the caller-provided event_id (shared with the Meta Pixel co-fire for
+    // dedup); fall back to a fresh UUID for any direct caller that omits it.
+    const eventId = eventIdArg ?? generateUUID();
 
     // Ensure we have all required identity fields
     const distinctId = identityFields.distinct_id;
@@ -791,8 +860,8 @@ class Datalyr {
       resolution_method: 'browser_sdk',
       resolution_confidence: 1.0,
 
-      // SDK metadata
-      sdk_version: '1.4.1',
+      // SDK metadata (keep in sync with package.json version)
+      sdk_version: '1.6.0',
       sdk_name: 'datalyr-web-sdk'
     };
 
