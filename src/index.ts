@@ -1116,5 +1116,7 @@ if (typeof window !== 'undefined') {
   (window as any).datalyr = datalyr;
 }
 
-// Export default instance
+// Export default instance (also exported by name so both
+// `import datalyr from '@datalyr/web'` and `import { datalyr } from '@datalyr/web'` work)
+export { datalyr };
 export default datalyr;
