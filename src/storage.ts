@@ -21,17 +21,22 @@ class SafeStorage implements StorageWrapper {
   private memory: Map<string, string> = new Map();
   private prefix = 'dl_';
 
-  constructor(storage: Storage) {
+  constructor(storage?: Storage) {
     // Test if storage is available
     try {
+      if (!storage) throw new Error('no storage'); // server / SSR
       const testKey = 'dl_test__' + Math.random();
       storage.setItem(testKey, '1');
       storage.removeItem(testKey);
       this.storage = storage;
     } catch {
-      // Storage not available (Safari private mode, etc.)
+      // Storage not available (server-side render, Safari private mode, etc.)
       this.storage = null;
-      console.warn('[Datalyr] Storage not available, using memory fallback');
+      // Only warn in the browser — on the server there's intentionally no
+      // storage and the SDK does no real work until init() runs client-side.
+      if (typeof window !== 'undefined') {
+        console.warn('[Datalyr] Storage not available, using memory fallback');
+      }
     }
   }
 
@@ -369,9 +374,19 @@ class CookieStorage {
   }
 }
 
-// Export singleton instances for storage
-export const storage = new SafeStorage(window.localStorage);
-export const sessionStorage = new SafeStorage(window.sessionStorage);
+// Export singleton instances for storage.
+// Guard the browser globals so importing the SDK on the server (SSR / Node)
+// doesn't throw `window is not defined`. On the server these fall back to
+// in-memory storage; real storage is wired when the module re-evaluates in the
+// browser. (Without this, any static `import` of the SDK in a Next.js client
+// component crashes server rendering.)
+const browserLocalStorage =
+  typeof window !== 'undefined' ? window.localStorage : undefined;
+const browserSessionStorage =
+  typeof window !== 'undefined' ? window.sessionStorage : undefined;
+
+export const storage = new SafeStorage(browserLocalStorage);
+export const sessionStorage = new SafeStorage(browserSessionStorage);
 
 // Export cookie class (will be instantiated with config)
 export { CookieStorage };
