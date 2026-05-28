@@ -63,6 +63,17 @@ export interface DatalyrConfig {
   autoIdentifyTrustedDomains?: string[]; // Default: [] - Additional domains to trust for API capture
   shopifyCartAttributes?: boolean;       // Default: false - On Shopify storefronts, stamp visitor_id + Meta click signals (_fbc/_fbp/fbclid) into the cart so server-side order webhooks can attribute. Opt-in; QA on a real store before enabling.
 
+  // Checkout Champ (CC) bridge.
+  // - platform: 'checkoutchamp' on a CC funnel page restores _dl_* URL params to cookies on init,
+  //   so visitor_id / fbc / fbclid arriving via the URL bridge persist across the funnel.
+  // - checkoutChampDomains: on a Shopify (or any) storefront, list of CC domains the merchant
+  //   uses for checkout. Outbound <a> links pointing at any of these get _dl_* attribution
+  //   appended automatically, and the SDK force-flushes its event queue on click.
+  // When EITHER is set, autoIdentify defaults to true (else respects caller). Explicit
+  // autoIdentify: false from the caller wins — no surprise override.
+  platform?: 'shopify' | 'checkoutchamp' | 'generic';
+  checkoutChampDomains?: string[];
+
   // Fallback endpoints for resilience
   fallbackEndpoints?: string[];         // Additional endpoints to try
 

@@ -127,6 +127,13 @@ class Datalyr {
     // Check opt-out AFTER cookies configured (Issue #14)
     this.optedOut = this.cookies.get('__dl_opt_out') === 'true';
 
+    // CC funnel page entry: restore the _dl_* URL bridge BEFORE IdentityManager
+    // initializes so the storefront's visitor_id is the one used here (instead
+    // of auto-generating a fresh one on this domain).
+    if (this.config.platform === 'checkoutchamp') {
+      this.restoreFromURL();
+    }
+
     // Initialize modules
     this.identity = new IdentityManager();
     this.session = new SessionManager(this.config.sessionTimeout);
@@ -218,6 +225,17 @@ class Datalyr {
           });
         }
 
+        // autoIdentify default for the CC bridge:
+        // - platform === 'checkoutchamp' (CC funnel pages) OR
+        // - checkoutChampDomains set (Shopify storefronts feeding a CC funnel)
+        // turn autoIdentify on unless the caller explicitly set it to false.
+        // The 95% claim relies on email capture on BOTH ends of the bridge.
+        const ccBridgeActive = this.config.platform === 'checkoutchamp'
+          || (Array.isArray(this.config.checkoutChampDomains) && this.config.checkoutChampDomains.length > 0);
+        if (ccBridgeActive && this.config.autoIdentify === undefined) {
+          this.config.autoIdentify = true;
+        }
+
         // Initialize auto-identify if explicitly enabled (opt-in)
         if (this.config.autoIdentify === true) {
           this.autoIdentify = new AutoIdentifyManager({
@@ -253,6 +271,13 @@ class Datalyr {
           this.syncShopifyCartAttributes().catch((error) => {
             this.log('Shopify cart attribute sync failed:', error);
           });
+        }
+
+        // Storefront → CC bridge: stamp _dl_* params on outbound links to the
+        // configured CC domains so visitor_id + click signals cross the domain
+        // boundary. Inert unless checkoutChampDomains is set.
+        if (Array.isArray(this.config.checkoutChampDomains) && this.config.checkoutChampDomains.length > 0) {
+          this.syncOutboundLinkParams(this.config.checkoutChampDomains);
         }
 
         // Track initial page view if enabled (AFTER encryption ready)
@@ -775,10 +800,12 @@ class Datalyr {
     const visitorId = this.identity.getAnonymousId();
     const fbc = this.cookies.get("_fbc") || (attribution as any)._fbc;
     const fbp = this.cookies.get("_fbp") || (attribution as any)._fbp;
+    const fbclidAt = this.cookies.get("_dl_fbclid_at");
     if (visitorId) attributes._datalyr_visitor_id = visitorId;
     if (fbc) attributes._datalyr_fbc = String(fbc);
     if (fbp) attributes._datalyr_fbp = String(fbp);
     if (fbclid) attributes._datalyr_fbclid = String(fbclid);
+    if (fbclidAt) attributes._datalyr_fbclid_at = String(fbclidAt);
 
     if (Object.keys(attributes).length === 0) return;
 
@@ -794,6 +821,207 @@ class Datalyr {
       // Never let cart sync affect tracking — swallow (e.g. no cart yet / CSP).
       this.log("Shopify /cart/update.js failed:", error);
     }
+  }
+
+  /**
+   * Restore _dl_* URL bridge params on a Checkout Champ funnel page.
+   * Runs BEFORE IdentityManager so the storefront's visitor_id wins over a
+   * freshly auto-generated one. Also restores _fbc / _fbp cookies and the
+   * fbclid click time so server-side rebuilds carry the real click moment.
+   *
+   * Strategy: stamp matching cookies (without clobbering pre-existing values),
+   * then rewrite the URL so `_dl_fbclid` becomes `fbclid` — that way the rest
+   * of the SDK's attribution layer (which reads `params.fbclid`) works
+   * unchanged, and any merchant analytics also see the canonical click ID.
+   */
+  private restoreFromURL(): void {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const get = (k: string) => params.get(k);
+
+      const vid = get("_dl_vid");
+      const fbc = get("_dl_fbc");
+      const fbp = get("_dl_fbp");
+      const fbclid = get("_dl_fbclid");
+      const fbclidAt = get("_dl_fbclid_at");
+      const gclid = get("_dl_gclid");
+      const gclidAt = get("_dl_gclid_at");
+
+      // visitor_id: bridge wins. The whole point of `_dl_vid` is to unify the
+      // storefront's session with the CC funnel session. A pre-existing local
+      // cookie from a prior direct CC visit would silently sink the integration
+      // (CC events stay on the local id; storefront events use the bridged id;
+      // the two never link). Overwrite — orphaned local events are fine.
+      if (vid) this.cookies.set("__dl_visitor_id", vid, 365);
+
+      // Meta cookies + click-time cookies: existing wins. _fbc / _fbp may have
+      // been written by Meta Pixel on the CC funnel page itself (more recent
+      // than the bridged value); _dl_fbclid_at should record first-touch click
+      // time per device, not get reset by a bridge from a new campaign.
+      const setIfMissing = (name: string, value: string | null) => {
+        if (!value) return;
+        if (this.cookies.get(name)) return;
+        this.cookies.set(name, value, 365);
+      };
+      setIfMissing("_fbc", fbc);
+      setIfMissing("_fbp", fbp);
+      setIfMissing("_dl_fbclid_at", fbclidAt);
+      setIfMissing("_dl_gclid_at", gclidAt);
+
+      // Rewrite URL: _dl_fbclid → fbclid (etc.) so captureAttribution() picks
+      // them up via its existing `params.fbclid` path. Strip the _dl_* params
+      // either way so they don't leak into downstream analytics URLs.
+      let rewrote = false;
+      const mappings: Array<[string, string | null]> = [
+        ["fbclid", fbclid],
+        ["gclid", gclid]
+      ];
+      for (const [canonical, value] of mappings) {
+        if (value && !params.get(canonical)) {
+          params.set(canonical, value);
+          rewrote = true;
+        }
+      }
+      for (const k of ["_dl_vid", "_dl_fbc", "_dl_fbp", "_dl_fbclid", "_dl_fbclid_at", "_dl_gclid", "_dl_gclid_at"]) {
+        if (params.has(k)) {
+          params.delete(k);
+          rewrote = true;
+        }
+      }
+      if (rewrote && typeof window.history?.replaceState === "function") {
+        const newSearch = params.toString();
+        const newUrl =
+          window.location.pathname +
+          (newSearch ? "?" + newSearch : "") +
+          window.location.hash;
+        window.history.replaceState(window.history.state, "", newUrl);
+      }
+
+      this.log("Checkout Champ bridge restored:", {
+        had_vid: !!vid,
+        had_fbc: !!fbc,
+        had_fbp: !!fbp,
+        had_fbclid: !!fbclid,
+        had_gclid: !!gclid
+      });
+    } catch (error) {
+      // Don't let bridge restoration block init — fall through to normal SDK
+      // behavior (a fresh visitor_id, no restored click signals).
+      this.log("restoreFromURL failed:", error);
+    }
+  }
+
+  /**
+   * Storefront → Checkout Champ link stamping. Finds every `<a href>` whose host
+   * matches the configured CC domain list and appends `?_dl_vid=…&_dl_fbc=…&
+   * _dl_fbp=…&_dl_fbclid=…&_dl_fbclid_at=…&_dl_gclid=…` so the user's
+   * visitor_id + Meta click signals cross the domain. MutationObserver watches
+   * for dynamically-injected links. On click, force-flush the event queue so
+   * any pending track() events land before the browser navigates away.
+   */
+  private syncOutboundLinkParams(domains: string[]): void {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+
+    const lowerDomains = domains.map((d) => d.toLowerCase());
+    const matchesCcDomain = (href: string): boolean => {
+      try {
+        const host = new URL(href, window.location.href).hostname.toLowerCase();
+        return lowerDomains.some((d) => host === d || host.endsWith("." + d));
+      } catch {
+        return false;
+      }
+    };
+
+    const buildBridgeParams = (): Record<string, string> => {
+      const attribution = this.attribution.getAttributionData();
+      const out: Record<string, string> = {};
+      const vid = this.identity.getAnonymousId();
+      const fbc = this.cookies.get("_fbc") || (attribution as any)._fbc;
+      const fbp = this.cookies.get("_fbp") || (attribution as any)._fbp;
+      const fbclid = attribution.clickIdType === "fbclid" ? attribution.clickId : null;
+      const fbclidAt = this.cookies.get("_dl_fbclid_at");
+      const gclid = attribution.clickIdType === "gclid" ? attribution.clickId : null;
+      const gclidAt = this.cookies.get("_dl_gclid_at");
+      if (vid) out._dl_vid = vid;
+      if (fbc) out._dl_fbc = String(fbc);
+      if (fbp) out._dl_fbp = String(fbp);
+      if (fbclid) out._dl_fbclid = String(fbclid);
+      if (fbclidAt) out._dl_fbclid_at = String(fbclidAt);
+      if (gclid) out._dl_gclid = String(gclid);
+      if (gclidAt) out._dl_gclid_at = String(gclidAt);
+      return out;
+    };
+
+    const stampLink = (anchor: HTMLAnchorElement) => {
+      if (!anchor.href || !matchesCcDomain(anchor.href)) return;
+      try {
+        const u = new URL(anchor.href, window.location.href);
+        const bridge = buildBridgeParams();
+        let mutated = false;
+        for (const [k, v] of Object.entries(bridge)) {
+          if (!u.searchParams.get(k)) {
+            u.searchParams.set(k, v);
+            mutated = true;
+          }
+        }
+        if (mutated) anchor.href = u.toString();
+      } catch {
+        // Ignore malformed URLs — don't break the page.
+      }
+    };
+
+    const stampAll = () => {
+      document.querySelectorAll("a[href]").forEach((el) => stampLink(el as HTMLAnchorElement));
+    };
+
+    const onClick = (e: Event) => {
+      const target = (e.target as Element | null)?.closest("a[href]");
+      if (!target) return;
+      const anchor = target as HTMLAnchorElement;
+      if (!matchesCcDomain(anchor.href)) return;
+      stampLink(anchor); // re-stamp in case attribution changed since DOMReady
+      try {
+        this.queue?.flush();
+      } catch {
+        // Best-effort — never block navigation.
+      }
+    };
+
+    stampAll();
+    document.addEventListener("click", onClick, true);
+
+    try {
+      // Debounce re-stamping. A busy SPA (infinite scroll, animations,
+      // React/Vue updates) can fire thousands of mutations per second; a naive
+      // re-stamp on every notification would burn CPU pointlessly when
+      // outbound link sets only change occasionally. 150ms is small enough to
+      // catch links before the user can click them, large enough to coalesce
+      // bursts.
+      let restampTimer: ReturnType<typeof setTimeout> | null = null;
+      const scheduleRestamp = () => {
+        if (restampTimer != null) return;
+        restampTimer = setTimeout(() => {
+          restampTimer = null;
+          stampAll();
+        }, 150);
+      };
+      const observer = new MutationObserver(scheduleRestamp);
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+
+      // Observer + click listener live for the session; pagehide cleans up on
+      // full-page unload. SPA route changes are fine — we WANT stamping to keep
+      // working across virtual navigations.
+      window.addEventListener("pagehide", () => {
+        try { observer.disconnect(); } catch { /* idempotent */ }
+        if (restampTimer != null) clearTimeout(restampTimer);
+        document.removeEventListener("click", onClick, true);
+      }, { once: true });
+    } catch (error) {
+      this.log("MutationObserver setup failed (CC link sync):", error);
+    }
+
+    this.log("Checkout Champ outbound-link sync active for:", lowerDomains);
   }
 
   /**

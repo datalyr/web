@@ -253,14 +253,31 @@ export class AttributionManager {
       // Optionally set the cookie for future use
       cookies.set('_fbp', adCookies._fbp, 90);
     }
-    
+
+    // Persist the click time the FIRST time we see fbclid/gclid in URL so we can
+    // rebuild fbc (and stamp real click time on server-side events) later even
+    // when _fbc/_gclid cookies get evicted. Once-only: never overwrite.
+    const fbclid = this.getCurrentFbclid();
+    if (fbclid && !cookies.get('_dl_fbclid_at')) {
+      cookies.set('_dl_fbclid_at', String(Date.now()), 90);
+    }
+    const gclid = this.hasClickId('gclid') ? (this.queryParamsCache?.gclid ?? null) : null;
+    if (gclid && !cookies.get('_dl_gclid_at')) {
+      cookies.set('_dl_gclid_at', String(Date.now()), 90);
+    }
+
     // Generate _fbc if we have fbclid but no _fbc.
     // Meta's fbc format is `fb.{subdomainIndex}.{creationTime}.{fbclid}` where
     // creationTime is UNIX time in MILLISECONDS (matches the _fbp generation above
     // and the real _fbc cookie the Meta Pixel writes). Do NOT use seconds here.
-    const fbclid = this.getCurrentFbclid();
     if (fbclid && !adCookies._fbc) {
-      const timestamp = Date.now();
+      // Prefer the persisted click time when valid; fall back to now if the
+      // cookie is missing or corrupted (e.g. user edited it to garbage).
+      // Without this guard, Number("abc") = NaN and Meta would reject
+      // `fb.1.NaN.{fbclid}`.
+      const stored = cookies.get('_dl_fbclid_at');
+      const parsed = stored ? Number(stored) : NaN;
+      const timestamp = Number.isFinite(parsed) && parsed > 0 ? parsed : Date.now();
       adCookies._fbc = `fb.1.${timestamp}.${fbclid}`;
       // Optionally set the cookie for future use
       cookies.set('_fbc', adCookies._fbc, 90);
