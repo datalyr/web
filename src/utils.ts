@@ -3,19 +3,23 @@
  */
 
 /**
- * SHA-256 hex digest of a UTF-8 string. Used to align the browser Meta Pixel's
- * advanced-matching `external_id` / `em` with what CAPI sends server-side —
- * Meta dedupes / matches on identical hashes across both surfaces.
+ * SHA-256 hex digest aligned with the worker's CAPI hashing (cloudflare/
+ * postback/core/utils.js `sha256()`). Always lowercases + trims the input
+ * before hashing — Meta's matching requires byte-for-byte identical hashes
+ * on the Pixel side and the CAPI server side, and the worker uniformly
+ * normalizes everything it hashes (em, ph, fn, ln, external_id, etc).
  *
- * Matches the worker's `sha256()` in cloudflare/postback/core/utils.js (lowercase
- * hex of SHA-256(utf-8 bytes)). Returns null when Web Crypto isn't available
- * (e.g. very old browsers, or non-secure contexts) so callers can gracefully
- * skip advanced matching rather than throwing.
+ * Pixel-side hashes that don't match CAPI hashes silently fail to dedupe,
+ * which is why this helper does the normalization for callers — easy to
+ * forget, hard to debug after release. Returns null when Web Crypto isn't
+ * available (very old browsers, non-secure contexts) so callers can
+ * gracefully skip advanced matching rather than throwing.
  */
 export async function sha256Hex(input: string): Promise<string | null> {
   if (typeof crypto === 'undefined' || !crypto.subtle) return null;
+  if (!input) return null;
   try {
-    const bytes = new TextEncoder().encode(input);
+    const bytes = new TextEncoder().encode(input.toLowerCase().trim());
     const digest = await crypto.subtle.digest('SHA-256', bytes);
     return Array.from(new Uint8Array(digest))
       .map((b) => b.toString(16).padStart(2, '0'))
