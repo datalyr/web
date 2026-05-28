@@ -870,7 +870,7 @@ class Datalyr {
       resolution_confidence: 1.0,
 
       // SDK metadata (keep in sync with package.json version)
-      sdk_version: '1.6.0',
+      sdk_version: '1.6.3',
       sdk_name: 'datalyr-web-sdk'
     };
 
