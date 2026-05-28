@@ -200,7 +200,16 @@ class Datalyr {
           this.container = new ContainerManager({
             workspaceId: this.config.workspaceId,
             endpoint: this.config.endpoint,
-            debug: this.config.debug
+            debug: this.config.debug,
+            // Lazy: invoked at the moment a third-party pixel inits, AFTER the
+            // /container-scripts roundtrip resolves — so a pre-init identify()
+            // already updated this.identity / this.userProperties. distinctId
+            // mirrors what CAPI puts in external_id[] (user_id || anonymous_id);
+            // email lets the Pixel match on em with the same hash CAPI sends.
+            getIdentity: () => ({
+              externalId: this.identity?.getDistinctId(),
+              email: this.userProperties?.email,
+            })
           });
 
           // Initialize container asynchronously

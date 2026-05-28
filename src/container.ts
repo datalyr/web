@@ -4,6 +4,22 @@
  */
 
 import { storage } from './storage';
+import { sha256Hex } from './utils';
+
+/**
+ * Identity snapshot read at the moment a third-party pixel initializes.
+ * Aligns the browser Pixel's advanced matching with what CAPI sends server-side
+ * (meta.js shovels all of {user_id, visitor_id, anonymous_id} into the CAPI
+ * external_id array) — so any one of those hashes coincides between surfaces.
+ *
+ * `externalId` should be the SDK's distinct_id (user_id when identified, else
+ * anonymous_id). `email` is only populated after identify(); when present, lets
+ * the Pixel match on `em` too.
+ */
+export interface PixelIdentity {
+  externalId?: string | null;
+  email?: string | null;
+}
 
 export interface ContainerScript {
   id: string;
@@ -55,16 +71,23 @@ export class ContainerManager {
   private sandboxedIframes: HTMLIFrameElement[] = []; // FIXED (ISSUE-02): Track iframes for cleanup
   private iframeCleanupTimeouts = new Map<HTMLIFrameElement, number>(); // FIXED (ISSUE-02): Track cleanup timeouts
   private messageHandler: ((event: MessageEvent) => void) | null = null; // FIXED (ISSUE-02): Track message listener
+  // Lazy identity getter so the Pixel can read the SDK's distinct_id / email at
+  // the moment of fbq('init'), after the /container-scripts roundtrip has
+  // resolved and after any pre-init identify() has updated user state. Reading
+  // through a callback avoids snapshotting stale identity at construction.
+  private getIdentity?: () => PixelIdentity | undefined;
 
   constructor(options: {
     workspaceId: string;
     endpoint?: string;
     debug?: boolean;
+    getIdentity?: () => PixelIdentity | undefined;
   }) {
     this.workspaceId = options.workspaceId;
     // Container scripts use the same endpoint as tracking (ingest)
     this.endpoint = options.endpoint || 'https://ingest.datalyr.com';
     this.debug = options.debug || false;
+    this.getIdentity = options.getIdentity;
 
     // Load session scripts from storage
     const sessionScripts = storage.get('dl_session_scripts', []);
@@ -119,9 +142,11 @@ export class ContainerManager {
       this.scripts = data.scripts || [];
       this.pixels = data.pixels || null;
       
-      // Initialize pixels if configured
+      // Initialize pixels if configured. Awaited so advanced-matching hashes
+      // are resolved before the first dl.track() flushes through trackToPixels
+      // (otherwise fbq('init') would lag fbq('track') in fast-path tracks).
       if (this.pixels) {
-        this.initializePixels();
+        await this.initializePixels();
       }
       
       // Load scripts based on trigger
@@ -448,19 +473,19 @@ export class ContainerManager {
   /**
    * Initialize third-party pixels (Meta, Google, TikTok)
    */
-  private initializePixels(): void {
+  private async initializePixels(): Promise<void> {
     if (!this.pixels) return;
-    
+
     // Initialize Meta Pixel
     if (this.pixels.meta?.enabled && this.pixels.meta.pixel_id) {
-      this.initializeMetaPixel(this.pixels.meta);
+      await this.initializeMetaPixel(this.pixels.meta);
     }
-    
+
     // Initialize Google Tag
     if (this.pixels.google?.enabled && this.pixels.google.tag_id) {
       this.initializeGoogleTag(this.pixels.google);
     }
-    
+
     // Initialize TikTok Pixel
     if (this.pixels.tiktok?.enabled && this.pixels.tiktok.pixel_id) {
       this.initializeTikTokPixel(this.pixels.tiktok);
@@ -469,8 +494,14 @@ export class ContainerManager {
 
   /**
    * Initialize Meta (Facebook) Pixel
+   *
+   * Async because we resolve SHA-256 hashes for advanced matching (Meta's
+   * `external_id` / `em`) before calling fbq('init'). Aligning the hashes the
+   * browser Pixel sends with what CAPI sends (meta.js shovels user_id /
+   * visitor_id / anonymous_id into external_id[], and `em` is sha256 of the
+   * lowercased email) is the dedup-quality lift the CAPI side can't fix alone.
    */
-  private initializeMetaPixel(config: any): void {
+  private async initializeMetaPixel(config: any): Promise<void> {
     try {
       // Load Meta Pixel script
       (function(f: any, b: any, e: any, v: any, n?: any, t?: any, s?: any) {
@@ -489,15 +520,36 @@ export class ContainerManager {
         s = b.getElementsByTagName(e)[0];
         s.parentNode.insertBefore(t, s);
       })(window, document, 'script', 'https://connect.facebook.net/en_US/fbevents.js');
-      
+
+      // Build advanced-matching object. Skipped silently if Web Crypto isn't
+      // available — Pixel still initializes, just without advanced matching.
+      // Anonymous_id is stable across the session and always present, so we
+      // never need to re-init on identify(): CAPI carries both anonymous_id
+      // AND user_id in its external_id[] array, so either side matching one
+      // hash slot is enough to dedupe.
+      const advancedMatching: Record<string, string> = {};
+      const identity = this.getIdentity?.();
+      if (identity?.externalId) {
+        const hash = await sha256Hex(String(identity.externalId));
+        if (hash) advancedMatching.external_id = hash;
+      }
+      if (identity?.email) {
+        const hash = await sha256Hex(String(identity.email).toLowerCase().trim());
+        if (hash) advancedMatching.em = hash;
+      }
+
       // Initialize pixel only — do NOT fire PageView here. The SDK's own pageview
       // tracking (track('pageview')) routes through trackToPixels and fires a single
       // mapped PageView with a shared eventID. Firing it again here produced TWO
       // PageViews per load (one un-deduped). Note: if the host app disables pageview
       // tracking entirely, no PageView is sent — which is the correct outcome.
-      (window as any).fbq('init', config.pixel_id);
-
-      this.log('Meta Pixel initialized:', config.pixel_id);
+      if (Object.keys(advancedMatching).length > 0) {
+        (window as any).fbq('init', config.pixel_id, advancedMatching);
+        this.log('Meta Pixel initialized with advanced matching:', config.pixel_id, Object.keys(advancedMatching));
+      } else {
+        (window as any).fbq('init', config.pixel_id);
+        this.log('Meta Pixel initialized (no advanced matching):', config.pixel_id);
+      }
     } catch (error) {
       this.log('Error initializing Meta Pixel:', error);
     }

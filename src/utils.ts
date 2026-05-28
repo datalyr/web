@@ -3,6 +3,29 @@
  */
 
 /**
+ * SHA-256 hex digest of a UTF-8 string. Used to align the browser Meta Pixel's
+ * advanced-matching `external_id` / `em` with what CAPI sends server-side —
+ * Meta dedupes / matches on identical hashes across both surfaces.
+ *
+ * Matches the worker's `sha256()` in cloudflare/postback/core/utils.js (lowercase
+ * hex of SHA-256(utf-8 bytes)). Returns null when Web Crypto isn't available
+ * (e.g. very old browsers, or non-secure contexts) so callers can gracefully
+ * skip advanced matching rather than throwing.
+ */
+export async function sha256Hex(input: string): Promise<string | null> {
+  if (typeof crypto === 'undefined' || !crypto.subtle) return null;
+  try {
+    const bytes = new TextEncoder().encode(input);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Generate UUID v4
  */
 export function generateUUID(): string {
