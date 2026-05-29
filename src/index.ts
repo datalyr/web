@@ -113,6 +113,15 @@ class Datalyr {
       ...config
     };
 
+    // platform:'shopify' implies cart-attribute sync: stamp visitor_id + Meta
+    // click signals into note_attributes so server-side order webhooks can
+    // attribute guest checkouts. Lets the Shopify theme app-embed enable it via
+    // data-platform="shopify" alone. `=== undefined` so an explicit
+    // shopifyCartAttributes:false still wins.
+    if (this.config.platform === 'shopify' && this.config.shopifyCartAttributes === undefined) {
+      this.config.shopifyCartAttributes = true;
+    }
+
     // Initialize cookie storage with config
     this.cookies = new CookieStorage({
       domain: this.config.cookieDomain,
