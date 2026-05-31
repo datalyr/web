@@ -232,6 +232,17 @@ class Datalyr {
           await this.container.init().catch(error => {
             this.log('Container initialization failed:', error);
           });
+
+          // Checkout Champ thank-you/upsell page: co-fire the browser Meta Pixel
+          // Purchase with the SAME deterministic event_id the CC webhook stamps
+          // server-side, so Meta dedupes the browser event against the server-side
+          // CAPI event (dedup = event_name + event_id). Pixel-only — the CC Export
+          // Profile webhook owns the server event + CAPI postback. No-op anywhere
+          // except a post-purchase page (keyed on CC's sessionStorage orderData).
+          // Must run AFTER container.init() so fbq is loaded + init'd.
+          if (this.config.platform === 'checkoutchamp') {
+            this.fireCheckoutChampPurchasePixel();
+          }
         }
 
         // autoIdentify default for the CC bridge:
@@ -922,6 +933,91 @@ class Datalyr {
   }
 
   /**
+   * Checkout Champ Meta Pixel ⇄ CAPI deduplication.
+   *
+   * On a CC thank-you / upsell page, fire the BROWSER Meta Pixel Purchase with the
+   * exact same event_id the CC webhook stamps server-side, so Meta collapses the
+   * browser Pixel event and the server-side CAPI event into one (dedup key =
+   * event_name + event_id). This gives the EMQ lift of a matched browser+server
+   * event without double-counting conversions in Ads Manager.
+   *
+   * PIXEL-ONLY by design. We do NOT enqueue a server event here: the CC Export
+   * Profile webhook (webhooks/platforms/checkoutchamp.js) already ingests the
+   * purchase and fires CAPI. Calling track() here would create a second server
+   * event (source='web') AND double-fire CAPI — defeating the whole point.
+   *
+   * The event_id MUST stay byte-identical to the server formula:
+   *   webhooks/platforms/checkoutchamp.js:250
+   *     generateEventId('checkoutchamp', `${event_type}_${order_id}`)
+   *   webhooks/core/ingest.js:122  →  `${platform}_${webhookEventId}`
+   *   ⇒ `checkoutchamp_purchase_<order_id>`
+   * where <order_id> is the value CC posts to the webhook via its [orderId] macro.
+   * We read the browser-side counterpart from CC's own client-side order object:
+   *   JSON.parse(sessionStorage.getItem('orderData')).orderId
+   * (CC docs: referenced in custom scripts as `orderDataTmp.orderId`).
+   *
+   * ASSUMPTION TO VERIFY ON A REAL CC TEST ORDER: that sessionStorage
+   * orderData.orderId === the [orderId] CC sends to the postback. If a merchant's
+   * CC plan exposes a different id client-side, the two event_ids won't match and
+   * Meta will show duplicates — caught by the test order in the setup checklist.
+   *
+   * v1 scope: the primary order only. Per-upsell Pixel dedup (each upsell is its
+   * own order_id + parent_order_id server-side) needs the upsell sessionStorage
+   * shape confirmed on a live funnel first — tracked as a follow-up.
+   */
+  private fireCheckoutChampPurchasePixel(): void {
+    if (typeof window === "undefined") return;
+    try {
+      // Needs the container (where the Meta Pixel lives). trackToPixels itself
+      // no-ops unless a Meta pixel is enabled + fbq is present, so an
+      // unconfigured workspace silently does nothing.
+      if (!this.container) return;
+
+      const raw = window.sessionStorage?.getItem("orderData");
+      if (!raw) return; // not a post-purchase page — nothing to dedupe
+
+      const order = JSON.parse(raw) || {};
+      const orderId = order.orderId;
+      if (!orderId) return;
+
+      // orderData persists across upsell page loads — fire the primary Purchase
+      // Pixel once per order. (Meta also dedupes by event_id over 48h, so this is
+      // belt-and-suspenders against a per-page re-fire.)
+      const guardKey = `__dl_cc_purchase_${orderId}`;
+      if (window.sessionStorage.getItem(guardKey)) return;
+      window.sessionStorage.setItem(guardKey, "1");
+
+      // KEEP IN SYNC with the server formula above.
+      const eventId = `checkoutchamp_purchase_${orderId}`;
+
+      // value/currency are for EMQ quality only — Meta dedup is event_id+name, so
+      // a mismatch here never breaks dedup. Best-effort parse of CC's fields.
+      const value = Number(order.totalAmount);
+      const properties: Record<string, any> = {
+        order_id: String(orderId),
+        content_type: "product",
+      };
+      if (Number.isFinite(value)) properties.value = value;
+      const currency = order.currencyCode || order.currency;
+      if (currency) properties.currency = String(currency);
+      if (order.productId) properties.content_ids = [String(order.productId)];
+
+      // Pixel-only co-fire. 'purchase' maps to Meta 'Purchase' in trackToPixels,
+      // matching the server-side rule's platform_event_name.
+      this.container.trackToPixels("purchase", properties, eventId);
+
+      this.log("Checkout Champ Purchase Pixel co-fired (CAPI dedup):", {
+        eventId,
+        value: properties.value,
+        currency: properties.currency,
+      });
+    } catch (error) {
+      // Never let dedup co-fire break the page or init.
+      this.log("fireCheckoutChampPurchasePixel failed:", error);
+    }
+  }
+
+  /**
    * Storefront → Checkout Champ link stamping. Finds every `<a href>` whose host
    * matches the configured CC domain list and appends `?_dl_vid=…&_dl_fbc=…&
    * _dl_fbp=…&_dl_fbclid=…&_dl_fbclid_at=…&_dl_gclid=…` so the user's
@@ -1107,7 +1203,7 @@ class Datalyr {
       resolution_confidence: 1.0,
 
       // SDK metadata (keep in sync with package.json version)
-      sdk_version: '1.6.4',
+      sdk_version: '1.6.5',
       sdk_name: 'datalyr-web-sdk'
     };
 
