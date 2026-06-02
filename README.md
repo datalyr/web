@@ -671,10 +671,10 @@ Returns an array of loaded script IDs.
 getLoadedScripts(): string[]
 ```
 
-Container script tag installation (loads pixels from your dashboard config):
+The container is built into the `dl.js` tag — it loads your dashboard-configured pixels on init, so there's no separate container script to install:
 
 ```html
-<script defer src="https://track.datalyr.com/container.js"
+<script defer src="https://track.datalyr.com/dl.js"
         data-workspace-id="YOUR_WORKSPACE_ID"></script>
 ```
 
