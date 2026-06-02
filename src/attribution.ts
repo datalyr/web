@@ -81,13 +81,19 @@ export class AttributionManager {
       }
     }
 
-    // Capture click IDs
+    // Capture click IDs. The first present (by CLICK_IDS priority) is the primary
+    // clickId/clickIdType, but ALSO capture every present click ID as its own named
+    // field — a single URL can carry both fbclid and gclid (redirect chains, forwarded
+    // / re-shared links), and keeping only the first dropped the others' platform
+    // attribution entirely. (WEB NEW-3)
     for (const clickId of this.CLICK_IDS) {
       const value = params[clickId];
       if (value) {
-        attribution.clickId = value;
-        attribution.clickIdType = clickId;
-        break; // Use first found click ID
+        if (!attribution.clickId) {
+          attribution.clickId = value;
+          attribution.clickIdType = clickId;
+        }
+        attribution[clickId] = value;
       }
     }
 
@@ -248,7 +254,10 @@ export class AttributionManager {
     // Generate _fbp if missing (Facebook browser ID)
     if (!adCookies._fbp && (this.hasClickId('fbclid') || adCookies._fbc)) {
       const timestamp = Date.now();
-      const randomId = Math.random().toString(36).substring(2, 15);
+      // Meta's _fbp format is fb.1.<creationTimeMs>.<randomNumber> where the last
+      // segment MUST be a decimal integer. The old base36 string was non-conformant —
+      // Meta ignores it (and it can shadow a real _fbp), degrading EMQ. (WEB-17)
+      const randomId = Math.floor(Math.random() * 1e10).toString();
       adCookies._fbp = `fb.1.${timestamp}.${randomId}`;
       // Optionally set the cookie for future use
       cookies.set('_fbp', adCookies._fbp, 90);
@@ -316,16 +325,22 @@ export class AttributionManager {
     const journey = this.getJourney();
     let current = this.captureAttribution();
 
-    // CRITICAL FIX: If current session has no attribution (direct/organic),
-    // fallback to persistent attribution from localStorage (90-day window)
-    const hasCurrentAttribution = !!(
-      current.source || current.medium || current.clickId || current.campaign
+    // A "real" attribution signal on THIS pageview = a click ID, a UTM/campaign, or a
+    // referrer/UTM-derived source. determineSource()/determineMedium() FLOOR to
+    // 'direct'/'none', so the mere presence of current.source/medium is NOT a signal.
+    // The old `hasCurrentAttribution` (truthy because source is always at least 'direct')
+    // made the fallback below dead code AND caused storeLastTouch to overwrite a real
+    // paid last-touch with 'direct'/'none' on the next internal navigation. (WEB NEW-1)
+    const hasRealAttribution = !!(
+      current.clickId ||
+      current.campaign ||
+      (current.source && current.source !== 'direct')
     );
 
-    if (!hasCurrentAttribution && firstTouch) {
-      // Check if persistent attribution is still valid
+    if (!hasRealAttribution && firstTouch) {
+      // Direct / internal navigation: fall back to persistent attribution (90-day
+      // window) so the event isn't mis-attributed to 'direct', keeping page context.
       if (!firstTouch.expires_at || Date.now() < firstTouch.expires_at) {
-        // Use persistent attribution but keep current page context
         current = {
           ...firstTouch,
           referrer: current.referrer,
@@ -339,11 +354,12 @@ export class AttributionManager {
     // Capture advertising cookies automatically
     const adCookies = this.captureAdCookies();
 
-    // Update first/last touch if needed
-    if (!firstTouch && Object.keys(current).length > 1) {
+    // Only (re)write first/last touch when this pageview carried a REAL signal — never
+    // overwrite stored attribution with the 'direct'/'none' floor of an internal nav.
+    if (!firstTouch && hasRealAttribution) {
       this.storeFirstTouch(current);
     }
-    if (Object.keys(current).length > 1) {
+    if (hasRealAttribution) {
       this.storeLastTouch(current);
     }
 

@@ -30,6 +30,21 @@ All notable changes to this project will be documented in this file.
 - **Regression tests** for the queue's data-loss / double-send paths
   (`src/queue.test.ts`) — the file previously had zero coverage.
 
+### Fixed (attribution correctness — from the deep web-SDK review)
+- **Last-touch attribution is no longer overwritten with `direct`/`none` on internal
+  navigations.** `determineSource()`/`determineMedium()` floor to `direct`/`none`, which
+  made the "has attribution" check always true — so the persistent-attribution fallback
+  was dead code and `storeLastTouch` overwrote a real paid last-touch on the next
+  pageview. Now first/last touch are only (re)written when the pageview carries a real
+  signal (click ID, UTM/campaign, or a referrer/UTM-derived source). (`src/attribution.ts`)
+- **Multiple click IDs on one URL are all captured.** A URL carrying both `fbclid` and
+  `gclid` (redirect chains / forwarded links) previously kept only the first; each
+  present click ID is now also emitted as its own named field. (`src/attribution.ts`)
+- **Synthetic `_fbp` uses a Meta-conformant decimal segment** (`fb.1.<ms>.<int>`) instead
+  of a base36 string Meta ignores — improves EMQ on the CAPI-only path. (`src/attribution.ts`)
+- **`sdk_version` now reports `1.7.1`** instead of the stale hardcoded `1.6.5`, so ingested
+  data reflects which clients have these fixes. (`src/index.ts`)
+
 ### Fixed (privacy)
 - **Third-party pixels are no longer loaded for opted-out / DNT / GPC / strict
   visitors.** Container initialization (which injects Meta/Google/TikTok loaders and
