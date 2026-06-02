@@ -34,6 +34,7 @@ export class AutoIdentifyManager {
   private lastIdentifyTime = 0;
   private RATE_LIMIT_MS = 5000; // Don't auto-identify more than once per 5 seconds
   private shopifyCheckInterval?: ReturnType<typeof setInterval>;
+  private destroyed = false; // set by destroy() (e.g. on opt-out) — stops any in-flight capture from re-persisting email
 
   constructor(config: AutoIdentifyConfig = {}) {
     this.config = {
@@ -452,6 +453,7 @@ export class AutoIdentifyManager {
    * Trigger identify with rate limiting
    */
   private async triggerIdentify(email: string, source: string): Promise<void> {
+    if (this.destroyed) return;
     // Rate limiting
     const now = Date.now();
     if (now - this.lastIdentifyTime < this.RATE_LIMIT_MS) {
@@ -470,6 +472,10 @@ export class AutoIdentifyManager {
       this.log('Already identified with this email');
       return;
     }
+
+    // If we were destroyed (e.g. user opted out) during the async read above, do NOT
+    // re-persist the email or fire the callback.
+    if (this.destroyed) return;
 
     // Store email (encrypted) to prevent duplicate identification. Best-effort: a
     // storage/encryption failure must not block the identify, since the identify
@@ -491,6 +497,8 @@ export class AutoIdentifyManager {
    * Destroy and cleanup
    */
   destroy(): void {
+    this.destroyed = true;
+
     // Restore original fetch
     if (this.originalFetch) {
       window.fetch = this.originalFetch;

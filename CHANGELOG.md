@@ -32,11 +32,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed (attribution correctness — from the deep web-SDK review)
 - **Last-touch attribution is no longer overwritten with `direct`/`none` on internal
-  navigations.** `determineSource()`/`determineMedium()` floor to `direct`/`none`, which
-  made the "has attribution" check always true — so the persistent-attribution fallback
-  was dead code and `storeLastTouch` overwrote a real paid last-touch on the next
-  pageview. Now first/last touch are only (re)written when the pageview carries a real
-  signal (click ID, UTM/campaign, or a referrer/UTM-derived source). (`src/attribution.ts`)
+  navigations** — including same-site full-page navigation on classic multi-page stores.
+  `determineSource()`/`determineMedium()` floor to `direct`/`none`, which made the "has
+  attribution" check always true — so the persistent-attribution fallback was dead code
+  and `storeLastTouch` overwrote a real paid last-touch on the next pageview. Now first/last
+  touch are only (re)written when the pageview carries a real signal (click ID, UTM/campaign,
+  or a referrer-derived source), and a **same-root-domain referrer is treated as `direct`**
+  (not `referral`) so internal page-to-page navigation can't clobber the real source.
+  (`src/attribution.ts`)
 - **Multiple click IDs on one URL are all captured.** A URL carrying both `fbclid` and
   `gclid` (redirect chains / forwarded links) previously kept only the first; each
   present click ID is now also emitted as its own named field. (`src/attribution.ts`)
@@ -49,19 +52,25 @@ All notable changes to this project will be documented in this file.
 - **`optOut()` now actually stops tracking and clears PII.** Previously it set a flag and
   cleared only the in-memory live queue — events persisted *before* opt-out still drained
   on the next periodic/on-load tick (the queue had no consent gate), and stored PII was
-  left at rest. Now opt-out disables the queue (no send, no drain), purges the live +
-  offline queues, tears down auto-identify, drops loaded pixels, and removes
-  `dl_user_traits` / `dl_auto_identified_email`. (`src/index.ts`, `src/queue.ts`)
-- **`setConsent()` is now enforced, not just stored.** `analytics: false` gates first-party
-  event sending; `marketing: false` / `sale: false` (CCPA "do not sell") gates the
-  third-party pixels. Previously `dl_consent` was written and never read. (`src/index.ts`)
+  left at rest. Now opt-out disables the queue (no send, **and no re-persist** — the
+  failure-path `moveToOfflineQueue`/`saveOfflineQueue` are gated too), purges the live +
+  offline queues, tears down auto-identify, stops forwarding to third-party pixels, and
+  removes `dl_user_traits` / `dl_auto_identified_email` / `dl_journey`. (Already-injected
+  pixel globals like `fbq`/`gtag` persist in the page until reload — we stop feeding them
+  but cannot fully unload a third-party script mid-session.) (`src/index.ts`, `src/queue.ts`)
+- **`setConsent()` is now enforced, not just stored.** Gated by the full policy (analytics
+  consent + opt-out + DNT/GPC): `analytics: false` disables first-party sending **and
+  purges buffered events** (so they can't drain if consent is later re-granted);
+  `marketing: false` / `sale: false` (CCPA "do not sell") stops forwarding to the
+  third-party pixels and prevents them initializing on the next page load. Previously
+  `dl_consent` was written and never read. (`src/index.ts`)
 - **`syncOutboundLinkParams` (CC bridge) is gated on consent** — an opted-out / DNT / GPC
   visitor's id + click-ids are no longer stamped on outbound links. (`src/index.ts`)
 - **`group()` / `alias()` honor consent** before mutating persisted identity, and `alias('')`
   is rejected. (`src/index.ts`)
-- **`reset()` clears the auto-identified email and super-properties** — fixes cross-user
-  contamination on shared devices (the next user was never re-captured, and the prior
-  user's email/super-props leaked into their events). (`src/index.ts`)
+- **`reset()` clears the auto-identified email, super-properties, and the journey** — fixes
+  cross-user contamination on shared devices (the next user was never re-captured, and the
+  prior user's email / super-props / touchpoints leaked into their events). (`src/index.ts`)
 
 ### Added (multi-touch journey — from the deep review)
 - **Customer-journey touchpoints are now recorded** (one per session) so `touchpoint_count`

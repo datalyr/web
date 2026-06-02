@@ -391,6 +391,12 @@ export class EventQueue {
    * FIXED (CRITICAL-06): Can now accept specific events or move entire queue
    */
   private moveToOfflineQueue(events?: IngestEventPayload[]): void {
+    // Consent leak fix: do NOT persist for a disabled queue. Without this, an
+    // in-flight _flush (or critical-event send) that FAILS after optOut() has purged
+    // the offline queue would re-write the PII-bearing event to storage AFTER the
+    // purge. Gating here (a persistence sink, not just the send sinks) closes it.
+    if (!this.enabled) return;
+
     // FIXED (DATA-03): Check if offline queue operation already in progress
     if (this.offlineQueueLock) {
       console.warn('[Datalyr Queue] Offline queue operation already in progress');
@@ -438,6 +444,9 @@ export class EventQueue {
    * Save offline queue to storage
    */
   private saveOfflineQueue(): void {
+    // Defense-in-depth twin of the moveToOfflineQueue gate: never write PII to disk
+    // for a disabled (opted-out) queue.
+    if (!this.enabled) return;
     // Keep max events based on config
     const toSave = this.offlineQueue.slice(-this.config.maxOfflineQueueSize);
     storage.set(this.OFFLINE_QUEUE_KEY, toSave);
@@ -460,6 +469,9 @@ export class EventQueue {
       this.log(`Processing ${this.offlineQueue.length} offline events`);
 
       while (this.offlineQueue.length > 0) {
+        // Stop mid-drain if disabled (opt-out during an active drain) — otherwise the
+        // unshift-on-failure below would re-persist a batch after optOut's purge.
+        if (!this.enabled) break;
         const batch = this.offlineQueue.splice(0, this.config.batchSize);
 
         try {

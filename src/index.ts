@@ -58,8 +58,6 @@ class Datalyr {
   private optedOut = false;
   // Consent preferences (setConsent). null = not set → no consent-based restriction.
   private consent: ConsentConfig | null = null;
-  // WEB-6: the session id we last recorded a journey touchpoint for (one per session).
-  private lastTouchpointSession: string | null = null;
   private initialized = false;
   private errors: ErrorInfo[] = [];
   private MAX_ERRORS = 50;
@@ -178,11 +176,9 @@ class Datalyr {
     const sessionId = this.session.getSessionId();
     this.identity.setSessionId(sessionId);
 
-    // Honor opt-out / withdrawn analytics consent at the queue level so events
-    // persisted before opt-out aren't drained (now that the queue exists).
-    if (this.optedOut || (this.consent && this.consent.analytics === false)) {
-      this.queue.setEnabled(false);
-    }
+    // Gate the queue by the FULL tracking policy (opt-out + analytics consent + DNT +
+    // GPC) so a returning opted-out / DNT / GPC visitor's persisted events don't drain.
+    this.queue.setEnabled(this.shouldTrack());
 
     // FIXED (ISSUE-01): Start async initialization immediately but don't block constructor
     // This allows encryption to initialize before any events are tracked
@@ -551,10 +547,13 @@ class Datalyr {
 
     // WEB-6: record one customer-journey touchpoint per session so touchpoint_count /
     // days_since_first_touch become real multi-touch signals (addTouchpoint had no
-    // callers before, so the journey was always empty).
+    // callers before, so the journey was always empty). Dedup against the PERSISTED
+    // journey (not an in-memory field) so a hard page reload within the same session
+    // doesn't append a duplicate touchpoint on a classic multi-page site.
     const sid = this.session.getSessionId();
-    if (sid !== this.lastTouchpointSession) {
-      this.lastTouchpointSession = sid;
+    const journey = this.attribution.getJourney();
+    const lastTouchpoint = journey.length ? journey[journey.length - 1] : null;
+    if (!lastTouchpoint || lastTouchpoint.sessionId !== sid) {
       this.attribution.addTouchpoint(sid, this.attribution.captureAttribution());
     }
 
@@ -664,6 +663,9 @@ class Datalyr {
     // re-captured (it short-circuits while dl_auto_identified_email is present), and so
     // the prior user's email isn't left at rest after logout.
     storage.remove('dl_auto_identified_email');
+    // Clear the journey too, or the next user's touchpoints append to the previous
+    // user's (cross-user contamination of touchpoint_count / days_since_first_touch).
+    storage.remove('dl_journey');
     this.session.createNewSession();
     this.log('User reset');
   }
@@ -816,6 +818,7 @@ class Datalyr {
     this.userProperties = {};
     storage.remove('dl_user_traits');
     storage.remove('dl_auto_identified_email');
+    storage.remove('dl_journey');
     this.log('User opted out');
   }
 
@@ -829,10 +832,10 @@ class Datalyr {
     }
     this.optedOut = false;
     this.cookies.set('__dl_opt_out', 'false', this.config.cookieExpires);
-    // Re-enable sending (unless analytics consent is still withdrawn).
-    if (!this.consent || this.consent.analytics !== false) {
-      this.queue.setEnabled(true);
-    }
+    // Re-enable only if the full policy now allows (analytics consent + DNT/GPC), not
+    // merely because opt-out was lifted — otherwise a GPC/DNT visitor's persisted
+    // events would start draining again. (Pixels / auto-identify resume on next load.)
+    this.queue.setEnabled(this.shouldTrack());
     this.log('User opted in');
   }
 
@@ -850,15 +853,22 @@ class Datalyr {
     this.consent = consent;
     storage.set('dl_consent', consent);
 
-    // Enforce it live (not just persist it). Analytics consent gates first-party event
-    // sending; marketing/sale consent gates third-party pixels.
-    if (consent.analytics === false) {
-      this.queue.setEnabled(false);
-    } else if (!this.optedOut) {
-      this.queue.setEnabled(true);
+    // Enforce it live (not just persist it). Gate the queue by the full policy
+    // (analytics consent + opt-out + DNT/GPC), and on withdrawal purge buffered events
+    // too — mirroring optOut — so events captured before withdrawal can't drain if
+    // consent is later re-granted.
+    const allowed = this.shouldTrack();
+    this.queue.setEnabled(allowed);
+    if (!allowed) {
+      this.queue.clear();
+      this.queue.clearOffline();
     }
+
+    // Marketing / "do not sell" withdrawal: stop FEEDING the third-party pixels and
+    // prevent them from being initialized on the next page load. NOTE: an
+    // already-injected pixel global (fbq/gtag/ttq) keeps running in the page — we
+    // can't fully unload a third-party script mid-session; full removal is on reload.
     if (!this.consentAllowsMarketing() && this.container) {
-      // Stop sharing data with already-loaded pixels (next page load won't init them).
       this.container.cleanupAllIframes();
       this.container = undefined;
     }

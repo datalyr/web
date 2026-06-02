@@ -424,7 +424,17 @@ export class AttributionManager {
     // Check referrer
     if (attribution.referrerHost) {
       const host = attribution.referrerHost.toLowerCase();
-      
+
+      // Same-site referrer = internal navigation, NOT a new acquisition source.
+      // Without this, a full-page internal nav (referrer = our own domain, common on
+      // classic multi-page stores) classifies as 'referral', which makes
+      // hasRealAttribution true and overwrites the real paid last-touch. Treat it as
+      // direct so the last-touch guard preserves the genuine source.
+      const currentHost = (typeof window !== 'undefined' ? window.location.hostname : '').toLowerCase();
+      if (currentHost && (host === currentHost || this.isSameRootDomain(host, currentHost))) {
+        return 'direct';
+      }
+
       // Social sources
       if (host.includes('facebook.com') || host.includes('fb.com')) return 'facebook';
       if (host.includes('twitter.com') || host.includes('t.co') || host.includes('x.com')) return 'twitter';
@@ -476,6 +486,17 @@ export class AttributionManager {
     }
 
     return 'referral';
+  }
+
+  /**
+   * Whether two hosts share the same root domain (eTLD+1 approximation), so that
+   * cross-subdomain internal navigation (e.g. shop.example.com → checkout.example.com)
+   * is also treated as same-site. Not a full public-suffix parse — good enough to keep
+   * internal navs from being mis-classified as referral.
+   */
+  private isSameRootDomain(a: string, b: string): boolean {
+    const root = (h: string) => h.split('.').slice(-2).join('.');
+    return root(a) === root(b);
   }
 
   /**

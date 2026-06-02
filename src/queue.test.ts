@@ -154,4 +154,23 @@ describe('EventQueue — data-loss & double-send paths (WEB-1/2/3/8)', () => {
     expect((global as any).fetch).not.toHaveBeenCalled();
     expect(queue.getQueueSize()).toBe(0);
   });
+
+  test('consent leak: an in-flight flush that FAILS after opt-out does not re-persist PII to storage', async () => {
+    jest.useFakeTimers();
+    (global as any).fetch = jest.fn(() => Promise.reject(new Error('network')));
+    queue = newQueue({ flushInterval: 100000 });
+
+    queue.enqueue(makeEvent('pageview', 1)); // non-critical → goes through _flush
+    const p = queue.flush(); // _flush starts; inFlight set; fetch is rejecting+retrying
+    // user opts out mid-flight (mirrors optOut: disable + purge)
+    queue.setEnabled(false);
+    queue.clearOffline();
+
+    await jest.advanceTimersByTimeAsync(40000); // run through retry backoff → _flush catch
+    await p;
+
+    // moveToOfflineQueue is gated on `enabled`, so the failed batch is NOT re-persisted.
+    expect(queue.getOfflineQueueSize()).toBe(0);
+    expect(storage.get(OFFLINE_KEY, [])).toEqual([]);
+  });
 });
