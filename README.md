@@ -1,6 +1,6 @@
 # @datalyr/web
 
-Browser SDK for event tracking, user identity, and attribution. Version 1.4.1.
+Browser SDK for event tracking, user identity, and attribution. Version 1.7.0.
 
 ## Table of Contents
 
@@ -116,7 +116,7 @@ Every event includes:
   workspace_id: 'wk_xxxxx',
   source: 'web',
   timestamp: '2024-01-15T10:30:00Z',
-  sdk_version: '1.4.1',
+  sdk_version: '1.7.0',
   sdk_name: 'datalyr-web-sdk'
 }
 ```
@@ -187,7 +187,7 @@ datalyr.init({
   // Auto-Identify (opt-in)
   autoIdentify?: boolean,                   // Default: false - Automatically identify users
   autoIdentifyForms?: boolean,              // Default: true - Capture email from forms (when autoIdentify enabled)
-  autoIdentifyAPI?: boolean,                // Default: true - Capture email from API responses (when autoIdentify enabled)
+  autoIdentifyAPI?: boolean,                // Default: false - Capture email from API responses (off: same-origin scan can mis-identify; opt in explicitly)
   autoIdentifyShopify?: boolean,            // Default: true - Capture email from Shopify endpoints (when autoIdentify enabled)
   autoIdentifyTrustedDomains?: string[],    // Default: [] - Additional domains to trust for API capture
 
@@ -195,6 +195,21 @@ datalyr.init({
   plugins?: DatalyrPlugin[],                // Default: [] - Custom plugin instances
 });
 ```
+
+---
+
+## Remote config (Identity Bridge)
+
+These options can be controlled from the dashboard (**Settings → Identity & Attribution**) with **no code change** — they're delivered to the SDK at runtime in the `/container-scripts` response and merged in:
+
+- `autoIdentify`, `autoIdentifyForms`, `autoIdentifyAPI`, `autoIdentifyShopify`
+- `shopifyCartAttributes`
+- `checkoutChampDomains`
+- `respectGlobalPrivacyControl`, `respectDoNotTrack`, `privacyMode`
+
+**Precedence, per key:** built-in default ← dashboard ← explicit `init()`. An explicit value in `init()` always wins, so you can pin a value in code and still manage everything else from the dashboard. Changes propagate in ~5 minutes (edge-cached). An older worker that doesn't send the `config` envelope is a no-op — built-in defaults stand.
+
+> `platform` is **not** remote-configurable — set it at install time via the `data-platform` attribute. The CheckoutChamp behaviors run before the remote config loads, so a dashboard-set platform wouldn't drive them.
 
 ---
 

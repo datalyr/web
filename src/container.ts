@@ -5,6 +5,7 @@
 
 import { storage } from './storage';
 import { sha256Hex } from './utils';
+import type { SdkRemoteConfig } from './config';
 
 /**
  * Identity snapshot read at the moment a third-party pixel initializes.
@@ -64,6 +65,10 @@ export class ContainerManager {
   private loadedScripts = new Set<string>();
   private sessionLoadedScripts = new Set<string>();
   private pixels: PixelConfig | null = null;
+  /** SDK runtime config from the /container-scripts `config` envelope (the
+   *  dashboard sdk_config + server-computed defaults). undefined if the worker
+   *  doesn't send it — caller then falls back to built-in defaults. */
+  private remoteConfig?: SdkRemoteConfig;
   private workspaceId: string;
   private endpoint: string;
   private debug: boolean;
@@ -138,9 +143,10 @@ export class ContainerManager {
 
       const data = await response.json();
       
-      // Store scripts and pixels
+      // Store scripts, pixels, and the SDK runtime config envelope.
       this.scripts = data.scripts || [];
       this.pixels = data.pixels || null;
+      this.remoteConfig = (data.config && typeof data.config === 'object') ? data.config : undefined;
       
       // Initialize pixels if configured. Awaited so advanced-matching hashes
       // are resolved before the first dl.track() flushes through trackToPixels
@@ -172,6 +178,14 @@ export class ContainerManager {
     } catch (error) {
       this.log('Error initializing container:', error);
     }
+  }
+
+  /**
+   * The SDK runtime config delivered by /container-scripts, or undefined if the
+   * response omitted it. The SDK merges this under explicit init() options.
+   */
+  getRemoteConfig(): SdkRemoteConfig | undefined {
+    return this.remoteConfig;
   }
 
   /**

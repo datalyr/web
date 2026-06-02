@@ -39,7 +39,7 @@ export class AutoIdentifyManager {
     this.config = {
       enabled: config.enabled !== false,
       captureFromForms: config.captureFromForms !== false,
-      captureFromAPI: config.captureFromAPI !== false,
+      captureFromAPI: config.captureFromAPI === true, // default OFF: same-origin response-scan can mis-identify (e.g. admin views)
       captureFromShopify: config.captureFromShopify !== false,
       trustedDomains: config.trustedDomains || [],
       debug: config.debug || false

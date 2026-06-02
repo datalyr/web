@@ -12,6 +12,7 @@ import { storage, CookieStorage } from './storage';
 import { ContainerManager } from './container';
 import { dataEncryption } from './encryption'; // SEC-03 Fix
 import { AutoIdentifyManager } from './auto-identify';
+import { applyRemoteConfig } from './config';
 import {
   generateUUID,
   sanitizeEventData,
@@ -48,6 +49,10 @@ class Datalyr {
   private cookies!: CookieStorage;
   private container?: ContainerManager;
   private autoIdentify?: AutoIdentifyManager;
+  // Keys the caller passed to init() (before built-in defaults were merged).
+  // Lets the remote-config merge override built-in defaults while always
+  // deferring to an explicit init() value. See applyRemoteConfig.
+  private explicitConfigKeys: ReadonlySet<string> = new Set();
   private superProperties: Record<string, any> = {};
   private userProperties: Record<string, any> = {};
   private optedOut = false;
@@ -79,6 +84,11 @@ class Datalyr {
     if (!config.workspaceId) {
       throw new Error('[Datalyr] workspaceId is required');
     }
+
+    // Snapshot the keys the caller explicitly set, BEFORE built-in defaults are
+    // merged in — so the remote-config merge can override built-in defaults
+    // while still deferring to anything the caller passed explicitly.
+    this.explicitConfigKeys = new Set(Object.keys(config));
 
     // Set default config values
     this.config = {
@@ -245,6 +255,18 @@ class Datalyr {
           }
         }
 
+        // Fold the remote /container-scripts config UNDER explicit init()
+        // overrides (precedence: defaults <- remote <- explicit). No-op if the
+        // container is disabled or the worker didn't send `config`. This is what
+        // makes the dashboard toggles take effect with no snippet edits.
+        applyRemoteConfig(this.config, this.container?.getRemoteConfig(), this.explicitConfigKeys);
+
+        // Privacy-strict turns auto-identify (email capture) OFF regardless of
+        // the dashboard/remote value — privacy wins over the bridge.
+        if (this.config.privacyMode === 'strict') {
+          this.config.autoIdentify = false;
+        }
+
         // autoIdentify default for the CC bridge:
         // - platform === 'checkoutchamp' (CC funnel pages) OR
         // - checkoutChampDomains set (Shopify storefronts feeding a CC funnel)
@@ -256,8 +278,10 @@ class Datalyr {
           this.config.autoIdentify = true;
         }
 
-        // Initialize auto-identify if explicitly enabled (opt-in)
-        if (this.config.autoIdentify === true) {
+        // Initialize auto-identify when enabled (explicit or remote) AND
+        // tracking is allowed. The shouldTrack() gate keeps capture from even
+        // setting up its form/API interceptors for opted-out / DNT / GPC users.
+        if (this.config.autoIdentify === true && this.shouldTrack()) {
           this.autoIdentify = new AutoIdentifyManager({
             enabled: true,
             captureFromForms: this.config.autoIdentifyForms,
@@ -287,7 +311,7 @@ class Datalyr {
         // Lets server-side order webhooks recover the browser visitor + Meta click
         // signals (the postback webhook reads these as note_attributes). Inert unless
         // enabled; best-effort and never blocks init.
-        if (this.config.shopifyCartAttributes === true) {
+        if (this.config.shopifyCartAttributes === true && this.shouldTrack()) {
           this.syncShopifyCartAttributes().catch((error) => {
             this.log('Shopify cart attribute sync failed:', error);
           });

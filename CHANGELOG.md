@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0] - 2026-06-01
+
+### Added
+- **Auto Identity Bridge — remote SDK config.** The `/container-scripts` response
+  now carries a `config` envelope (the workspace's dashboard settings), so the
+  following can be controlled from Settings → Identity & Attribution with **no
+  snippet changes**: `autoIdentify`, `autoIdentifyForms`, `autoIdentifyAPI`,
+  `autoIdentifyShopify`, `shopifyCartAttributes`, `checkoutChampDomains`,
+  `respectGlobalPrivacyControl`, `respectDoNotTrack`, `privacyMode`.
+  - Merge precedence per key: **built-in defaults ← remote (dashboard) ← explicit `init()`**.
+    Explicit code always wins; the dashboard overrides built-in defaults for any
+    key the caller didn't set explicitly (`applyRemoteConfig` in `src/config.ts`).
+- **Shopify cart attribution** (`shopifyCartAttributes`) — stamps the visitor ID
+  and Meta click IDs (`_fbc`/`_fbp`/`_fbclid`) into the Shopify cart so server-side
+  order webhooks attribute guest checkouts to the ad, with no browser pixel.
+
+### Changed
+- `autoIdentifyAPI` (capture email from API responses) now defaults **off**; opt in
+  explicitly or via the dashboard.
+- Strict `privacyMode` forces `autoIdentify` off regardless of other settings.
+
+### Notes
+- `platform` is intentionally NOT remote-configurable — it's an install-time
+  snippet attribute (`data-platform`), because CheckoutChamp behaviors run before
+  the remote config arrives.
+- A missing/older worker (no `config` envelope) is a no-op: built-in defaults stand.
+
 ## [1.2.1] - 2025-01
 
 ### Changed

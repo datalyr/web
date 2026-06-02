@@ -58,7 +58,7 @@ export interface DatalyrConfig {
   // Auto-Identify (opt-in feature for convenience)
   autoIdentify?: boolean;                // Default: false - Set true to automatically identify users
   autoIdentifyForms?: boolean;           // Default: true - Capture email from forms (when autoIdentify enabled)
-  autoIdentifyAPI?: boolean;             // Default: true - Capture email from API requests/responses (when autoIdentify enabled)
+  autoIdentifyAPI?: boolean;             // Default: false - Capture email from API requests/responses (off: same-origin response-scan can mis-identify, e.g. admin views). Opt in explicitly or via dashboard.
   autoIdentifyShopify?: boolean;         // Default: true - Capture email from Shopify endpoints (when autoIdentify enabled)
   autoIdentifyTrustedDomains?: string[]; // Default: [] - Additional domains to trust for API capture
   shopifyCartAttributes?: boolean;       // Default: false, BUT auto-enabled when platform:'shopify' is set (unless explicitly false). On Shopify storefronts, stamp visitor_id + Meta click signals (_fbc/_fbp/fbclid) into the cart so server-side order webhooks can attribute. QA on a real store before enabling.
