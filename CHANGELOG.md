@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.1] - 2026-06-02
+
+### Fixed (reliability — silent data loss)
+- **Persisted offline queue is now drained on page load and on every periodic
+  flush**, not only on a `window 'online'` transition. A visitor returning
+  already-online never fired that event, so events that failed in a prior session
+  (including revenue conversions) sat in `localStorage` until they aged out and were
+  sliced away. They now retry as soon as the SDK initializes / on the next flush
+  tick. (`src/queue.ts`)
+- **Failed critical events (purchase/signup/lead) now have a retry path while
+  online.** A transient 5xx parked them in the offline queue, which — per the bug
+  above — only drained on an `online` transition that may never come. The periodic
+  offline drain gives them a guaranteed retry. (`src/queue.ts`)
+- **`forceFlush()` (page unload) no longer loses or double-sends events.** It now
+  (a) includes the offline queue, not just the live queue; (b) chunks the payload
+  under `sendBeacon`'s ~64KB cap (true byte length) instead of silently failing on
+  large batches; (c) persists any refused chunk to storage so it survives to the next
+  page load; (d) **excludes the batch already in-flight in `_flush`** (its keepalive
+  fetch already carries it, so re-beaconing would double-send); and (e) **detaches
+  what it sends synchronously**, so the multiple unload events the handler is wired to
+  (`visibilitychange`/`pagehide`/`beforeunload`) can't re-beacon the same events.
+  (`src/queue.ts`)
+- **Transient send failures no longer double-send.** On a failed flush the events
+  are moved to the offline queue *and removed from the live queue* (single owner),
+  instead of living in both and relying on server-side dedup. (`src/queue.ts`)
+- **Regression tests** for the queue's data-loss / double-send paths
+  (`src/queue.test.ts`) — the file previously had zero coverage.
+
+### Fixed (privacy)
+- **Third-party pixels are no longer loaded for opted-out / DNT / GPC / strict
+  visitors.** Container initialization (which injects Meta/Google/TikTok loaders and
+  calls `fbq('init', …, advancedMatching)` with the visitor's hashed email) is now
+  gated on `shouldTrack()` and an explicit `privacyMode: 'strict'`, matching the
+  existing auto-identify gate. (`src/index.ts`)
+- **Auto-identified email is stored encrypted (AES-GCM) instead of plaintext
+  `localStorage`**, consistent with `dl_user_traits`. A value written by a pre-1.7.1
+  build is plaintext; it is detected (raw read — ciphertext is base64, so an `@` means
+  it was never encrypted) and **re-encrypted in place on next init**, so the installed
+  base is migrated, not just new visitors. (`src/auto-identify.ts`)
+
 ## [1.7.0] - 2026-06-01
 
 ### Added

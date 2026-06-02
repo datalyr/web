@@ -49,7 +49,7 @@ export class AutoIdentifyManager {
   /**
    * Initialize auto-identify system
    */
-  initialize(identifyCallback: (email: string, source: string) => void): void {
+  async initialize(identifyCallback: (email: string, source: string) => void): Promise<void> {
     if (!this.config.enabled) {
       this.log('Auto-identify disabled');
       return;
@@ -57,10 +57,27 @@ export class AutoIdentifyManager {
 
     this.identifyCallback = identifyCallback;
 
-    // Check if already identified
-    const existingEmail = storage.get('dl_auto_identified_email');
+    // Check if already identified.
+    // WEB-5: the captured email is PII — store it AES-GCM-encrypted (consistent with
+    // dl_user_traits), not plaintext localStorage.
+    const existingEmail = await storage.getEncrypted('dl_auto_identified_email');
     if (existingEmail) {
-      this.log('User already auto-identified:', existingEmail);
+      // Migration: a value written by a pre-1.7.1 build is PLAINTEXT. getEncrypted
+      // returns it anyway — decrypt() has a backwards-compat fallback that hands back
+      // the raw string when AES decryption fails — so without this step the PII would
+      // stay in plaintext localStorage forever. Detect a legacy plaintext email by
+      // inspecting the RAW stored bytes (ciphertext is base64, so an '@' means it was
+      // never encrypted) and re-write it encrypted in place.
+      const raw = storage.get('dl_auto_identified_email');
+      if (typeof raw === 'string' && raw.includes('@')) {
+        try {
+          await storage.setEncrypted('dl_auto_identified_email', existingEmail);
+          this.log('Migrated legacy plaintext auto-identified email to encrypted storage');
+        } catch (error) {
+          this.log('Failed to migrate legacy auto-identified email:', error);
+        }
+      }
+      this.log('User already auto-identified');
       return;
     }
 
@@ -434,24 +451,34 @@ export class AutoIdentifyManager {
   /**
    * Trigger identify with rate limiting
    */
-  private triggerIdentify(email: string, source: string): void {
+  private async triggerIdentify(email: string, source: string): Promise<void> {
     // Rate limiting
     const now = Date.now();
     if (now - this.lastIdentifyTime < this.RATE_LIMIT_MS) {
       this.log('Rate limited, skipping identify');
       return;
     }
+    // Stamp the rate-limit timer synchronously, BEFORE the async storage calls below,
+    // so two near-simultaneous triggers can't both slip past into a double-identify
+    // (the storage read/write is now async — a window the old sync code didn't have).
+    this.lastIdentifyTime = now;
 
-    // Check if already identified
-    const existingEmail = storage.get('dl_auto_identified_email');
+    // Check if already identified.
+    // WEB-5: encrypted store (the email is PII at rest).
+    const existingEmail = await storage.getEncrypted('dl_auto_identified_email');
     if (existingEmail === email) {
       this.log('Already identified with this email');
       return;
     }
 
-    // Store email to prevent duplicate identification
-    storage.set('dl_auto_identified_email', email);
-    this.lastIdentifyTime = now;
+    // Store email (encrypted) to prevent duplicate identification. Best-effort: a
+    // storage/encryption failure must not block the identify, since the identify
+    // event carries the email to the backend regardless.
+    try {
+      await storage.setEncrypted('dl_auto_identified_email', email);
+    } catch (error) {
+      this.log('Failed to persist auto-identified email:', error);
+    }
 
     // Trigger callback
     if (this.identifyCallback) {

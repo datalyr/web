@@ -37,6 +37,8 @@ export class EventQueue {
   private OFFLINE_QUEUE_KEY = 'dl_offline_queue';
   private flushLock = false; // FIXED (DATA-03): Mutex to prevent race conditions
   private offlineQueueLock = false; // FIXED (DATA-03): Separate lock for offline queue operations
+  private offlineProcessing = false; // FIXED (WEB-1): re-entrancy guard for processOfflineQueue
+  private inFlight: IngestEventPayload[] = []; // FIXED (WEB-3): batch currently in _flight's keepalive fetch — forceFlush must NOT re-beacon it
 
   constructor(config: any) {
     this.config = {
@@ -62,6 +64,14 @@ export class EventQueue {
     this.loadOfflineQueue();
     this.setupNetworkListeners();
     this.startPeriodicFlush();
+
+    // WEB-1: a previous session may have left events in the persisted offline queue.
+    // The 'online' listener only fires on an offline→online TRANSITION, which never
+    // happens for a visitor who returns already-online — so drain on startup too,
+    // otherwise those events (incl. failed revenue conversions) just age out.
+    if (this.networkStatus.isOnline && this.offlineQueue.length > 0) {
+      setTimeout(() => this.processOfflineQueue(), 1000);
+    }
   }
 
   /**
@@ -228,6 +238,13 @@ export class EventQueue {
     const batchSize = Math.min(this.config.batchSize, this.queue.length);
     const events = this.queue.slice(0, batchSize);
 
+    // WEB-3 (HIGH-1): mark this batch as in-flight. sendBatch's fetch uses
+    // keepalive:true, so it survives an unload that fires mid-flush — forceFlush
+    // reads `inFlight` to avoid re-beaconing the very events this fetch is sending.
+    // `inFlight` is always the FRONT `batchSize` of this.queue while flushLock holds
+    // (enqueue only pushes to the back; flushLock serializes _flush bodies).
+    this.inFlight = events;
+
     try {
       await this.sendBatch(events);
       // SUCCESS: Now it's safe to remove events from queue
@@ -235,9 +252,15 @@ export class EventQueue {
       this.log(`Successfully sent and removed ${batchSize} events from queue`);
     } catch (error) {
       this.log('Failed to send batch:', error);
-      // Don't remove from queue - events stay for retry
-      // Move to offline queue for persistent storage
+      // WEB-8: make the offline queue the SINGLE owner of these events. Previously
+      // they stayed in the live queue AND were copied to the offline queue, so a
+      // later success on both paths double-sent (relying on server-side dedup).
+      // Remove the same slice from the live queue; the offline queue now drains on
+      // every periodic tick (WEB-1/WEB-2), so they are still retried, not stranded.
+      this.queue.splice(0, batchSize);
       this.moveToOfflineQueue(events);
+    } finally {
+      this.inFlight = [];
     }
   }
 
@@ -335,6 +358,13 @@ export class EventQueue {
       if (this.queue.length > 0) {
         this.flush();
       }
+      // WEB-1/WEB-2: also drain persisted offline events (including failed critical
+      // events that enqueue() parked here) on every tick — not only on an 'online'
+      // transition that may never fire. This is what gives parked purchase/lead
+      // events a retry path while the user stays online.
+      if (this.networkStatus.isOnline && this.offlineQueue.length > 0) {
+        this.processOfflineQueue();
+      }
     }, this.config.flushInterval);
   }
 
@@ -411,27 +441,37 @@ export class EventQueue {
    * Process offline queue
    */
   private async processOfflineQueue(): Promise<void> {
+    // WEB-1: guard against re-entrancy. This is now driven from three places (the
+    // 'online' listener, the periodic flush, and the on-load kick); without a guard
+    // two of them could splice the same offlineQueue concurrently and double-send.
+    if (this.offlineProcessing) return;
     if (this.offlineQueue.length === 0) return;
+    if (!this.networkStatus.isOnline) return;
 
-    this.log(`Processing ${this.offlineQueue.length} offline events`);
+    this.offlineProcessing = true;
+    try {
+      this.log(`Processing ${this.offlineQueue.length} offline events`);
 
-    while (this.offlineQueue.length > 0) {
-      const batch = this.offlineQueue.splice(0, this.config.batchSize);
-      
-      try {
-        await this.sendBatch(batch);
-        this.saveOfflineQueue();
-      } catch (error) {
-        this.log('Failed to send offline batch:', error);
-        // Put back in queue
-        this.offlineQueue.unshift(...batch);
-        this.saveOfflineQueue();
-        break;
+      while (this.offlineQueue.length > 0) {
+        const batch = this.offlineQueue.splice(0, this.config.batchSize);
+
+        try {
+          await this.sendBatch(batch);
+          this.saveOfflineQueue();
+        } catch (error) {
+          this.log('Failed to send offline batch:', error);
+          // Put back in queue
+          this.offlineQueue.unshift(...batch);
+          this.saveOfflineQueue();
+          break;
+        }
       }
-    }
 
-    if (this.offlineQueue.length === 0) {
-      storage.remove(this.OFFLINE_QUEUE_KEY);
+      if (this.offlineQueue.length === 0) {
+        storage.remove(this.OFFLINE_QUEUE_KEY);
+      }
+    } finally {
+      this.offlineProcessing = false;
     }
   }
 
@@ -457,31 +497,106 @@ export class EventQueue {
   }
 
   /**
+   * Build a batch payload from a set of events.
+   */
+  private buildBatch(events: IngestEventPayload[]): IngestBatchPayload {
+    return {
+      events,
+      batchId: generateUUID(),
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  /**
    * Force flush (for page unload)
+   * FIXED (WEB-3): include the offline queue, chunk under sendBeacon's ~64KB cap,
+   * and persist any chunk the browser refuses so it survives to the next page load.
+   * Previously this beaconed the live queue as one blob — ignoring the offline queue
+   * entirely and silently failing (returning false) whenever the payload exceeded 64KB.
+   *
+   * Two follow-up review fixes:
+   *  - HIGH-1: exclude any batch currently in-flight in _flush(). That batch is being
+   *    sent with a keepalive fetch that already survives unload; re-beaconing it would
+   *    double-send. (`inFlight` is the front `inFlight.length` events of this.queue.)
+   *  - HIGH-2: handleUnload is wired to visibilitychange+pagehide+beforeunload, so this
+   *    runs multiple times per lifecycle. Detach what we beacon SYNCHRONOUSLY (clear the
+   *    in-memory queues, persist a refused remainder straight to storage rather than back
+   *    into this.offlineQueue) so a repeat call finds nothing to re-send.
    */
   async forceFlush(): Promise<void> {
-    // Try sendBeacon first for reliability
-    if (navigator.sendBeacon && this.queue.length > 0) {
-      const batchPayload: IngestBatchPayload = {
-        events: this.queue,
-        batchId: generateUUID(),
-        timestamp: new Date().toISOString()
-      };
+    if (!navigator.sendBeacon) {
+      // No beacon API — best-effort keepalive-fetch drain of both queues.
+      await this.flush();
+      await this.processOfflineQueue();
+      return;
+    }
 
-      const blob = new Blob([JSON.stringify(batchPayload)], {
+    // Exclude the in-flight batch (its keepalive fetch already carries it).
+    const live = this.queue.slice(this.inFlight.length);
+    const pending = [...live, ...this.offlineQueue];
+
+    // Detach synchronously: keep only the in-flight front (for _flush to settle) and
+    // empty the offline queue, so a second unload event this lifecycle re-enters with
+    // nothing to re-beacon. The refused remainder (if any) is persisted to STORAGE
+    // below, not back into this.offlineQueue, for exactly this reason.
+    this.queue = this.queue.slice(0, this.inFlight.length);
+    this.offlineQueue = [];
+
+    if (pending.length === 0) return;
+
+    const MAX_BEACON_BYTES = 60000; // headroom under the browser's ~64KB cap
+
+    // Greedily pack events into chunks bounded by BOTH batchSize and byte size.
+    const chunks: IngestEventPayload[][] = [];
+    let current: IngestEventPayload[] = [];
+    let currentBytes = 2; // approx for the JSON array/object wrapper
+    for (const ev of pending) {
+      // Byte length (not UTF-16 .length) so multibyte product names / emoji can't
+      // under-count and overflow the cap.
+      const evBytes = new Blob([JSON.stringify(ev)]).size + 1;
+      if (
+        current.length > 0 &&
+        (current.length >= this.config.batchSize || currentBytes + evBytes > MAX_BEACON_BYTES)
+      ) {
+        chunks.push(current);
+        current = [];
+        currentBytes = 2;
+      }
+      current.push(ev);
+      currentBytes += evBytes;
+    }
+    if (current.length > 0) chunks.push(current);
+
+    // Send each chunk; the moment the browser refuses to enqueue one, keep it and
+    // everything after it for the next session.
+    let failedFrom = -1;
+    for (let c = 0; c < chunks.length; c++) {
+      const blob = new Blob([JSON.stringify(this.buildBatch(chunks[c]))], {
         type: 'application/json'
       });
-
-      const success = navigator.sendBeacon(this.config.endpoint, blob);
-      if (success) {
-        this.log('Events sent via sendBeacon');
-        this.queue = [];
-        return;
+      if (!navigator.sendBeacon(this.config.endpoint, blob)) {
+        failedFrom = c;
+        break;
       }
     }
 
-    // Fallback to regular flush
-    await this.flush();
+    if (failedFrom >= 0) {
+      const remainder = chunks
+        .slice(failedFrom)
+        .reduce((acc, c) => acc.concat(c), [] as IngestEventPayload[]);
+      // Persist straight to storage (NOT this.offlineQueue) so a repeat unload event
+      // won't re-beacon it; the next page load's drain (which uses a normal fetch with
+      // no 64KB cap) delivers it. MED-2: log if the maxOfflineQueueSize cap truncates.
+      const toPersist = remainder.slice(-this.config.maxOfflineQueueSize);
+      if (remainder.length > toPersist.length) {
+        this.log(`Offline cap dropped ${remainder.length - toPersist.length} oldest events at unload`);
+      }
+      storage.set(this.OFFLINE_QUEUE_KEY, toPersist);
+      this.log(`sendBeacon refused ${remainder.length} events; persisted ${toPersist.length} for next load`);
+    } else {
+      this.log('Events sent via sendBeacon');
+      storage.remove(this.OFFLINE_QUEUE_KEY);
+    }
   }
 
   /**
