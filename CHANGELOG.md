@@ -45,6 +45,29 @@ All notable changes to this project will be documented in this file.
 - **`sdk_version` now reports `1.7.1`** instead of the stale hardcoded `1.6.5`, so ingested
   data reflects which clients have these fixes. (`src/index.ts`)
 
+### Fixed (consent / privacy — from the deep web-SDK review)
+- **`optOut()` now actually stops tracking and clears PII.** Previously it set a flag and
+  cleared only the in-memory live queue — events persisted *before* opt-out still drained
+  on the next periodic/on-load tick (the queue had no consent gate), and stored PII was
+  left at rest. Now opt-out disables the queue (no send, no drain), purges the live +
+  offline queues, tears down auto-identify, drops loaded pixels, and removes
+  `dl_user_traits` / `dl_auto_identified_email`. (`src/index.ts`, `src/queue.ts`)
+- **`setConsent()` is now enforced, not just stored.** `analytics: false` gates first-party
+  event sending; `marketing: false` / `sale: false` (CCPA "do not sell") gates the
+  third-party pixels. Previously `dl_consent` was written and never read. (`src/index.ts`)
+- **`syncOutboundLinkParams` (CC bridge) is gated on consent** — an opted-out / DNT / GPC
+  visitor's id + click-ids are no longer stamped on outbound links. (`src/index.ts`)
+- **`group()` / `alias()` honor consent** before mutating persisted identity, and `alias('')`
+  is rejected. (`src/index.ts`)
+- **`reset()` clears the auto-identified email and super-properties** — fixes cross-user
+  contamination on shared devices (the next user was never re-captured, and the prior
+  user's email/super-props leaked into their events). (`src/index.ts`)
+
+### Added (multi-touch journey — from the deep review)
+- **Customer-journey touchpoints are now recorded** (one per session) so `touchpoint_count`
+  and `days_since_first_touch` are real signals. `addTouchpoint()` previously had no
+  callers, so the journey was always empty. (`src/index.ts`, `src/attribution.ts`)
+
 ### Fixed (privacy)
 - **Third-party pixels are no longer loaded for opted-out / DNT / GPC / strict
   visitors.** Container initialization (which injects Meta/Google/TikTok loaders and

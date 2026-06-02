@@ -129,4 +129,29 @@ describe('EventQueue — data-loss & double-send paths (WEB-1/2/3/8)', () => {
     expect(fetchMock).toHaveBeenCalled();
     expect(queue.getOfflineQueueSize()).toBe(0);
   });
+
+  test('consent gate: setEnabled(false) stops the offline drain (events persisted before opt-out are NOT sent)', async () => {
+    jest.useFakeTimers();
+    storage.set(OFFLINE_KEY, [makeEvent('purchase', 1)]);
+    const fetchMock = jest.fn(() => Promise.resolve({ ok: true }));
+    (global as any).fetch = fetchMock;
+
+    queue = newQueue();
+    queue.setEnabled(false); // opt-out before the on-load drain fires
+    await jest.advanceTimersByTimeAsync(1100);
+
+    expect(fetchMock).not.toHaveBeenCalled(); // disabled → no drain of pre-opt-out events
+  });
+
+  test('consent gate: a disabled queue neither sends critical events nor flushes', async () => {
+    (global as any).fetch = jest.fn(() => Promise.resolve({ ok: true }));
+    queue = newQueue();
+    queue.setEnabled(false);
+
+    queue.enqueue(makeEvent('purchase', 1)); // critical event — would normally send immediately
+    await queue.flush();
+
+    expect((global as any).fetch).not.toHaveBeenCalled();
+    expect(queue.getQueueSize()).toBe(0);
+  });
 });

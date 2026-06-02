@@ -56,6 +56,10 @@ class Datalyr {
   private superProperties: Record<string, any> = {};
   private userProperties: Record<string, any> = {};
   private optedOut = false;
+  // Consent preferences (setConsent). null = not set → no consent-based restriction.
+  private consent: ConsentConfig | null = null;
+  // WEB-6: the session id we last recorded a journey touchpoint for (one per session).
+  private lastTouchpointSession: string | null = null;
   private initialized = false;
   private errors: ErrorInfo[] = [];
   private MAX_ERRORS = 50;
@@ -146,6 +150,10 @@ class Datalyr {
     // Check opt-out AFTER cookies configured (Issue #14)
     this.optedOut = this.cookies.get('__dl_opt_out') === 'true';
 
+    // Load persisted consent so shouldTrack()/container gating honor it from the
+    // first event (setConsent persists it; see optOut for the enforcement on opt-out).
+    this.consent = storage.get('dl_consent', null);
+
     // CC funnel page entry: restore the _dl_* URL bridge BEFORE IdentityManager
     // initializes so the storefront's visitor_id is the one used here (instead
     // of auto-generating a fresh one on this domain).
@@ -169,6 +177,12 @@ class Datalyr {
     // Set session ID in identity manager
     const sessionId = this.session.getSessionId();
     this.identity.setSessionId(sessionId);
+
+    // Honor opt-out / withdrawn analytics consent at the queue level so events
+    // persisted before opt-out aren't drained (now that the queue exists).
+    if (this.optedOut || (this.consent && this.consent.analytics === false)) {
+      this.queue.setEnabled(false);
+    }
 
     // FIXED (ISSUE-01): Start async initialization immediately but don't block constructor
     // This allows encryption to initialize before any events are tracked
@@ -229,7 +243,7 @@ class Datalyr {
         // gate this: the container fetch is what delivers the remote config, so only
         // local consent signals + an explicit strict init() are knowable here.)
         const privacyStrict = this.config.privacyMode === 'strict';
-        if (this.config.enableContainer !== false && this.shouldTrack() && !privacyStrict) {
+        if (this.config.enableContainer !== false && this.shouldTrack() && !privacyStrict && this.consentAllowsMarketing()) {
           this.container = new ContainerManager({
             workspaceId: this.config.workspaceId,
             endpoint: this.config.endpoint,
@@ -327,7 +341,9 @@ class Datalyr {
         // Storefront → CC bridge: stamp _dl_* params on outbound links to the
         // configured CC domains so visitor_id + click signals cross the domain
         // boundary. Inert unless checkoutChampDomains is set.
-        if (Array.isArray(this.config.checkoutChampDomains) && this.config.checkoutChampDomains.length > 0) {
+        if (Array.isArray(this.config.checkoutChampDomains) && this.config.checkoutChampDomains.length > 0 && this.shouldTrack()) {
+          // MED-4: gated on shouldTrack() (like syncShopifyCartAttributes) so an
+          // opted-out / DNT / GPC visitor's id + click-ids aren't stamped on outbound links.
           this.syncOutboundLinkParams(this.config.checkoutChampDomains);
         }
 
@@ -533,6 +549,15 @@ class Datalyr {
     }
     if (!this.shouldTrack()) return;
 
+    // WEB-6: record one customer-journey touchpoint per session so touchpoint_count /
+    // days_since_first_touch become real multi-touch signals (addTouchpoint had no
+    // callers before, so the journey was always empty).
+    const sid = this.session.getSessionId();
+    if (sid !== this.lastTouchpointSession) {
+      this.lastTouchpointSession = sid;
+      this.attribution.addTouchpoint(sid, this.attribution.captureAttribution());
+    }
+
     const pageData: PageProperties = {
       title: document.title,
       url: window.location.href,
@@ -596,6 +621,7 @@ class Datalyr {
       console.warn('[Datalyr] SDK not initialized. Call init() first.');
       return;
     }
+    if (!this.shouldTrack()) return;
     this.track('$group', {
       group_id: groupId,
       traits
@@ -610,6 +636,12 @@ class Datalyr {
       console.warn('[Datalyr] SDK not initialized. Call init() first.');
       return;
     }
+    if (!userId) {
+      console.warn('[Datalyr] alias() requires a non-empty userId');
+      return;
+    }
+    // Gate before mutating persisted identity (identity.alias writes dl_user_id).
+    if (!this.shouldTrack()) return;
     const aliasData = this.identity.alias(userId, previousId);
     this.track('$alias', aliasData);
   }
@@ -624,7 +656,14 @@ class Datalyr {
     }
     this.identity.reset();
     this.userProperties = {};
+    // Clear super properties too — they'd otherwise keep attaching the previous user's
+    // values to the next user's events (cross-user contamination on shared devices).
+    this.superProperties = {};
     storage.remove('dl_user_traits');
+    // Clear the auto-identify guard so a different user on the same browser is
+    // re-captured (it short-circuits while dl_auto_identified_email is present), and so
+    // the prior user's email isn't left at rest after logout.
+    storage.remove('dl_auto_identified_email');
     this.session.createNewSession();
     this.log('User reset');
   }
@@ -760,7 +799,23 @@ class Datalyr {
     }
     this.optedOut = true;
     this.cookies.set('__dl_opt_out', 'true', this.config.cookieExpires);
+    // Stop the queue from sending OR draining anything persisted before opt-out, and
+    // purge what's already buffered (the periodic/on-load drain has no other gate).
+    this.queue.setEnabled(false);
     this.queue.clear();
+    this.queue.clearOffline();
+    // Tear down auto-identify so it stops capturing email into storage post-opt-out.
+    this.autoIdentify?.destroy();
+    this.autoIdentify = undefined;
+    // Stop forwarding to (and drop) third-party pixels for this visitor.
+    if (this.container) {
+      this.container.cleanupAllIframes();
+      this.container = undefined;
+    }
+    // Purge PII at rest.
+    this.userProperties = {};
+    storage.remove('dl_user_traits');
+    storage.remove('dl_auto_identified_email');
     this.log('User opted out');
   }
 
@@ -774,6 +829,10 @@ class Datalyr {
     }
     this.optedOut = false;
     this.cookies.set('__dl_opt_out', 'false', this.config.cookieExpires);
+    // Re-enable sending (unless analytics consent is still withdrawn).
+    if (!this.consent || this.consent.analytics !== false) {
+      this.queue.setEnabled(true);
+    }
     this.log('User opted in');
   }
 
@@ -788,7 +847,22 @@ class Datalyr {
    * Set consent preferences
    */
   setConsent(consent: ConsentConfig): void {
+    this.consent = consent;
     storage.set('dl_consent', consent);
+
+    // Enforce it live (not just persist it). Analytics consent gates first-party event
+    // sending; marketing/sale consent gates third-party pixels.
+    if (consent.analytics === false) {
+      this.queue.setEnabled(false);
+    } else if (!this.optedOut) {
+      this.queue.setEnabled(true);
+    }
+    if (!this.consentAllowsMarketing() && this.container) {
+      // Stop sharing data with already-loaded pixels (next page load won't init them).
+      this.container.cleanupAllIframes();
+      this.container = undefined;
+    }
+
     this.log('Consent updated:', consent);
   }
 
@@ -1250,6 +1324,11 @@ class Datalyr {
       return false;
     }
 
+    // Explicit analytics-consent withdrawal (setConsent) blocks first-party tracking.
+    if (this.consent && this.consent.analytics === false) {
+      return false;
+    }
+
     // Check Do Not Track
     if (this.config.respectDoNotTrack && isDoNotTrackEnabled()) {
       return false;
@@ -1261,6 +1340,15 @@ class Datalyr {
     }
 
     return true;
+  }
+
+  /**
+   * Whether marketing/third-party pixels are allowed. Withdrawing `marketing` or `sale`
+   * (CCPA "do not sell") consent via setConsent() blocks loading the Meta/Google/TikTok
+   * pixels (which share data). No consent set = allowed (default).
+   */
+  private consentAllowsMarketing(): boolean {
+    return !this.consent || (this.consent.marketing !== false && this.consent.sale !== false);
   }
 
   /**

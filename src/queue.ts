@@ -39,6 +39,7 @@ export class EventQueue {
   private offlineQueueLock = false; // FIXED (DATA-03): Separate lock for offline queue operations
   private offlineProcessing = false; // FIXED (WEB-1): re-entrancy guard for processOfflineQueue
   private inFlight: IngestEventPayload[] = []; // FIXED (WEB-3): batch currently in _flight's keepalive fetch — forceFlush must NOT re-beacon it
+  private enabled = true; // FIXED (consent): when false (opt-out / withdrawn analytics consent) all enqueue/flush/drain is a no-op
 
   constructor(config: any) {
     this.config = {
@@ -78,6 +79,10 @@ export class EventQueue {
    * Add event to queue
    */
   enqueue(event: IngestEventPayload): void {
+    // Consent gate: opt-out / withdrawn analytics consent stops all sending. (The SDK
+    // also gates at track(), but this is the backstop for anything that reaches here.)
+    if (!this.enabled) return;
+
     const eventName = event.event_name; // Use snake_case
 
     // Check for duplicates (within 500ms window)
@@ -193,6 +198,7 @@ export class EventQueue {
    * FIXED (DATA-03): Enhanced protection against concurrent flushes
    */
   async flush(): Promise<void> {
+    if (!this.enabled) return;
     // FIXED (DATA-03): Check both promise and lock for concurrent flush protection
     if (this.flushPromise || this.flushLock) {
       return this.flushPromise || Promise.resolve();
@@ -444,6 +450,7 @@ export class EventQueue {
     // WEB-1: guard against re-entrancy. This is now driven from three places (the
     // 'online' listener, the periodic flush, and the on-load kick); without a guard
     // two of them could splice the same offlineQueue concurrently and double-send.
+    if (!this.enabled) return;
     if (this.offlineProcessing) return;
     if (this.offlineQueue.length === 0) return;
     if (!this.networkStatus.isOnline) return;
@@ -524,6 +531,7 @@ export class EventQueue {
    *    into this.offlineQueue) so a repeat call finds nothing to re-send.
    */
   async forceFlush(): Promise<void> {
+    if (!this.enabled) return;
     if (!navigator.sendBeacon) {
       // No beacon API — best-effort keepalive-fetch drain of both queues.
       await this.flush();
@@ -608,6 +616,24 @@ export class EventQueue {
       clearTimeout(this.batchTimer);
       this.batchTimer = null;
     }
+  }
+
+  /**
+   * Enable/disable all sending. Used by opt-out / withdrawn analytics consent so that
+   * events persisted BEFORE opt-out aren't drained afterwards (the periodic drain and
+   * the on-load drain both honor this).
+   */
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+  }
+
+  /**
+   * Clear the offline queue and its persisted copy (used by opt-out to purge any
+   * PII-bearing events that were parked before the user opted out).
+   */
+  clearOffline(): void {
+    this.offlineQueue = [];
+    storage.remove(this.OFFLINE_QUEUE_KEY);
   }
 
   /**
