@@ -94,6 +94,20 @@
       check('WEB-5: stored traits do NOT contain the raw email (encrypted at rest)',
         !!traits && !traits.includes('secret@example.com'), traits ? `len=${traits.length}` : '(no traits key)');
 
+      // --- NEW-2: after identify() rotated the session, the top-level session_id and the
+      // event_data session_id (from session.getMetrics()) must agree ---
+      const beforeSid = window.__sent.length;
+      window.datalyr.track('purchase', { value: 1 }); // critical → sends immediately
+      await sleep(60);
+      let topSid = null, dataSid = null;
+      try {
+        const r = window.__sent.slice(beforeSid).find(x => x.body.includes('purchase'));
+        const evt = JSON.parse(r.body).events.find(e => e.event_name === 'purchase');
+        topSid = evt.session_id; dataSid = evt.event_data && evt.event_data.session_id;
+      } catch (e) {}
+      check('NEW-2: top-level session_id === event_data.session_id after identify()',
+        !!topSid && topSid === dataSid, `top=${topSid} data=${dataSid}`);
+
       // --- WEB-1/2: offline → queued (no send) → online → drains ---
       window.dispatchEvent(new Event('offline'));
       const beforeOffline = window.__sent.length;

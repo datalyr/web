@@ -77,6 +77,27 @@ All notable changes to this project will be documented in this file.
   and `days_since_first_touch` are real signals. `addTouchpoint()` previously had no
   callers, so the journey was always empty. (`src/index.ts`, `src/attribution.ts`)
 
+### Fixed (pixel + lifecycle — from the deep review)
+- **TikTok standard conversions are no longer mis-categorized.** The TikTok event map was
+  keyed on Meta-style names (`'Purchase'`) but looked up with the raw event (`'purchase'`),
+  so every standard event fell through and fired as a literal custom event. Now keyed on
+  the raw lowercased name (with a workspace rule map first), with the full TikTok vocabulary
+  (`purchase`→`CompletePayment`, etc.). (`src/container.ts`)
+- **`session_id` is consistent again.** It changes on `identify()` (session rotation) and on
+  timeout, but the identity manager only synced it at init — so the top-level `session_id`
+  (from identity) disagreed with `event_data.session_id` (from session metrics). Now synced
+  per event. (`src/index.ts`)
+- **`destroy()` no longer leaks or wedges re-init.** It now removes the unload/visibility
+  listeners and tears down the CC outbound-link observer, and resets the init promise +
+  container/auto-identify so a `destroy()`+`init()` cycle comes back fully initialized.
+  (`src/index.ts`)
+- **SPA `pageview` no longer double-fires** on routers that `replaceState` on mount —
+  consecutive same-URL navigations are deduped. (`src/index.ts`)
+- **`trackAppDownloadClick()` awaits the flush** before navigating away, so the click event
+  isn't lost on browsers without `sendBeacon`. (`src/index.ts`)
+- **`setAttribution()` actually affects events now** (routes through the AttributionManager's
+  last/first touch instead of a dead session key it only wrote and never read). (`src/index.ts`)
+
 ### Fixed (privacy)
 - **Third-party pixels are no longer loaded for opted-out / DNT / GPC / strict
   visitors.** Container initialization (which injects Meta/Google/TikTok loaders and

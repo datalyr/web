@@ -66,6 +66,10 @@ class Datalyr {
   private originalReplaceState?: typeof history.replaceState;
   private popstateHandler?: EventListener;
   private hashchangeHandler?: EventListener;
+  private unloadHandler?: () => void;          // beforeunload + pagehide (removed in destroy)
+  private visibilityHandler?: () => void;      // visibilitychange (removed in destroy)
+  private outboundDisposer?: () => void;        // tears down the CC outbound-link observer/listener
+  private lastSpaPath: string | null = null;    // dedups SPA pageviews (replaceState-on-mount double-fire)
   // FIXED (ISSUE-01): Async initialization promise to prevent race conditions
   private initializationPromise: Promise<void> | null = null;
 
@@ -430,10 +434,10 @@ class Datalyr {
    * For Android, encodes attribution params into the Play Store referrer
    * so the mobile SDK can retrieve them deterministically after install.
    */
-  trackAppDownloadClick(options: {
+  async trackAppDownloadClick(options: {
     targetPlatform: 'ios' | 'android';
     appStoreUrl: string;
-  }): void {
+  }): Promise<void> {
     if (!this.initialized) {
       console.warn('[Datalyr] SDK not initialized. Call init() first.');
       return;
@@ -447,8 +451,11 @@ class Datalyr {
       app_store_url: options.appStoreUrl,
     });
 
-    // Flush immediately via sendBeacon before page navigates away
-    this.queue.forceFlush();
+    // AWAIT the flush before navigating away (M5). sendBeacon dispatches synchronously,
+    // but on browsers WITHOUT sendBeacon forceFlush falls back to a keepalive fetch —
+    // and the synchronous window.location assignment below would tear the page down
+    // before that fetch dispatched, losing the click event.
+    await this.queue.forceFlush();
 
     // For Android: append referrer param to Play Store URL with click attribution
     if (options.targetPlatform === 'android' && options.appStoreUrl.includes('play.google.com')) {
@@ -787,7 +794,14 @@ class Datalyr {
    */
   setAttribution(attribution: Partial<Attribution>): void {
     const current = this.attribution.captureAttribution();
-    const merged = { ...current, ...attribution };
+    const merged = { ...current, ...attribution } as Attribution;
+    // M6: actually make this affect events. Previously it only wrote a session key that
+    // NOTHING in the event path reads, so setAttribution() was a silent no-op. Route it
+    // through the AttributionManager so last_touch_* reflects it (and first_touch_* when
+    // none is set yet — storeFirstTouch is immutable-unless-expired, so it won't clobber
+    // an existing first touch).
+    this.attribution.storeLastTouch(merged);
+    this.attribution.storeFirstTouch(merged);
     this.session.storeAttribution(merged);
   }
 
@@ -1229,14 +1243,15 @@ class Datalyr {
       const observer = new MutationObserver(scheduleRestamp);
       observer.observe(document.documentElement, { childList: true, subtree: true });
 
-      // Observer + click listener live for the session; pagehide cleans up on
-      // full-page unload. SPA route changes are fine — we WANT stamping to keep
-      // working across virtual navigations.
-      window.addEventListener("pagehide", () => {
+      // Observer + click listener live for the session; pagehide cleans up on full-page
+      // unload, and destroy() can tear them down early via this disposer (H2 — otherwise
+      // a destroy()+re-init() leaks the observer + capturing click listener).
+      this.outboundDisposer = () => {
         try { observer.disconnect(); } catch { /* idempotent */ }
-        if (restampTimer != null) clearTimeout(restampTimer);
+        if (restampTimer != null) { clearTimeout(restampTimer); restampTimer = null; }
         document.removeEventListener("click", onClick, true);
-      }, { once: true });
+      };
+      window.addEventListener("pagehide", () => this.outboundDisposer?.(), { once: true });
     } catch (error) {
       this.log("MutationObserver setup failed (CC link sync):", error);
     }
@@ -1248,6 +1263,13 @@ class Datalyr {
    * Create event payload
    */
   private createEventPayload(eventName: string, properties: Record<string, any>, eventIdArg?: string): IngestEventPayload {
+    // NEW-2: keep the identity's cached session id in lockstep with the LIVE session.
+    // The session id changes on identify() (rotateSessionId) and on session timeout, but
+    // identity only synced it at init/start — so the top-level payload.session_id (from
+    // identity) disagreed with event_data.session_id (from session.getMetrics()). Sync
+    // here, before reading either, so every event carries a single consistent session id.
+    this.identity.setSessionId(this.session.getSessionId());
+
     // Sanitize and merge properties
     const sanitizedProperties = sanitizeEventData(properties);
     const eventData = deepMerge(
@@ -1372,61 +1394,60 @@ class Datalyr {
     this.originalReplaceState = history.replaceState;
     const self = this;
 
+    // Seed with the current URL so a router's replaceState-on-mount (same URL) doesn't
+    // fire a duplicate pageview on top of the initial page() call. (M2/M3)
+    this.lastSpaPath = window.location.pathname + window.location.search + window.location.hash;
+
     // Override pushState
     history.pushState = function(...args) {
       self.originalPushState!.apply(history, args);
-      setTimeout(() => {
-        // Clear attribution cache to capture fresh URL params
-        self.attribution.clearCache();
-        self.page();
-      }, 0);
+      setTimeout(() => self.handleSpaNavigation(), 0);
     };
 
     // Override replaceState
     history.replaceState = function(...args) {
       self.originalReplaceState!.apply(history, args);
-      setTimeout(() => {
-        // Clear attribution cache to capture fresh URL params
-        self.attribution.clearCache();
-        self.page();
-      }, 0);
+      setTimeout(() => self.handleSpaNavigation(), 0);
     };
 
     // Listen for popstate
-    this.popstateHandler = () => {
-      setTimeout(() => {
-        // Clear attribution cache to capture fresh URL params
-        self.attribution.clearCache();
-        self.page();
-      }, 0);
-    };
+    this.popstateHandler = () => { setTimeout(() => self.handleSpaNavigation(), 0); };
     window.addEventListener('popstate', this.popstateHandler);
 
     // Listen for hashchange
-    this.hashchangeHandler = () => {
-      // Clear attribution cache to capture fresh URL params
-      self.attribution.clearCache();
-      self.page();
-    };
+    this.hashchangeHandler = () => { self.handleSpaNavigation(); };
     window.addEventListener('hashchange', this.hashchangeHandler);
+  }
+
+  /**
+   * Handle an SPA virtual navigation. Dedups consecutive same-URL fires (M2/M3): many
+   * routers call history.replaceState on mount/hydration, which previously fired a
+   * SECOND `pageview` on top of the initial `page()`. Only fires when the full URL
+   * (path+search+hash) actually changed.
+   */
+  private handleSpaNavigation(): void {
+    const path = window.location.pathname + window.location.search + window.location.hash;
+    if (path === this.lastSpaPath) return;
+    this.lastSpaPath = path;
+    this.attribution.clearCache();
+    this.page();
   }
 
   /**
    * Setup page unload handler
    */
   private setupUnloadHandler(): void {
-    // Use both events for maximum compatibility
-    const handleUnload = () => {
-      this.queue.forceFlush();
+    // Store refs so destroy() can remove these — otherwise a destroy()+re-init() cycle
+    // leaks listeners that keep firing forceFlush() on the OLD (destroyed) queue. (H2)
+    this.unloadHandler = () => { this.queue.forceFlush(); };
+    this.visibilityHandler = () => {
+      if (document.visibilityState === 'hidden') this.queue.forceFlush();
     };
 
-    window.addEventListener('beforeunload', handleUnload);
-    window.addEventListener('pagehide', handleUnload);
-    window.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') {
-        handleUnload();
-      }
-    });
+    // Use multiple events for maximum compatibility.
+    window.addEventListener('beforeunload', this.unloadHandler);
+    window.addEventListener('pagehide', this.unloadHandler);
+    window.addEventListener('visibilitychange', this.visibilityHandler);
   }
 
   /**
@@ -1545,6 +1566,22 @@ class Datalyr {
     if (this.hashchangeHandler) {
       window.removeEventListener('hashchange', this.hashchangeHandler);
     }
+    // H2: also remove the unload/visibility listeners and tear down the CC outbound-link
+    // observer/listener — these were leaking across destroy()+re-init(), keeping the OLD
+    // queue alive and firing on every navigation.
+    if (this.unloadHandler) {
+      window.removeEventListener('beforeunload', this.unloadHandler);
+      window.removeEventListener('pagehide', this.unloadHandler);
+      this.unloadHandler = undefined;
+    }
+    if (this.visibilityHandler) {
+      window.removeEventListener('visibilitychange', this.visibilityHandler);
+      this.visibilityHandler = undefined;
+    }
+    if (this.outboundDisposer) {
+      this.outboundDisposer();
+      this.outboundDisposer = undefined;
+    }
 
     // Clean up queue
     if (this.queue) {
@@ -1568,6 +1605,14 @@ class Datalyr {
 
     // SEC-03 Fix: Clean up encryption keys
     dataEncryption.destroy();
+
+    // H3: reset init state so a subsequent init() fully re-runs. Without nulling the
+    // initializationPromise, initializeAsync() early-returns the stale (resolved)
+    // promise and the SDK comes back half-initialized (no container/pixels/SPA/pageview).
+    this.initializationPromise = null;
+    this.container = undefined;
+    this.autoIdentify = undefined;
+    this.lastSpaPath = null;
 
     // Clear any remaining data
     this.superProperties = {};

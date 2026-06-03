@@ -32,7 +32,10 @@
       if (u.includes('container-scripts')) {
         return Promise.resolve(new Response(JSON.stringify({
           scripts: [],
-          pixels: { meta: { enabled: true, pixel_id: 'PIXEL_TEST_123', event_mappings: {} } },
+          pixels: {
+            meta: { enabled: true, pixel_id: 'PIXEL_TEST_123', event_mappings: {} },
+            tiktok: { enabled: true, pixel_id: 'TT_PIXEL_123' }
+          },
           config: {}
         }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       }
@@ -96,6 +99,16 @@
       check('⭐ pixel eventID === ingest event_id (Meta will dedupe — no double-count)',
         !!ingestId && !!pixelEventId && ingestId === pixelEventId,
         `ingest=${ingestId} pixel=${pixelEventId}`);
+
+      // TikTok-dead fix: a purchase must map to the standard "CompletePayment", NOT fire
+      // as a literal custom "purchase" event (the bug).
+      const ttqCalls = Array.isArray(window.ttq)
+        ? window.ttq.filter(c => Array.isArray(c) && c[0] === 'track') : [];
+      const ttqMapped = ttqCalls.find(c => c[1] === 'CompletePayment');
+      const ttqRaw = ttqCalls.find(c => c[1] === 'purchase');
+      check('TikTok-dead fix: purchase → "CompletePayment" (not raw "purchase")',
+        !!ttqMapped && !ttqRaw,
+        ttqCalls.length ? `tiktok events=[${ttqCalls.map(c => c[1]).join(', ')}]` : '(no ttq track calls)');
     } catch (err) {
       check('harness ran without throwing', false, String(err && err.stack || err));
     }

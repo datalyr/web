@@ -712,17 +712,31 @@ export class ContainerManager {
     // Track to TikTok Pixel
     if (this.pixels?.tiktok?.enabled && (window as any).ttq) {
       try {
-        // Map common events to TikTok names
+        // Map our event names to TikTok's standard vocabulary. BUG FIX (TikTok-dead):
+        // this map was keyed on Meta-standard names ('Purchase') but looked up with the
+        // sanitized RAW event ('purchase'), so EVERY standard event missed and fired as
+        // a literal custom event (e.g. "purchase" instead of "CompletePayment") — all
+        // TikTok conversions were mis-categorized. Now keyed on the lowercased raw name
+        // and looked up the same way the Meta block does, with a workspace rule map first.
         const tiktokEventMap: Record<string, string> = {
-          'Purchase': 'CompletePayment',
-          'AddToCart': 'AddToCart',
-          'InitiateCheckout': 'InitiateCheckout',
-          'ViewContent': 'ViewContent',
-          'Search': 'Search',
-          'Lead': 'SubmitForm'
+          view_content: 'ViewContent', product_viewed: 'ViewContent', view_item: 'ViewContent',
+          search: 'Search',
+          add_to_wishlist: 'AddToWishlist',
+          add_to_cart: 'AddToCart', product_added: 'AddToCart',
+          initiate_checkout: 'InitiateCheckout', begin_checkout: 'InitiateCheckout', checkout_started: 'InitiateCheckout',
+          add_payment_info: 'AddPaymentInfo',
+          purchase: 'CompletePayment', order_completed: 'CompletePayment', order_paid: 'CompletePayment',
+          place_an_order: 'PlaceAnOrder',
+          contact: 'Contact',
+          download: 'Download',
+          lead: 'SubmitForm', submit_form: 'SubmitForm',
+          complete_registration: 'CompleteRegistration', sign_up: 'CompleteRegistration', signup: 'CompleteRegistration',
+          subscribe: 'Subscribe', subscription_created: 'Subscribe',
         };
-
-        const tiktokEvent = tiktokEventMap[sanitizedEventName] || sanitizedEventName;
+        const tiktokRuleMap = (this.pixels?.tiktok as any)?.event_mappings as Record<string, string> | undefined;
+        const tiktokEvent = tiktokRuleMap?.[eventName]
+          || tiktokEventMap[String(eventName).toLowerCase()]
+          || sanitizedEventName;
         (window as any).ttq.track(tiktokEvent, sanitizedProperties);
       } catch (error) {
         this.log('Error tracking TikTok Pixel event:', error);
