@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Datalyr Web SDK — Pixel ⇄ CAPI dedup harness</title>
+  <style>
+    body { font: 14px/1.5 ui-monospace, Menlo, monospace; max-width: 900px; margin: 24px auto; padding: 0 16px; }
+    .pass { color: #157f3b; } .fail { color: #b00020; font-weight: 700; }
+    #summary { font-size: 16px; font-weight: 700; margin: 12px 0; }
+    pre { white-space: pre-wrap; background: #f6f8fa; padding: 12px; border-radius: 6px; }
+    .detail { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Pixel ⇄ CAPI event_id dedup</h1>
+  <p class="detail">Mocks <code>/container-scripts</code> (Meta pixel enabled) + <code>window.fbq</code>,
+  fires a purchase, and asserts the browser pixel's <code>eventID</code> equals the ingest event's
+  <code>event_id</code> — the alignment that makes Meta dedupe the browser + CAPI events (no double-count).</p>
+  <div id="summary">Running…</div>
+  <pre id="results"></pre>
+
+  <script>
+    // Capture fbq calls (pre-defined → the container's fbq snippet keeps this stub).
+    window.__fbq = [];
+    window.fbq = function () { window.__fbq.push(Array.prototype.slice.call(arguments)); };
+    window.fbq.queue = []; window.fbq.loaded = true; window.fbq.version = '2.0'; window._fbq = window.fbq;
+
+    // Mock the network: /container-scripts → a Meta-pixel config; event POSTs → captured + 200.
+    window.__sent = [];
+    window.fetch = function (url, opts) {
+      const u = String(url);
+      if (u.includes('container-scripts')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          scripts: [],
+          pixels: { meta: { enabled: true, pixel_id: 'PIXEL_TEST_123', event_mappings: {} } },
+          config: {}
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      if (opts && opts.method === 'POST') {
+        window.__sent.push({ url: u, body: opts.body ? String(opts.body) : '' });
+      }
+      return Promise.resolve(new Response(JSON.stringify({ success: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' }
+      }));
+    };
+    try { navigator.sendBeacon = function () { return true; }; } catch (e) {}
+  </script>
+
+  <script src="dist/datalyr.js"></script>
+
+  <script>
+  (async function run() {
+    const results = [];
+    const check = (name, cond, detail) => results.push({ name, pass: !!cond, detail: detail || '' });
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    try {
+      try { localStorage.clear(); } catch (e) {}
+
+      window.datalyr.init({
+        workspaceId: 'ws_harness',
+        apiKey: 'test_key',
+        enableContainer: true,     // container ON → loads the (mocked) Meta pixel
+        trackPageViews: false,
+        debug: false,
+      });
+      await window.datalyr.ready();   // container.init() fetches /container-scripts + inits fbq
+      await sleep(100);
+
+      const initCall = window.__fbq.find(a => a[0] === 'init');
+      check('Meta pixel initialized via fbq("init", pixelId)',
+        !!initCall && initCall[1] === 'PIXEL_TEST_123', initCall ? `pixel=${initCall[1]}` : '(no init call)');
+
+      // Fire a purchase — routes to BOTH the ingest payload and the browser pixel.
+      const before = window.__sent.length;
+      window.datalyr.track('purchase', { value: 19.99, currency: 'USD' });
+      await sleep(150);
+
+      // Ingest side: pull the event_id the server/CAPI will dedupe on.
+      let ingestId = null;
+      const req = window.__sent.slice(before).find(r => r.body.includes('purchase'));
+      try {
+        const payload = JSON.parse(req.body);
+        const evt = (payload.events || []).find(e => e.event_name === 'purchase') || (payload.events || [])[0];
+        ingestId = evt && evt.event_id;
+      } catch (e) {}
+      check('purchase event sent to ingest with an event_id', !!ingestId, ingestId ? `event_id=${ingestId}` : '(none)');
+
+      // Pixel side: fbq('track','Purchase', props, { eventID })
+      const trackCall = window.__fbq.find(a => a[0] === 'track' && a[1] === 'Purchase');
+      const pixelEventId = trackCall && trackCall[3] && trackCall[3].eventID;
+      check('browser pixel fired fbq("track","Purchase", …, {eventID})', !!pixelEventId,
+        pixelEventId ? `eventID=${pixelEventId}` : '(no Purchase track call)');
+
+      // THE dedup assertion: the two IDs must match, or Meta double-counts the conversion.
+      check('⭐ pixel eventID === ingest event_id (Meta will dedupe — no double-count)',
+        !!ingestId && !!pixelEventId && ingestId === pixelEventId,
+        `ingest=${ingestId} pixel=${pixelEventId}`);
+    } catch (err) {
+      check('harness ran without throwing', false, String(err && err.stack || err));
+    }
+
+    const pass = results.filter(r => r.pass).length;
+    const total = results.length;
+    document.getElementById('results').innerHTML = results.map(r =>
+      `<span class="${r.pass ? 'pass' : 'fail'}">${r.pass ? 'PASS' : 'FAIL'}</span>  ${r.name}` +
+      (r.detail ? `  <span class="detail">${r.detail}</span>` : '')).join('\n');
+    document.getElementById('summary').innerHTML =
+      `<span class="${pass === total ? 'pass' : 'fail'}">${pass}/${total} passed</span>`;
+    document.title = `RESULT ${pass}/${total}`;
+    window.__DONE__ = true;
+  })();
+  </script>
+</body>
+</html>

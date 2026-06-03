@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Datalyr Web SDK — Test Harness</title>
+  <style>
+    body { font: 14px/1.5 ui-monospace, Menlo, monospace; max-width: 900px; margin: 24px auto; padding: 0 16px; }
+    h1 { font-size: 18px; }
+    .pass { color: #157f3b; }
+    .fail { color: #b00020; font-weight: 700; }
+    #summary { font-size: 16px; font-weight: 700; margin: 12px 0; }
+    pre { white-space: pre-wrap; background: #f6f8fa; padding: 12px; border-radius: 6px; }
+    .detail { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Datalyr Web SDK — Test Harness</h1>
+  <p class="detail">Loads the built IIFE bundle, mocks the network (nothing hits prod), and exercises
+  the 1.7.1 changes in a real browser. Results below.</p>
+  <div id="summary">Running…</div>
+  <pre id="results"></pre>
+
+  <!-- Mock the network BEFORE the SDK loads so no request ever reaches prod ingest. -->
+  <script>
+    window.__sent = [];      // captured fetch POST bodies
+    window.__beacons = [];   // captured sendBeacon URLs
+    const realFetch = window.fetch;
+    window.fetch = function (url, opts) {
+      try {
+        const u = String(url);
+        if (u.includes('ingest.datalyr.com') || u.includes('datalyr') || (opts && opts.method === 'POST')) {
+          window.__sent.push({ url: u, body: opts && opts.body ? String(opts.body) : '' });
+          return Promise.resolve(new Response(JSON.stringify({ success: true }), {
+            status: 200, headers: { 'Content-Type': 'application/json' }
+          }));
+        }
+      } catch (e) {}
+      // Anything else (shouldn't happen with enableContainer:false) → benign 200
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    };
+    try {
+      navigator.sendBeacon = function (url, data) { window.__beacons.push(String(url)); return true; };
+    } catch (e) {}
+  </script>
+
+  <!-- The built SDK (IIFE → window.Datalyr + window.datalyr) -->
+  <script src="dist/datalyr.js"></script>
+
+  <script>
+  (async function run() {
+    const results = [];
+    const check = (name, cond, detail) => results.push({ name, pass: !!cond, detail: detail || '' });
+    const lsKey = (frag) => Object.keys(localStorage).find(k => k.includes(frag));
+    const lsVal = (frag) => { const k = lsKey(frag); return k ? localStorage.getItem(k) : null; };
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    try {
+      // Clean slate
+      try { localStorage.clear(); } catch (e) {}
+
+      check('SDK IIFE loaded (window.datalyr present)', !!window.datalyr);
+
+      // --- init (container off so no third-party pixel scripts; pageviews off so we control events) ---
+      window.datalyr.init({
+        workspaceId: 'ws_harness',
+        apiKey: 'test_key',
+        endpoint: 'https://ingest.datalyr.com',
+        enableContainer: false,
+        trackPageViews: false,
+        debug: false,
+      });
+      check('init() did not throw + isOptedOut() === false', window.datalyr.isOptedOut() === false);
+
+      // ready() must resolve even though encryption initializes (real crypto.subtle here).
+      // Awaited directly: if it ever hung, the whole harness would never finish (and the
+      // results would show "Running…"), which is itself the signal.
+      await window.datalyr.ready();
+      check('ready() resolved (encryption init did not hang/abort)', true);
+
+      // --- basic track + attribution merge (page loaded with ?gclid=...) ---
+      const before = window.__sent.length;
+      window.datalyr.track('purchase', { value: 9.99 });   // critical event → sends immediately
+      await sleep(50);
+      const purchaseReq = window.__sent.slice(before).find(r => r.body.includes('purchase'));
+      check('track("purchase") sent via fetch', !!purchaseReq);
+      check('event carries gclid attribution (source=google) from the ?gclid= URL',
+        !!purchaseReq && /"source"\s*:\s*"google"/.test(purchaseReq.body), purchaseReq ? '' : '(no request captured)');
+
+      // --- WEB-5: identify traits are stored ENCRYPTED, not plaintext ---
+      window.datalyr.identify('user_harness', { email: 'secret@example.com' });
+      await sleep(150); // setEncrypted is async (real AES-GCM)
+      const traits = lsVal('user_traits');
+      check('identify() persisted traits to storage', !!traits);
+      check('WEB-5: stored traits do NOT contain the raw email (encrypted at rest)',
+        !!traits && !traits.includes('secret@example.com'), traits ? `len=${traits.length}` : '(no traits key)');
+
+      // --- WEB-1/2: offline → queued (no send) → online → drains ---
+      window.dispatchEvent(new Event('offline'));
+      const beforeOffline = window.__sent.length;
+      window.datalyr.track('offline_event_x', { n: 1 });   // non-critical → goes through the queue
+      await window.datalyr.flush();
+      await sleep(50);
+      const sentWhileOffline = window.__sent.length - beforeOffline;
+      check('offline: event is NOT sent (queued)', sentWhileOffline === 0, `sent=${sentWhileOffline}`);
+      check('offline: event persisted to the offline queue in storage', !!lsVal('offline_queue'));
+
+      window.dispatchEvent(new Event('online'));
+      await sleep(1500); // online listener drains after a 1s timeout
+      const drained = window.__sent.some(r => r.body.includes('offline_event_x'));
+      check('online: queued offline event drains (sent on reconnect)', drained);
+
+      // --- consent: setConsent({analytics:false}) blocks sending ---
+      const beforeConsent = window.__sent.length;
+      window.datalyr.setConsent({ analytics: false });
+      window.datalyr.track('should_be_blocked', {});
+      await window.datalyr.flush().catch(() => {});
+      await sleep(50);
+      const blockedSent = window.__sent.slice(beforeConsent).some(r => r.body.includes('should_be_blocked'));
+      check('setConsent({analytics:false}) blocks the event', !blockedSent);
+
+      // re-grant, confirm it flows again
+      window.datalyr.setConsent({ analytics: true });
+      const beforeRegrant = window.__sent.length;
+      window.datalyr.track('purchase', { value: 1 });
+      await sleep(50);
+      check('setConsent({analytics:true}) re-enables sending',
+        window.__sent.slice(beforeRegrant).some(r => r.body.includes('purchase')));
+
+      // --- opt-out: stops sending + clears PII at rest ---
+      window.datalyr.identify('user2', { email: 'second@example.com' });
+      await sleep(100);
+      window.datalyr.optOut();
+      await sleep(50);
+      check('optOut(): isOptedOut() === true', window.datalyr.isOptedOut() === true);
+      check('optOut(): traits purged from storage', !lsVal('user_traits'));
+      const beforeOptOut = window.__sent.length;
+      window.datalyr.track('after_optout', {});
+      await window.datalyr.flush().catch(() => {});
+      await sleep(50);
+      check('optOut(): no events sent after opting out',
+        !window.__sent.slice(beforeOptOut).some(r => r.body.includes('after_optout')));
+    } catch (err) {
+      check('harness ran without throwing', false, String(err && err.stack || err));
+    }
+
+    // --- render ---
+    const pass = results.filter(r => r.pass).length;
+    const total = results.length;
+    document.getElementById('results').innerHTML = results.map(r =>
+      `<span class="${r.pass ? 'pass' : 'fail'}">${r.pass ? 'PASS' : 'FAIL'}</span>  ${r.name}` +
+      (r.detail ? `  <span class="detail">${r.detail}</span>` : '')
+    ).join('\n');
+    const ok = pass === total;
+    document.getElementById('summary').innerHTML =
+      `<span class="${ok ? 'pass' : 'fail'}">${pass}/${total} passed</span>`;
+    document.title = `RESULT ${pass}/${total}`;
+    window.__DONE__ = true;
+    window.__RESULT__ = { pass, total, results };
+  })();
+  </script>
+</body>
+</html>
