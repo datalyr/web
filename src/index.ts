@@ -222,13 +222,19 @@ class Datalyr {
 
     this.initializationPromise = (async () => {
       try {
-        // SEC-03 Fix: Initialize encryption for PII data
-        const deviceId = this.identity.getAnonymousId();
-        await dataEncryption.initialize(this.config.workspaceId, deviceId);
-
-        // Load encrypted user properties
-        this.userProperties = await storage.getEncrypted('dl_user_traits', {});
-        this.log('Encryption initialized, user properties loaded');
+        // SEC-03: encryption is for PII-AT-REST only — it must NOT gate event delivery,
+        // pageviews, or pixels. On a non-secure context (http://) or an old browser,
+        // crypto.subtle is absent and initialize() throws; isolate it so the rest of init
+        // (SPA tracking, container/pixels, initial pageview) still runs. (http:// fix)
+        try {
+          const deviceId = this.identity.getAnonymousId();
+          await dataEncryption.initialize(this.config.workspaceId, deviceId);
+          this.userProperties = await storage.getEncrypted('dl_user_traits', {});
+          this.log('Encryption initialized, user properties loaded');
+        } catch (encErr) {
+          console.warn('[Datalyr] Encryption unavailable (non-secure context?); continuing WITHOUT PII-at-rest encryption:', encErr);
+          this.userProperties = storage.get('dl_user_traits', {});
+        }
 
         // Setup SPA tracking if enabled
         if (this.config.trackSPA) {

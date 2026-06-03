@@ -12,6 +12,11 @@ const DEFAULT_CRITICAL_EVENTS = ['purchase', 'signup', 'subscribe', 'lead', 'con
 // Default high priority events that use faster batching
 const DEFAULT_HIGH_PRIORITY_EVENTS = ['add_to_cart', 'begin_checkout', 'view_item', 'search'];
 
+// A 429 is a deliberate backpressure signal, not a transient failure — tagged so the
+// send path can route it to the offline queue WITHOUT retrying (which would storm the
+// already-overloaded server). See sendBatch / the rateLimitedUntil gate.
+class RateLimitError extends Error {}
+
 export class EventQueue {
   private queue: IngestEventPayload[] = [];
   private offlineQueue: IngestEventPayload[] = [];
@@ -40,20 +45,28 @@ export class EventQueue {
   private offlineProcessing = false; // FIXED (WEB-1): re-entrancy guard for processOfflineQueue
   private inFlight: IngestEventPayload[] = []; // FIXED (WEB-3): batch currently in _flight's keepalive fetch — forceFlush must NOT re-beacon it
   private enabled = true; // FIXED (consent): when false (opt-out / withdrawn analytics consent) all enqueue/flush/drain is a no-op
+  private rateLimitedUntil = 0; // FIXED (429): skip flush/drain until the server's Retry-After window passes
 
   constructor(config: any) {
+    // Coerce numeric config to sane values. The old `config.X || default` both turned a
+    // legitimate 0 into the default AND let invalid values through — a NEGATIVE batchSize
+    // made processOfflineQueue's `splice(0, -1)` loop forever and FREEZE the host tab.
+    const clampInt = (v: any, def: number, min: number, max: number): number => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), min), max) : def;
+    };
     this.config = {
-      batchSize: config.batchSize || 10,
-      flushInterval: config.flushInterval || 5000,
-      maxRetries: config.maxRetries || 5,
-      retryDelay: config.retryDelay || 1000,
+      batchSize: clampInt(config.batchSize, 10, 1, 1000),
+      flushInterval: clampInt(config.flushInterval, 5000, 250, 3_600_000),
+      maxRetries: clampInt(config.maxRetries, 5, 0, 20),
+      retryDelay: clampInt(config.retryDelay, 1000, 0, 60_000),
       endpoint: config.endpoint || 'https://ingest.datalyr.com',
-      fallbackEndpoints: config.fallbackEndpoints || [],
+      fallbackEndpoints: Array.isArray(config.fallbackEndpoints) ? config.fallbackEndpoints : [],
       workspaceId: config.workspaceId,
       debug: config.debug || false,
       criticalEvents: config.criticalEvents || DEFAULT_CRITICAL_EVENTS,
       highPriorityEvents: config.highPriorityEvents || DEFAULT_HIGH_PRIORITY_EVENTS,
-      maxOfflineQueueSize: config.maxOfflineQueueSize || 100
+      maxOfflineQueueSize: clampInt(config.maxOfflineQueueSize, 100, 1, 100_000)
     };
 
     this.networkStatus = {
@@ -199,6 +212,8 @@ export class EventQueue {
    */
   async flush(): Promise<void> {
     if (!this.enabled) return;
+    // FIXED (429): respect the server's Retry-After window instead of hammering it.
+    if (Date.now() < this.rateLimitedUntil) return;
     // FIXED (DATA-03): Check both promise and lock for concurrent flush protection
     if (this.flushPromise || this.flushLock) {
       return this.flushPromise || Promise.resolve();
@@ -299,17 +314,15 @@ export class EventQueue {
         // Handle rate limiting
         if (response.status === 429) {
           const retryAfter = parseInt(response.headers.get('Retry-After') || '60');
-          this.log(`Rate limited, retrying after ${retryAfter}s`);
-
-          // FIXED (CRITICAL-06): Don't unshift() - events are still in queue!
-          // With the new fix, events aren't removed until success, so they're
-          // already in the queue. Just schedule a retry flush.
-          setTimeout(() => {
-            this.flush();
-          }, retryAfter * 1000);
-
-          // Throw to trigger catch block which moves events to offline queue
-          throw new Error(`Rate limited (429), retry after ${retryAfter}s`);
+          // FIXED (429 retry-storm): honor Retry-After as a SINGLE backoff window. The
+          // old code scheduled a flush AND let the throw fall into the generic
+          // exponential-backoff retry below — firing ~6 requests inside the window the
+          // server asked us to wait, amplifying an ingest overload. Now: record the
+          // window and throw a RateLimitError (which the catch does NOT retry). The
+          // events move to the offline queue and drain once the window passes.
+          this.rateLimitedUntil = Date.now() + Math.max(retryAfter, 1) * 1000;
+          this.log(`Rate limited; backing off ${retryAfter}s`);
+          throw new RateLimitError('Rate limited (429)');
         }
 
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -317,6 +330,13 @@ export class EventQueue {
 
       this.log(`Batch sent successfully to ${currentEndpoint}: ${events.length} events`);
     } catch (error) {
+      // A 429 is deliberate backpressure — do NOT retry it here (neither fallback nor
+      // backoff). Propagate so the batch moves to the offline queue; the periodic drain
+      // resumes only after rateLimitedUntil. This is what prevents the retry storm.
+      if (error instanceof RateLimitError) {
+        throw error;
+      }
+
       // Try next fallback endpoint if available
       if (endpointIndex < endpoints.length - 1) {
         this.log(`Failed on ${currentEndpoint}, trying fallback ${endpointIndex + 1}`);
@@ -460,6 +480,7 @@ export class EventQueue {
     // 'online' listener, the periodic flush, and the on-load kick); without a guard
     // two of them could splice the same offlineQueue concurrently and double-send.
     if (!this.enabled) return;
+    if (Date.now() < this.rateLimitedUntil) return; // FIXED (429): honor Retry-After window
     if (this.offlineProcessing) return;
     if (this.offlineQueue.length === 0) return;
     if (!this.networkStatus.isOnline) return;

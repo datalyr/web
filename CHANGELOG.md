@@ -98,6 +98,22 @@ All notable changes to this project will be documented in this file.
 - **`setAttribution()` actually affects events now** (routes through the AttributionManager's
   last/first touch instead of a dead session key it only wrote and never read). (`src/index.ts`)
 
+### Fixed (reliability — config / rate-limit / non-HTTPS)
+- **Config is validated, not coerced.** Numeric options (`batchSize`/`flushInterval`/
+  `maxRetries`/`retryDelay`/`maxOfflineQueueSize`) are clamped to sane ranges instead of
+  `config.X || default` — which both silently turned a legitimate `0` into the default AND
+  let a **negative `batchSize`** through, where `splice(0,-1)` looped forever and **froze
+  the host tab**. (`src/queue.ts`)
+- **429 no longer causes a retry-storm.** A `429` now honors `Retry-After` as a single
+  backoff window — the batch parks in the offline queue and flush/drain are gated until the
+  window passes. Previously a 429 *both* scheduled a flush *and* fell into exponential-
+  backoff retry, firing ~6 requests inside the window the server asked us to wait,
+  amplifying an ingest overload. (`src/queue.ts`)
+- **Non-secure (`http://`) pages still track.** Encryption init is isolated so a missing
+  `crypto.subtle` (http:// or old browser) no longer aborts the rest of init — SPA tracking,
+  container/pixels, and the initial pageview still run; only PII-at-rest encryption is
+  skipped. (`src/index.ts`)
+
 ### Fixed (privacy)
 - **Third-party pixels are no longer loaded for opted-out / DNT / GPC / strict
   visitors.** Container initialization (which injects Meta/Google/TikTok loaders and

@@ -54,9 +54,8 @@ describe('EventQueue — data-loss & double-send paths (WEB-1/2/3/8)', () => {
   test('WEB-8: a failed flush moves events to offline AND removes them from the live queue (single owner)', async () => {
     jest.useFakeTimers();
     (global as any).fetch = jest.fn(() => Promise.reject(new Error('network')));
-    // Large flushInterval so the periodic tick doesn't re-drain mid-assertion.
-    // (Note: maxRetries can't be set to 0 — the SDK's `config.maxRetries || 5`
-    // coerces 0→5 — so we drive fake timers through the default 5 backoffs instead.)
+    // Large flushInterval so the periodic tick doesn't re-drain mid-assertion. Uses the
+    // default maxRetries (5), so we drive fake timers through the 5 backoffs.
     queue = newQueue({ flushInterval: 100000 });
     queue.enqueue(makeEvent('pageview', 1));
     expect(queue.getQueueSize()).toBe(1);
@@ -172,5 +171,42 @@ describe('EventQueue — data-loss & double-send paths (WEB-1/2/3/8)', () => {
     // moveToOfflineQueue is gated on `enabled`, so the failed batch is NOT re-persisted.
     expect(queue.getOfflineQueueSize()).toBe(0);
     expect(storage.get(OFFLINE_KEY, [])).toEqual([]);
+  });
+
+  test('429: no retry-storm — sends once, parks to offline, honors the Retry-After window', async () => {
+    const fetchMock = jest.fn(() => Promise.resolve({
+      ok: false, status: 429, statusText: 'Too Many Requests',
+      headers: { get: (h: string) => (h === 'Retry-After' ? '1' : null) },
+    }));
+    (global as any).fetch = fetchMock;
+    queue = newQueue();
+
+    queue.enqueue(makeEvent('pageview', 1));
+    await queue.flush();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // ONE request — not ~6 from fallback + exponential backoff (the old retry-storm).
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(queue.getOfflineQueueSize()).toBe(1); // parked for later, not dropped
+
+    // Within the Retry-After window, a flush is a no-op (don't hammer the server).
+    fetchMock.mockClear();
+    await queue.flush();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('config: a negative batchSize is clamped (no infinite-loop / tab hang on drain)', async () => {
+    jest.useFakeTimers();
+    storage.set(OFFLINE_KEY, [makeEvent('pageview', 1)]);
+    const fetchMock = jest.fn(() => Promise.resolve({ ok: true }));
+    (global as any).fetch = fetchMock;
+
+    // batchSize:-1 used to make processOfflineQueue's splice(0,-1) loop forever (frozen
+    // tab). If the clamp regressed, this test would HANG (jest timeout) instead of pass.
+    queue = newQueue({ batchSize: -1 });
+    await jest.advanceTimersByTimeAsync(1100); // on-load drain
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(queue.getOfflineQueueSize()).toBe(0);
   });
 });
