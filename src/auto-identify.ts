@@ -279,10 +279,21 @@ export class AutoIdentifyManager {
     // Try to fetch customer data immediately
     this.checkShopifyCustomer();
 
-    // Check periodically (in case customer logs in later)
+    // Check periodically (in case the customer logs in later), but CAP the attempts so a
+    // visitor who never logs in — the vast majority of storefront traffic — doesn't poll
+    // /account.json forever (it used to run every 10s for the whole session). A logged-in
+    // customer surfaces well within ~2 minutes. (WEB-10)
+    let checks = 0;
+    const MAX_CHECKS = 12; // ~2 minutes at 10s
     this.shopifyCheckInterval = setInterval(() => {
+      checks++;
       this.checkShopifyCustomer();
-    }, 10000); // Check every 10 seconds
+      if (checks >= MAX_CHECKS && this.shopifyCheckInterval) {
+        clearInterval(this.shopifyCheckInterval);
+        this.shopifyCheckInterval = undefined;
+        this.log('Shopify monitoring stopped after max checks (no login detected)');
+      }
+    }, 10000);
 
     this.log('Shopify monitoring active');
   }
