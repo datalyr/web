@@ -50,6 +50,23 @@ describe('AttributionManager — capture + last-touch (1.7.1 fixes)', () => {
     expect(a.gclid).toBe('g_1');
   });
 
+  test('Snap: ScCid is captured and normalized to the canonical sclid field', () => {
+    // Snapchat appends &ScCid= (not sclid). Must land under sclid so server-side
+    // attribution + the Snap CAPI sender (sc_click_id) can read it.
+    setPage('?ScCid=snap_click_1');
+    const a = attr.captureAttribution() as any;
+    expect(a.sclid).toBe('snap_click_1');
+    expect(a.clickId).toBe('snap_click_1');
+    expect(a.clickIdType).toBe('sclid');
+    expect(a.source).toBe('snapchat');
+  });
+
+  test('Snap: lowercase sccid alias is also captured as sclid', () => {
+    setPage('?sccid=snap_click_2');
+    const a = attr.captureAttribution() as any;
+    expect(a.sclid).toBe('snap_click_2');
+  });
+
   test('same-site referrer (internal navigation) resolves to direct, not referral', () => {
     // referrer is our own host → internal nav, must NOT count as a referral source
     setPage('', 'http://localhost/previous-page');

@@ -22,7 +22,7 @@ export class AttributionManager {
     'msclkid',    // Microsoft/Bing
     'twclid',     // Twitter/X
     'li_fat_id',  // LinkedIn
-    'sclid',      // Snapchat
+    'sclid',      // Snapchat (canonical internal name — see CLICK_ID_ALIASES)
     'dclid',      // Google Display/DoubleClick
     'epik',       // Pinterest
     'rdt_cid',    // Reddit
@@ -30,6 +30,15 @@ export class AttributionManager {
     'irclid',     // Impact Radius
     'ko_click_id' // Klaviyo
   ];
+  // Real ad-platform URL params whose value we store under a canonical internal
+  // name. Snapchat appends &ScCid= (alias `sccid`) to the landing URL — it does
+  // NOT use `sclid`. Query-param lookup is case-sensitive, so capture the real
+  // params and normalize to `sclid`, which ingest / the MV / server-side
+  // attribution all key on. Without this, real Snap ad clicks captured nothing.
+  private CLICK_ID_ALIASES: Record<string, string> = {
+    ScCid: 'sclid',
+    sccid: 'sclid',
+  };
   // Default tracked params matching dl.js
   private DEFAULT_TRACKED_PARAMS = [
     'lyr',        // Datalyr partner tracking
@@ -94,6 +103,19 @@ export class AttributionManager {
           attribution.clickIdType = clickId;
         }
         attribution[clickId] = value;
+      }
+    }
+
+    // Aliased click IDs (e.g. Snap's ScCid/sccid → canonical sclid). Param lookup
+    // above is case-sensitive and uses canonical names, so check the real params here.
+    for (const [param, canonical] of Object.entries(this.CLICK_ID_ALIASES)) {
+      const value = params[param];
+      if (value && !attribution[canonical]) {
+        if (!attribution.clickId) {
+          attribution.clickId = value;
+          attribution.clickIdType = canonical;
+        }
+        attribution[canonical] = value;
       }
     }
 
@@ -250,6 +272,10 @@ export class AttributionManager {
     // TikTok cookies
     adCookies._ttp = cookies.get('_ttp');
     adCookies._ttc = cookies.get('_ttc');
+
+    // Snapchat first-party cookie (Snap Pixel sets _scid). Flows to the server as
+    // cookies._scid and is sent on the Snap CAPI event as sc_cookie1 (raw).
+    adCookies._scid = cookies.get('_scid');
     
     // Generate _fbp if missing (Facebook browser ID)
     if (!adCookies._fbp && (this.hasClickId('fbclid') || adCookies._fbc)) {
