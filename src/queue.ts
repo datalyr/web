@@ -17,6 +17,16 @@ const DEFAULT_HIGH_PRIORITY_EVENTS = ['add_to_cart', 'begin_checkout', 'view_ite
 // already-overloaded server). See sendBatch / the rateLimitedUntil gate.
 class RateLimitError extends Error {}
 
+// A permanent (non-retryable) failure — a 4xx other than 408/429 (invalid event shape,
+// origin not allowed, auth). Retrying or parking it just head-of-line-blocks the offline
+// queue forever and hammers ingest. Tagged so the send paths DROP the batch instead of
+// unshifting it back to the head. (FSR-55)
+class PermanentError extends Error {
+  constructor(public status: number, message?: string) {
+    super(message || `HTTP ${status}`);
+  }
+}
+
 export class EventQueue {
   private queue: IngestEventPayload[] = [];
   private offlineQueue: IngestEventPayload[] = [];
@@ -104,18 +114,33 @@ export class EventQueue {
       return;
     }
 
-    // CRITICAL FIX (CRITICAL-05): Critical events need proper error handling
-    // Instead of calling sendBatch() without await, we add them to queue
-    // with immediate flush AND move to offline queue on failure
+    // Critical events (purchase/signup/lead/…) send immediately, bypassing the batch.
+    // FSR-16: persist the event to the offline queue BEFORE the first send and remove it
+    // on confirmed delivery. Previously the event existed ONLY inside the sendBatch retry
+    // closure during backoff (~31s) — not in any tracked queue — so a tab close mid-retry
+    // (the most plausible moment after checkout) lost the purchase permanently: forceFlush
+    // / destroy never saw it. Server-side event_id dedup makes the at-least-once re-send
+    // safe.
     if (this.config.criticalEvents.includes(eventName)) {
       this.log('Critical event, sending immediately:', eventName);
 
-      // Send immediately with proper error handling
-      this.sendBatch([event]).catch((error) => {
-        this.log('Critical event send failed, adding to offline queue:', eventName, error);
-        // Move to offline queue to ensure it's not lost
-        this.moveToOfflineQueue([event]);
-      });
+      this.persistCriticalEvent(event);
+
+      this.sendBatch([event])
+        .then(() => {
+          // Delivered — drop the persisted copy so it isn't replayed next load.
+          this.removeFromOfflineQueue(event.event_id);
+        })
+        .catch((error) => {
+          if (error instanceof PermanentError) {
+            this.log('Critical event permanently rejected, dropping:', eventName, error);
+            this.removeFromOfflineQueue(event.event_id);
+            return;
+          }
+          // Leave it persisted: the periodic drain + next-load drain retry it, and an
+          // unload mid-retry can now beacon it (it's in the offline queue). (FSR-16)
+          this.log('Critical event send failed, retained in offline queue:', eventName, error);
+        });
 
       return;
     }
@@ -279,7 +304,13 @@ export class EventQueue {
       // Remove the same slice from the live queue; the offline queue now drains on
       // every periodic tick (WEB-1/WEB-2), so they are still retried, not stranded.
       this.queue.splice(0, batchSize);
-      this.moveToOfflineQueue(events);
+      // FSR-55: don't park a permanently-rejected batch — it would never succeed and
+      // would block the offline drain. Drop it.
+      if (error instanceof PermanentError) {
+        this.log(`Dropping ${events.length} events — permanent error ${error.status}`);
+      } else {
+        this.moveToOfflineQueue(events);
+      }
     } finally {
       this.inFlight = [];
     }
@@ -299,6 +330,15 @@ export class EventQueue {
     const endpoints = [this.config.endpoint, ...this.config.fallbackEndpoints];
     const currentEndpoint = endpoints[endpointIndex] || this.config.endpoint;
 
+    const body = JSON.stringify(batchPayload);
+    // FSR-54: keepalive requests share a 64KB in-flight quota (Fetch spec) — a larger
+    // body fails INSTANTLY with a network error, then retries through every fallback +
+    // backoff (all failing the same way) and parks in the offline queue, where it
+    // head-of-line-blocks the drain forever. keepalive only matters for unload survival,
+    // so only request it when the body is safely under the cap; oversized batches go via
+    // a normal fetch (no cap) and succeed.
+    const useKeepalive = new Blob([body]).size <= 60000;
+
     try {
       const response = await fetch(currentEndpoint, {
         method: 'POST',
@@ -306,8 +346,8 @@ export class EventQueue {
           'Content-Type': 'application/json',
           'X-Batch-Size': events.length.toString()
         },
-        body: JSON.stringify(batchPayload),
-        keepalive: true
+        body,
+        keepalive: useKeepalive
       });
 
       if (!response.ok) {
@@ -325,15 +365,22 @@ export class EventQueue {
           throw new RateLimitError('Rate limited (429)');
         }
 
+        // FSR-55: a 4xx other than 408 (timeout) is PERMANENT — invalid event shape
+        // (400), origin not allowed (403), auth (401). Retrying / parking it just blocks
+        // the queue and hammers ingest forever. Tag it so the caller drops the batch.
+        if (response.status >= 400 && response.status < 500 && response.status !== 408) {
+          throw new PermanentError(response.status, `HTTP ${response.status}: ${response.statusText}`);
+        }
+
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
       this.log(`Batch sent successfully to ${currentEndpoint}: ${events.length} events`);
     } catch (error) {
-      // A 429 is deliberate backpressure — do NOT retry it here (neither fallback nor
-      // backoff). Propagate so the batch moves to the offline queue; the periodic drain
-      // resumes only after rateLimitedUntil. This is what prevents the retry storm.
-      if (error instanceof RateLimitError) {
+      // A 429 is deliberate backpressure and a 4xx is permanent — do NOT retry either
+      // (neither fallback nor backoff). Propagate so the caller routes them correctly
+      // (offline queue for 429, drop for permanent). This prevents the retry storm.
+      if (error instanceof RateLimitError || error instanceof PermanentError) {
         throw error;
       }
 
@@ -450,6 +497,36 @@ export class EventQueue {
   }
 
   /**
+   * Persist a critical event to the offline queue BEFORE its immediate send, so it
+   * survives an unload during the send/backoff window. Deduped on event_id so a
+   * re-enqueue can't double-store it. (FSR-16)
+   */
+  private persistCriticalEvent(event: IngestEventPayload): void {
+    if (!this.enabled) return;
+    if (this.offlineQueue.some(e => e.event_id === event.event_id)) return;
+    this.offlineQueue.push(event);
+    if (this.offlineQueue.length > this.config.maxOfflineQueueSize) {
+      this.offlineQueue.splice(0, this.offlineQueue.length - this.config.maxOfflineQueueSize);
+    }
+    this.saveOfflineQueue();
+  }
+
+  /**
+   * Remove a delivered/dropped event from the offline queue by event_id, and clear the
+   * persisted copy when the queue empties. (FSR-16)
+   */
+  private removeFromOfflineQueue(eventId: string): void {
+    const before = this.offlineQueue.length;
+    this.offlineQueue = this.offlineQueue.filter(e => e.event_id !== eventId);
+    if (this.offlineQueue.length === before) return;
+    if (this.offlineQueue.length === 0) {
+      storage.remove(this.OFFLINE_QUEUE_KEY);
+    } else {
+      this.saveOfflineQueue();
+    }
+  }
+
+  /**
    * Load offline queue from storage
    */
   private loadOfflineQueue(): void {
@@ -499,8 +576,17 @@ export class EventQueue {
           await this.sendBatch(batch);
           this.saveOfflineQueue();
         } catch (error) {
+          // FSR-55: a permanently-rejected (4xx) batch must NOT go back to the head —
+          // that would block every event behind it forever and hammer ingest every tick.
+          // Drop it (already spliced off the front) and keep draining the rest.
+          if (error instanceof PermanentError) {
+            this.log(`Dropping poison offline batch (${batch.length}) — permanent error ${error.status}`);
+            this.saveOfflineQueue();
+            continue;
+          }
           this.log('Failed to send offline batch:', error);
-          // Put back in queue
+          // Transient/rate-limited: put the batch back at the head and stop this drain;
+          // the next tick (after any rateLimitedUntil window) retries.
           this.offlineQueue.unshift(...batch);
           this.saveOfflineQueue();
           break;
@@ -548,42 +634,71 @@ export class EventQueue {
   }
 
   /**
-   * Force flush (for page unload)
-   * FIXED (WEB-3): include the offline queue, chunk under sendBeacon's ~64KB cap,
-   * and persist any chunk the browser refuses so it survives to the next page load.
-   * Previously this beaconed the live queue as one blob — ignoring the offline queue
-   * entirely and silently failing (returning false) whenever the payload exceeded 64KB.
+   * Force flush. Called on visibilitychange:hidden (NON-terminal — an ordinary tab
+   * switch / mobile background) and on pagehide+beforeunload (terminal unload).
    *
-   * Two follow-up review fixes:
-   *  - HIGH-1: exclude any batch currently in-flight in _flush(). That batch is being
-   *    sent with a keepalive fetch that already survives unload; re-beaconing it would
-   *    double-send. (`inFlight` is the front `inFlight.length` events of this.queue.)
-   *  - HIGH-2: handleUnload is wired to visibilitychange+pagehide+beforeunload, so this
-   *    runs multiple times per lifecycle. Detach what we beacon SYNCHRONOUSLY (clear the
-   *    in-memory queues, persist a refused remainder straight to storage rather than back
-   *    into this.offlineQueue) so a repeat call finds nothing to re-send.
+   * FSR-15: the old single path beaconed BOTH queues on EVERY visibilitychange and then
+   * storage.remove()'d the persisted offline copy on sendBeacon()===true. But sendBeacon
+   * true only means the browser ENQUEUED the request — not that it was delivered. The
+   * offline queue exists precisely because earlier sends failed (ingest down / 5xx / 429);
+   * a single alt-tab during that outage beaconed the whole backlog into the dead endpoint
+   * and ERASED the persisted copy, so nothing replayed when ingest recovered. It also
+   * ignored rateLimitedUntil, firing beacons straight into the Retry-After window.
+   *
+   * Now:
+   *  - Non-terminal (tab switch): deliver the LIVE queue via a response-checked keepalive
+   *    fetch (flush) and response-check-drain the offline backlog (processOfflineQueue) —
+   *    neither erases the backlog on failure. The destructive beacon path is not used.
+   *  - Terminal (unload): beacon live+offline best-effort, but PERSIST everything first
+   *    and NEVER storage.remove() on a mere beacon enqueue. The next page load's
+   *    response-checked drain (normal fetch, no 64KB cap) is the source of truth and
+   *    clears the copy; server event_id dedup makes the potential double-send safe.
+   *  - Both paths honor rateLimitedUntil (don't beacon/flush into the backoff window).
+   *
+   * Still excludes the in-flight _flush batch (its keepalive fetch already carries it,
+   * HIGH-1), and detaches synchronously so a repeat unload event this lifecycle re-enters
+   * with nothing to re-beacon (HIGH-2).
    */
-  async forceFlush(): Promise<void> {
+  async forceFlush(isTerminal = false): Promise<void> {
     if (!this.enabled) return;
-    if (!navigator.sendBeacon) {
-      // No beacon API — best-effort keepalive-fetch drain of both queues.
+
+    if (!isTerminal) {
+      // Non-terminal visibilitychange: the page is still alive, so use the
+      // response-checked send paths (keepalive fetch) — they move failures to the
+      // persisted offline queue rather than erasing it. Within the 429 window, leave
+      // everything parked.
+      if (Date.now() < this.rateLimitedUntil) return;
       await this.flush();
       await this.processOfflineQueue();
       return;
     }
 
+    // Terminal unload.
     // Exclude the in-flight batch (its keepalive fetch already carries it).
     const live = this.queue.slice(this.inFlight.length);
     const pending = [...live, ...this.offlineQueue];
 
-    // Detach synchronously: keep only the in-flight front (for _flush to settle) and
-    // empty the offline queue, so a second unload event this lifecycle re-enters with
-    // nothing to re-beacon. The refused remainder (if any) is persisted to STORAGE
-    // below, not back into this.offlineQueue, for exactly this reason.
+    // Detach the IN-MEMORY queues synchronously so a second unload event this lifecycle
+    // finds nothing to re-beacon (HIGH-2). The persisted STORAGE copy below is the
+    // durable record and is deliberately NOT removed on a successful beacon. (FSR-15)
     this.queue = this.queue.slice(0, this.inFlight.length);
     this.offlineQueue = [];
 
     if (pending.length === 0) return;
+
+    // Persist the full backlog FIRST so it survives no matter what sendBeacon reports.
+    // The next load's response-checked drain delivers + clears it (dedup-safe). (FSR-15)
+    if (this.enabled) {
+      const toPersist = pending.slice(-this.config.maxOfflineQueueSize);
+      if (pending.length > toPersist.length) {
+        this.log(`Offline cap dropped ${pending.length - toPersist.length} oldest events at unload`);
+      }
+      storage.set(this.OFFLINE_QUEUE_KEY, toPersist);
+    }
+
+    // Within the 429 window, don't beacon into it — the persisted copy drains next load.
+    if (Date.now() < this.rateLimitedUntil) return;
+    if (!navigator.sendBeacon) return; // no beacon API — next load fetch-drains the copy
 
     const MAX_BEACON_BYTES = 60000; // headroom under the browser's ~64KB cap
 
@@ -608,36 +723,17 @@ export class EventQueue {
     }
     if (current.length > 0) chunks.push(current);
 
-    // Send each chunk; the moment the browser refuses to enqueue one, keep it and
-    // everything after it for the next session.
-    let failedFrom = -1;
-    for (let c = 0; c < chunks.length; c++) {
-      const blob = new Blob([JSON.stringify(this.buildBatch(chunks[c]))], {
+    // Best-effort early delivery. We do NOT storage.remove() on success — the persisted
+    // copy is the source of truth for the next load (sendBeacon true ≠ delivered).
+    let beaconed = 0;
+    for (const chunk of chunks) {
+      const blob = new Blob([JSON.stringify(this.buildBatch(chunk))], {
         type: 'application/json'
       });
-      if (!navigator.sendBeacon(this.config.endpoint, blob)) {
-        failedFrom = c;
-        break;
-      }
+      if (!navigator.sendBeacon(this.config.endpoint, blob)) break;
+      beaconed += chunk.length;
     }
-
-    if (failedFrom >= 0) {
-      const remainder = chunks
-        .slice(failedFrom)
-        .reduce((acc, c) => acc.concat(c), [] as IngestEventPayload[]);
-      // Persist straight to storage (NOT this.offlineQueue) so a repeat unload event
-      // won't re-beacon it; the next page load's drain (which uses a normal fetch with
-      // no 64KB cap) delivers it. MED-2: log if the maxOfflineQueueSize cap truncates.
-      const toPersist = remainder.slice(-this.config.maxOfflineQueueSize);
-      if (remainder.length > toPersist.length) {
-        this.log(`Offline cap dropped ${remainder.length - toPersist.length} oldest events at unload`);
-      }
-      storage.set(this.OFFLINE_QUEUE_KEY, toPersist);
-      this.log(`sendBeacon refused ${remainder.length} events; persisted ${toPersist.length} for next load`);
-    } else {
-      this.log('Events sent via sendBeacon');
-      storage.remove(this.OFFLINE_QUEUE_KEY);
-    }
+    this.log(`forceFlush(terminal): beaconed ${beaconed}/${pending.length} events; persisted copy retained for next-load drain`);
   }
 
   /**

@@ -8,6 +8,7 @@ import { dataEncryption } from './encryption';
 
 interface StorageWrapper {
   get(key: string, defaultValue?: any): any;
+  getString(key: string, defaultValue?: string | null): string | null;
   set(key: string, value: any): boolean;
   remove(key: string): boolean;
   keys(): string[];
@@ -64,6 +65,39 @@ class SafeStorage implements StorageWrapper {
           return value;
         }
       }
+    } catch {
+      return defaultValue;
+    }
+  }
+
+  /**
+   * Get a value as a RAW string, skipping the JSON.parse that get() applies.
+   *
+   * FSR-17: get() blindly JSON.parses, so a stored user_id like '12345' comes back as
+   * the NUMBER 12345 after reload, and a 16+-digit snowflake id ('1234567890123456789')
+   * is silently precision-corrupted (→ 1234567890123456800) — permanent identity
+   * fragmentation. Identifiers (dl_user_id, dl_anonymous_id, dl_auto_identified_email)
+   * must round-trip as the exact string they were stored as; use this for them.
+   */
+  getString(key: string, defaultValue: string | null = null): string | null {
+    const fullKey = this.prefix + key;
+    try {
+      const value = this.storage
+        ? this.storage.getItem(fullKey)
+        : (this.memory.has(fullKey) ? this.memory.get(fullKey)! : null);
+      if (value === null || value === undefined) return defaultValue;
+      // Values written by set() with a string are stored raw (unquoted); return as-is.
+      // A value written as JSON (quoted string) is unwrapped so callers always get the
+      // logical string, never a quoted one.
+      if (value.length >= 2 && value[0] === '"' && value[value.length - 1] === '"') {
+        try {
+          const parsed = JSON.parse(value);
+          if (typeof parsed === 'string') return parsed;
+        } catch {
+          // fall through to raw
+        }
+      }
+      return value;
     } catch {
       return defaultValue;
     }
@@ -268,17 +302,27 @@ class CookieStorage {
   }
 
   get(name: string): string | null {
-    const value = `; ${document.cookie}`;
-    const parts = value.split(`; ${name}=`);
-    if (parts.length === 2) {
-      const rawValue = parts.pop()?.split(';').shift() || null;
-      if (rawValue) {
-        try {
-          return decodeURIComponent(rawValue);
-        } catch {
-          // Return raw value if decoding fails (backwards compatibility)
-          return rawValue;
-        }
+    // FSR-56: parse document.cookie into name=value pairs and return the FIRST match.
+    // The old `split('; ' + name + '=')` returned null whenever the same cookie name
+    // appeared more than once (3+ parts) — extremely common for ad cookies set at both
+    // the registrable domain and a subdomain (_fbp/_fbc/_ga), and producible by this SDK
+    // itself (the __dl_visitor_id host-only fallback). That caused real _fbp/_fbc to be
+    // ignored and re-synthesized, and the CC bridge cookie read to silently fail.
+    // Browsers list the most specific (longer path / host) cookie first, so first wins.
+    const cookieString = typeof document !== 'undefined' ? document.cookie : '';
+    if (!cookieString) return null;
+    for (const pair of cookieString.split(';')) {
+      const trimmed = pair.trim();
+      const eq = trimmed.indexOf('=');
+      if (eq === -1) continue;
+      if (trimmed.slice(0, eq) !== name) continue;
+      const rawValue = trimmed.slice(eq + 1);
+      if (!rawValue) return null;
+      try {
+        return decodeURIComponent(rawValue);
+      } catch {
+        // Return raw value if decoding fails (backwards compatibility)
+        return rawValue;
       }
     }
     return null;

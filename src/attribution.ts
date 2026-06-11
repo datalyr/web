@@ -4,7 +4,7 @@
  */
 
 import { storage, cookies } from './storage';
-import { getAllQueryParams } from './utils';
+import { getAllQueryParams, getRegistrableDomain } from './utils';
 import type { Attribution, TouchPoint } from './types';
 
 export class AttributionManager {
@@ -81,12 +81,19 @@ export class AttributionManager {
       timestamp: Date.now()
     };
 
-    // Capture UTM parameters
+    // Capture UTM parameters.
+    // Emit BOTH the canonical `utm_*` key AND the stripped alias (source/medium/...).
+    // FSR-13: ingest (event_data.utm_source ?? utmSource) and EVERY attribution MV /
+    // lookup pipe key on the prefixed `utm_source`/`utm_campaign` names with no fallback —
+    // stripping the prefix left the UTM leg of the attribution read path dead for all web
+    // events. The stripped alias is still emitted because the dashboard analytics MVs and
+    // determineSource()/determineMedium() read it (and it's the long-standing shape).
     for (const utm of this.UTM_PARAMS) {
       const value = params[utm];
       if (value) {
+        attribution[utm] = value; // canonical: utm_source, utm_campaign, ...
         const key = utm.replace('utm_', '') as keyof Attribution;
-        attribution[key] = value;
+        attribution[key] = value; // alias: source, campaign, ...
       }
     }
 
@@ -289,33 +296,51 @@ export class AttributionManager {
       cookies.set('_fbp', adCookies._fbp, 90);
     }
 
-    // Persist the click time the FIRST time we see fbclid/gclid in URL so we can
-    // rebuild fbc (and stamp real click time on server-side events) later even
-    // when _fbc/_gclid cookies get evicted. Once-only: never overwrite.
-    const fbclid = this.getCurrentFbclid();
-    if (fbclid && !cookies.get('_dl_fbclid_at')) {
-      cookies.set('_dl_fbclid_at', String(Date.now()), 90);
-    }
-    const gclid = this.hasClickId('gclid') ? (this.queryParamsCache?.gclid ?? null) : null;
-    if (gclid && !cookies.get('_dl_gclid_at')) {
-      cookies.set('_dl_gclid_at', String(Date.now()), 90);
-    }
-
-    // Generate _fbc if we have fbclid but no _fbc.
     // Meta's fbc format is `fb.{subdomainIndex}.{creationTime}.{fbclid}` where
     // creationTime is UNIX time in MILLISECONDS (matches the _fbp generation above
     // and the real _fbc cookie the Meta Pixel writes). Do NOT use seconds here.
-    if (fbclid && !adCookies._fbc) {
-      // Prefer the persisted click time when valid; fall back to now if the
-      // cookie is missing or corrupted (e.g. user edited it to garbage).
-      // Without this guard, Number("abc") = NaN and Meta would reject
-      // `fb.1.NaN.{fbclid}`.
-      const stored = cookies.get('_dl_fbclid_at');
-      const parsed = stored ? Number(stored) : NaN;
-      const timestamp = Number.isFinite(parsed) && parsed > 0 ? parsed : Date.now();
-      adCookies._fbc = `fb.1.${timestamp}.${fbclid}`;
-      // Optionally set the cookie for future use
-      cookies.set('_fbc', adCookies._fbc, 90);
+    //
+    // FSR-14: a returning visitor who clicks a NEW ad must get a FRESH _fbc. The old
+    // once-only guards (`!_dl_fbclid_at`, `!_fbc`) meant a new fbclid never refreshed
+    // _fbc while a prior 90-day _fbc still existed — Meta then received the OLD
+    // campaign's fbc (and an old creationTime that can push the conversion outside the
+    // click window) even though event_data carried the new fbclid. We detect a new
+    // click by comparing the URL fbclid against the one embedded in the existing _fbc
+    // (its 4th dot-segment). `_dl_fbclid_at` stays a pure ms timestamp — the CC bridge /
+    // Shopify cart / server-side rebuild forward it as a time, so its format must not
+    // change.
+    const fbclid = this.getCurrentFbclid();
+    if (fbclid) {
+      const existingFbc = adCookies._fbc; // captured above (cookies.get('_fbc'))
+      const embeddedFbclid = this.extractFbclidFromFbc(existingFbc);
+      if (!existingFbc) {
+        // No _fbc to compare against. Rebuild it, preferring the persisted click time
+        // (covers the case where _fbc was evicted but the same click is still in play),
+        // falling back to now if missing/corrupt (Number('abc') = NaN guard).
+        const stored = cookies.get('_dl_fbclid_at');
+        const parsed = stored ? Number(stored) : NaN;
+        const timestamp = Number.isFinite(parsed) && parsed > 0 ? parsed : Date.now();
+        if (!stored) cookies.set('_dl_fbclid_at', String(timestamp), 90);
+        adCookies._fbc = `fb.1.${timestamp}.${fbclid}`;
+        cookies.set('_fbc', adCookies._fbc, 90);
+      } else if (embeddedFbclid && embeddedFbclid !== fbclid) {
+        // A NEW ad click landed over a stale _fbc — regenerate with the new fbclid and
+        // the CURRENT click time, and overwrite the persisted click time to match.
+        const now = Date.now();
+        adCookies._fbc = `fb.1.${now}.${fbclid}`;
+        cookies.set('_fbc', adCookies._fbc, 90);
+        cookies.set('_dl_fbclid_at', String(now), 90);
+      }
+      // else: same fbclid already embedded in _fbc → leave both cookies untouched.
+    }
+
+    // Persist the click time the FIRST time we see gclid in the URL so server-side
+    // events can stamp the real click moment even after the _gcl_* cookies evict.
+    // (gclid has no synthesized-and-going-stale artifact like _fbc, and Google does not
+    // validate a creationTime window the way Meta does, so this stays once-only.)
+    const gclid = this.hasClickId('gclid') ? (this.queryParamsCache?.gclid ?? null) : null;
+    if (gclid && !cookies.get('_dl_gclid_at')) {
+      cookies.set('_dl_gclid_at', String(Date.now()), 90);
     }
     
     // Filter out null values for cleaner data
@@ -343,6 +368,20 @@ export class AttributionManager {
   }
 
   /**
+   * Extract the fbclid embedded in an `_fbc` cookie value
+   * (`fb.{subdomainIndex}.{creationTime}.{fbclid}` → the 4th dot-segment), or null if
+   * the value is missing/malformed. Used to detect whether a NEW fbclid in the URL
+   * differs from the one a prior _fbc was built for. (FSR-14)
+   */
+  private extractFbclidFromFbc(fbc: string | null | undefined): string | null {
+    if (!fbc) return null;
+    const parts = fbc.split('.');
+    // fb . subdomainIndex . creationTime . fbclid (the fbclid itself may contain no dots)
+    if (parts.length < 4 || parts[0] !== 'fb') return null;
+    return parts.slice(3).join('.') || null;
+  }
+
+  /**
    * Get attribution data for event
    */
   getAttributionData(): Record<string, any> {
@@ -363,12 +402,19 @@ export class AttributionManager {
       (current.source && current.source !== 'direct')
     );
 
-    if (!hasRealAttribution && firstTouch) {
-      // Direct / internal navigation: fall back to persistent attribution (90-day
-      // window) so the event isn't mis-attributed to 'direct', keeping page context.
-      if (!firstTouch.expires_at || Date.now() < firstTouch.expires_at) {
+    // Direct / internal navigation: fall back to persisted attribution so the event
+    // isn't mis-attributed to 'direct'. FSR-48: prefer the LAST touch (the most recent
+    // real signal, e.g. a May Meta click) over the FIRST touch (e.g. a January gclid) —
+    // spreading firstTouch carried its stale clickId top-level and credited the older
+    // campaign for last-click. Also fall back to whichever of last/first touch is still
+    // valid, so an expired first-touch with a live last-touch no longer drops to 'direct'.
+    if (!hasRealAttribution) {
+      // getLastTouch()/getFirstTouch() already drop expired records, so either is live or
+      // null. Prefer last-touch; fall back to first-touch if there's no live last-touch.
+      const fallback = lastTouch || firstTouch;
+      if (fallback) {
         current = {
-          ...firstTouch,
+          ...fallback,
           referrer: current.referrer,
           referrerHost: current.referrerHost,
           landingPage: current.landingPage,
@@ -521,8 +567,10 @@ export class AttributionManager {
    * internal navs from being mis-classified as referral.
    */
   private isSameRootDomain(a: string, b: string): boolean {
-    const root = (h: string) => h.split('.').slice(-2).join('.');
-    return root(a) === root(b);
+    // FSR-47: use the real eTLD+1 (public-suffix-aware) so a ccTLD merchant
+    // (shop.example.co.uk) doesn't collapse every external referrer that merely shares
+    // the suffix (google.co.uk → root 'co.uk') into 'direct'.
+    return getRegistrableDomain(a) === getRegistrableDomain(b);
   }
 
   /**

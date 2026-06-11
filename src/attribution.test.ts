@@ -122,4 +122,59 @@ describe('AttributionManager — capture + last-touch (1.7.1 fixes)', () => {
     // later becomes first-touch instead of being locked to "direct")
     expect(storage.get('dl_first_touch')).toBeNull();
   });
+
+  test('FSR-13: UTM params are emitted under the canonical utm_* keys (what ingest/MVs read) AND the stripped alias', () => {
+    setPage('?utm_source=newsletter&utm_campaign=spring&utm_medium=email');
+    const a = attr.captureAttribution() as any;
+    // canonical (ingest reads event_data.utm_source; every attribution MV keys on it)
+    expect(a.utm_source).toBe('newsletter');
+    expect(a.utm_campaign).toBe('spring');
+    expect(a.utm_medium).toBe('email');
+    // stripped alias still present (dashboard MVs + determineSource/Medium read it)
+    expect(a.source).toBe('newsletter');
+    expect(a.campaign).toBe('spring');
+    expect(a.medium).toBe('email');
+  });
+
+  test('FSR-13: getAttributionData merges the canonical utm_* keys (so event_data carries them)', () => {
+    setPage('?utm_source=podcast&utm_campaign=ep42');
+    const data = attr.getAttributionData() as any;
+    expect(data.utm_source).toBe('podcast');
+    expect(data.utm_campaign).toBe('ep42');
+  });
+
+  test('FSR-14: a NEW fbclid over a stale _fbc regenerates _fbc with the new fbclid + a current time', () => {
+    // Seed a stale _fbc from an OLD campaign (old creation time, old fbclid).
+    cookies.set('_fbc', 'fb.1.1000000000000.OLD_CLICK', 90);
+    setPage('?fbclid=NEW_CLICK');
+    const data = attr.getAttributionData() as any;
+    // _fbc must now embed the NEW fbclid, not keep the stale one.
+    expect(data._fbc).toMatch(/^fb\.1\.\d+\.NEW_CLICK$/);
+    const ts = Number(data._fbc.split('.')[2]);
+    expect(ts).toBeGreaterThan(1000000000000); // refreshed creation time, not the stale one
+  });
+
+  test('FSR-14: the SAME fbclid already embedded in _fbc is left untouched (no churn)', () => {
+    cookies.set('_fbc', 'fb.1.1700000000000.SAME_CLICK', 90);
+    setPage('?fbclid=SAME_CLICK');
+    const data = attr.getAttributionData() as any;
+    expect(data._fbc).toBe('fb.1.1700000000000.SAME_CLICK');
+  });
+
+  test('FSR-48: an internal-nav fallback uses the fresher LAST touch, not the stale first touch', () => {
+    // First touch: January gclid.
+    setPage('?gclid=jan_click');
+    attr.getAttributionData();
+    // Later, a real Meta click becomes the last touch.
+    attr.clearCache();
+    setPage('?fbclid=may_click');
+    attr.getAttributionData();
+    // Now an internal navigation (no signal) — the fallback must carry the LAST touch
+    // (facebook), not the first touch (google) and its stale clickId.
+    attr.clearCache();
+    setPage('', 'http://localhost/some-internal-page');
+    const data = attr.getAttributionData() as any;
+    expect(data.source).toBe('facebook');
+    expect(data.clickId).toBe('may_click');
+  });
 });

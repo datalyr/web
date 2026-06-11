@@ -107,13 +107,43 @@ export function getAllQueryParams(search = window.location.search): Record<strin
   return params;
 }
 
+// FSR-57: credential detection that matches whole TOKENS (after splitting a key on
+// camelCase + separators), not substrings. The old substring regex deleted innocent
+// keys — `author`/`authority` (contains 'auth'), `passenger_count`/`passport_number`
+// (contains 'pass'), `session_type`/`cookie_consent` — silently dropping customer event
+// properties. 'session' and 'cookie' are intentionally absent: they're not credentials.
+// Single words that are unambiguous as whole tokens:
+const SENSITIVE_KEY_WORDS = new Set([
+  'pass', 'password', 'passwd', 'pwd',
+  'secret', 'token', 'auth', 'authorization',
+  'bearer', 'signature', 'cvv', 'cvc', 'ssn'
+]);
+// Compound credentials that tokenize into innocent-looking parts (api_key → api+key)
+// — matched against the separator-stripped key so api_key / apiKey / access_token all hit.
+const SENSITIVE_KEY_COMPOUNDS = [
+  'apikey', 'accesskey', 'secretkey', 'privatekey', 'publickey',
+  'accesstoken', 'refreshtoken', 'idtoken', 'clientsecret',
+  'creditcard', 'cardnumber'
+];
+
+function isSensitiveKey(key: string): boolean {
+  const words = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[\s._\-]+/)
+    .map(w => w.toLowerCase())
+    .filter(Boolean);
+  if (words.some(w => SENSITIVE_KEY_WORDS.has(w))) return true;
+  const normalized = key.toLowerCase().replace(/[\s._\-]+/g, '');
+  return SENSITIVE_KEY_COMPOUNDS.some(c => normalized.includes(c));
+}
+
 /**
  * Sanitize event data (remove sensitive keys, DOM elements, functions)
  */
 export function sanitizeEventData(data: any, maxDepth = 5, currentDepth = 0): any {
   if (currentDepth >= maxDepth) return '[Max depth reached]';
   if (data === null || data === undefined) return data;
-  
+
   // Remove DOM elements and functions
   if (
     (typeof Element !== 'undefined' && data instanceof Element) ||
@@ -122,48 +152,52 @@ export function sanitizeEventData(data: any, maxDepth = 5, currentDepth = 0): an
   ) {
     return '[Removed]';
   }
-  
+
   // Handle arrays
   if (Array.isArray(data)) {
     return data.map(item => sanitizeEventData(item, maxDepth, currentDepth + 1));
   }
-  
+
   // Handle objects
   if (typeof data === 'object') {
     const sanitized: Record<string, any> = {};
-    const sensitiveKeys = /pass|pwd|token|secret|auth|bearer|session|cookie|signature|api[-_]?key|private[-_]?key|access[-_]?token|refresh[-_]?token/i;
-    
+
     for (const key in data) {
       if (Object.prototype.hasOwnProperty.call(data, key)) {
-        // Skip sensitive keys
-        if (sensitiveKeys.test(key)) {
+        // Skip sensitive keys (whole-token match — see SENSITIVE_KEY_WORDS)
+        if (isSensitiveKey(key)) {
           continue;
         }
-        
+
         // Sanitize value recursively
         sanitized[key] = sanitizeEventData(data[key], maxDepth, currentDepth + 1);
       }
     }
-    
+
     return sanitized;
   }
-  
+
   // Handle strings
   if (typeof data === 'string') {
     // Truncate very long strings
     if (data.length > 1000) {
       return data.slice(0, 1000) + '...[truncated]';
     }
-    
-    // Remove potential JWT tokens or API keys
-    if (data.match(/^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+$/) || // JWT
-        data.match(/^[a-f0-9]{32,}$/i)) { // Hex tokens
+
+    // FSR-57: redact only UNAMBIGUOUS JWTs — base64url '{"...' header always starts with
+    // 'eyJ'. The old rules redacted ANY 3-dot-segment string ('www.google.com' → so every
+    // 3-label referrer_host became '[Redacted]'; '1.7.1' semver too) and ANY 32+-char hex
+    // string (md5/order IDs, pre-hashed emails, and — critically — 32-hex customer user
+    // IDs on the $alias path, which silently wrote user_id='[Redacted]' into
+    // visitor_user_links, collapsing those users). Credential-bearing KEYS are already
+    // dropped above, so the bare-hex value heuristic was net-negative and is removed.
+    if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(data)) { // JWT
       return '[Redacted]';
     }
-    
+
     return data;
   }
-  
+
   return data;
 }
 
@@ -233,66 +267,84 @@ export function isGlobalPrivacyControlEnabled(): boolean {
          (window as any).globalPrivacyControl === true;
 }
 
+// Common two-part TLDs (country-specific registries) where the registrable domain is
+// the last THREE labels (e.g. shop.example.co.uk → example.co.uk). Not a full public
+// suffix list, but covers the markets we see; CookieStorage.getAutoDomain() probes
+// dynamically for the rest.
+const TWO_PART_TLDS = new Set([
+  // United Kingdom
+  'co.uk', 'org.uk', 'net.uk', 'ac.uk', 'gov.uk', 'me.uk',
+  // Australia
+  'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
+  // New Zealand
+  'co.nz', 'net.nz', 'org.nz', 'govt.nz',
+  // Japan
+  'co.jp', 'ne.jp', 'or.jp', 'ac.jp', 'go.jp',
+  // India
+  'co.in', 'net.in', 'org.in', 'gov.in', 'ac.in',
+  // South Africa
+  'co.za', 'net.za', 'org.za', 'gov.za',
+  // Brazil
+  'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br',
+  // South Korea
+  'co.kr', 'ne.kr', 'or.kr', 'go.kr', 'ac.kr',
+  // China
+  'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn',
+  // Other Asia-Pacific
+  'co.id', 'co.th', 'com.sg', 'com.my', 'com.ph', 'com.vn',
+  'com.tw', 'com.hk',
+  // Latin America
+  'com.mx', 'com.ar', 'com.co', 'com.pe', 'com.cl',
+  // Europe
+  'co.il', 'co.at', 'co.hu', 'co.pl'
+]);
+
 /**
- * Get root domain for cross-subdomain tracking
+ * Registrable domain (eTLD+1) for a hostname, honoring two-part ccTLDs.
+ *   shop.example.co.uk → example.co.uk
+ *   www.example.com    → example.com
+ *   localhost / IPs    → returned unchanged
+ * Returns a bare host (no leading dot) — getRootDomain() adds the cookie-domain dot.
+ * (FSR-47: same-site referrer classification must use this, not naive last-two-labels.)
+ */
+export function getRegistrableDomain(hostname: string): string {
+  if (!hostname) return hostname;
+  const lower = hostname.toLowerCase();
+
+  // Handle localhost and IP addresses
+  if (lower === 'localhost' ||
+      /^[0-9]{1,3}(\.[0-9]{1,3}){3}$/.test(lower) || // IPv4
+      /^\[?[0-9a-fA-F:]+\]?$/.test(lower)) { // IPv6
+    return hostname;
+  }
+
+  const parts = lower.split('.');
+  if (parts.length < 2) return hostname;
+
+  const lastTwo = parts.slice(-2).join('.');
+  if (TWO_PART_TLDS.has(lastTwo) && parts.length >= 3) {
+    return parts.slice(-3).join('.');
+  }
+  return parts.slice(-2).join('.');
+}
+
+/**
+ * Get root domain for cross-subdomain tracking (cookie-domain form, with leading dot).
  */
 export function getRootDomain(): string {
   const hostname = window.location.hostname;
 
-  // Handle localhost and IP addresses
+  // Handle localhost and IP addresses — never set a cookie domain for these.
   if (hostname === 'localhost' ||
       hostname.match(/^[0-9]{1,3}\./) || // IPv4
       hostname.match(/^\[?[0-9a-fA-F:]+\]?$/)) { // IPv6
     return hostname;
   }
 
-  // Get root domain (last two parts: example.com)
   const parts = hostname.split('.');
-  if (parts.length >= 2) {
-    // Handle .co.uk, .com.au, etc
-    const tld = parts[parts.length - 1];
-    const sld = parts[parts.length - 2];
+  if (parts.length < 2) return hostname;
 
-    // Common two-part TLDs (country-specific domains)
-    // Note: The CookieStorage.getAutoDomain() probe method handles unknown TLDs dynamically,
-    // but this list provides faster resolution for known patterns
-    const twoPartTlds = [
-      // United Kingdom
-      'co.uk', 'org.uk', 'net.uk', 'ac.uk', 'gov.uk', 'me.uk',
-      // Australia
-      'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
-      // New Zealand
-      'co.nz', 'net.nz', 'org.nz', 'govt.nz',
-      // Japan
-      'co.jp', 'ne.jp', 'or.jp', 'ac.jp', 'go.jp',
-      // India
-      'co.in', 'net.in', 'org.in', 'gov.in', 'ac.in',
-      // South Africa
-      'co.za', 'net.za', 'org.za', 'gov.za',
-      // Brazil
-      'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br',
-      // South Korea
-      'co.kr', 'ne.kr', 'or.kr', 'go.kr', 'ac.kr',
-      // China
-      'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn',
-      // Other Asia-Pacific
-      'co.id', 'co.th', 'com.sg', 'com.my', 'com.ph', 'com.vn',
-      'com.tw', 'com.hk',
-      // Latin America
-      'com.mx', 'com.ar', 'com.co', 'com.pe', 'com.cl',
-      // Europe
-      'co.il', 'co.at', 'co.hu', 'co.pl'
-    ];
-    const lastTwo = `${sld}.${tld}`;
-
-    if (twoPartTlds.includes(lastTwo) && parts.length >= 3) {
-      return '.' + parts.slice(-3).join('.');
-    }
-
-    return '.' + parts.slice(-2).join('.');
-  }
-
-  return hostname;
+  return '.' + getRegistrableDomain(hostname);
 }
 
 /**

@@ -2,6 +2,67 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.3] - 2026-06-10
+
+Fixes from the 2026-06-10 full-stack review (Web SDK section). FSR ids reference
+`docs-v2/FULL_STACK_REVIEW_2026-06-10.md`.
+
+### Fixed — attribution (HIGH)
+- **UTM attribution restored (FSR-13).** `captureAttribution()` stripped the `utm_`
+  prefix, so events carried `source`/`campaign` while ingest and every attribution
+  MV/lookup pipe key on `utm_source`/`utm_campaign` — the UTM leg of web attribution was
+  dead. We now emit BOTH the canonical `utm_*` keys (what the server reads) and the
+  stripped aliases (dashboards / `determineSource`). (`src/attribution.ts`)
+- **Stale `_fbc` for repeat ad clicks (FSR-14).** A new `fbclid` over an existing 90-day
+  `_fbc` never refreshed it, so Meta received the old campaign's click id / creation time.
+  We now detect a new click (compare the URL `fbclid` to the one embedded in `_fbc`) and
+  regenerate `_fbc` with the new id + current time. (`src/attribution.ts`)
+
+### Fixed — delivery / reliability (HIGH)
+- **Tab-switch no longer destroys the offline backlog (FSR-15).** `forceFlush` on every
+  `visibilitychange` beacon-drained the persisted offline queue and erased it on
+  beacon-enqueue (not delivery), losing the backlog during an outage. Now: tab switches
+  use response-checked fetch drains; only terminal unload beacons, and it never erases the
+  persisted copy on a mere `sendBeacon`=true (next-load drain clears it, dedup-safe). It
+  also honors the 429 backoff window. (`src/queue.ts`, `src/index.ts`)
+- **Critical events survive an unload mid-retry (FSR-16).** Purchase/signup/lead events
+  lived only in the in-memory retry closure during backoff. They're now persisted to the
+  offline queue before the first send and removed on confirmed delivery. (`src/queue.ts`)
+
+### Fixed — identity (HIGH)
+- **`user_id` no longer corrupted on reload (FSR-17).** Identifiers are read via a new
+  `storage.getString()` that skips `JSON.parse`, so numeric ids don't change type and
+  16+-digit snowflake ids aren't precision-truncated. (`src/storage.ts`, `src/identity.ts`)
+
+### Fixed — MEDIUM
+- ccTLD same-site referrer classification now uses a real eTLD+1 helper (FSR-47).
+- Internal-nav attribution fallback uses the fresher last-touch, not stale first-touch (FSR-48).
+- Auto-identify form capture skips gift/recipient/refer-a-friend email fields (FSR-49).
+- `_dl_vid` cross-domain bridge param is validated (`anon_<uuid>`), stripped from the URL,
+  and never overwrites an existing visitor id — closing an identity-takeover footgun (FSR-50).
+- `setConsent()` is safe before `init()` (FSR-51).
+- `/container-scripts` fetch is time-boxed (3s) so it can't block the initial pageview (FSR-52).
+- `identify()` no longer rotates the session id mid-session (FSR-53).
+- Oversized batches drop `keepalive` so the 64KB cap can't permanently wedge the queue (FSR-54).
+- Permanent 4xx batches are dropped instead of head-of-line-blocking the offline queue forever (FSR-55).
+- `CookieStorage.get()` handles duplicate cookie names (returns the first) (FSR-56).
+- `sanitizeEventData` key/value redaction anchored — stops dropping `author`/`session_*` and
+  redacting `referrer_host`/semver/hex order ids/`$alias` user ids (FSR-57).
+
+### Fixed — LOW
+- CC purchase-pixel guard set only after the Meta pixel is confirmed live (FSR-102).
+- `sdk_version` synced to package.json + a build-time guard (`build:check`) enforces it (FSR-103, FSR-46).
+- Cross-domain CC bridge forwards both `gclid` and `fbclid` when present (FSR-104).
+- Caller-passed event properties take precedence over auto-captured attribution/context (FSR-105).
+- `reset()` clears first/last-touch attribution (cross-user contamination) (FSR-106).
+- Visitor id is not persisted at init for opted-out / GPC / DNT visitors (FSR-107).
+- Auto-identify form `MutationObserver` is disconnected on `destroy()`/opt-out (FSR-101).
+
+### Build
+- `scripts/check-bundle.js` (`npm run build:check`) fails the build unless the output
+  bundles contain the `data-workspace-id` bootstrap + a current feature literal and the
+  `sdk_version` matches package.json — guarding the 2026-05-26 outage mode (FSR-46).
+
 ## [1.7.1] - 2026-06-02
 
 ### Fixed (reliability — silent data loss)

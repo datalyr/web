@@ -1,6 +1,6 @@
 {
   "name": "@datalyr/web",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "description": "Datalyr Web SDK - Modern attribution tracking for web applications",
   "main": "dist/datalyr.js",
   "module": "dist/datalyr.esm.js",
@@ -16,6 +16,7 @@
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
+    "build:check": "node scripts/check-bundle.js",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [

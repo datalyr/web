@@ -125,17 +125,31 @@ export class ContainerManager {
     if (this.initialized) return;
     
     try {
-      // Fetch container configuration
-      const response = await fetch(`${this.endpoint}/container-scripts`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Container-Version': '1.0'
-        },
-        body: JSON.stringify({
-          workspaceId: this.workspaceId
-        })
-      });
+      // FSR-52: time-box the /container-scripts fetch. init() is awaited BEFORE the
+      // initial page() fires, and this fetch had no timeout — a slow/stalled ingest
+      // worker (the fleet has a documented history of worker-side stalls) delayed or lost
+      // the landing pageview indefinitely. Abort after 3s so page() still fires; the catch
+      // below leaves pixels/remoteConfig unset (the SDK proceeds with first-party tracking
+      // and defaults). AbortSignal.timeout isn't on every supported browser, so use a
+      // manual controller.
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timeoutId = controller ? setTimeout(() => controller.abort(), 3000) : null;
+      let response: Response;
+      try {
+        response = await fetch(`${this.endpoint}/container-scripts`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Container-Version': '1.0'
+          },
+          body: JSON.stringify({
+            workspaceId: this.workspaceId
+          }),
+          signal: controller ? controller.signal : undefined
+        });
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+      }
 
       if (!response.ok) {
         throw new Error(`Failed to fetch container scripts: ${response.status}`);
@@ -640,6 +654,16 @@ export class ContainerManager {
     } catch (error) {
       this.log('Error initializing TikTok Pixel:', error);
     }
+  }
+
+  /**
+   * Whether the Meta Pixel is configured AND loaded (fbq present) — i.e. a Purchase
+   * co-fire via trackToPixels() would actually reach Meta rather than silently no-op.
+   * Used by the CC purchase-pixel dedup so its once-per-order guard isn't burned before
+   * the pixel is live. (FSR-102)
+   */
+  hasMetaPixel(): boolean {
+    return !!(this.pixels?.meta?.enabled && (window as any).fbq);
   }
 
   /**

@@ -34,7 +34,14 @@ export class AutoIdentifyManager {
   private lastIdentifyTime = 0;
   private RATE_LIMIT_MS = 5000; // Don't auto-identify more than once per 5 seconds
   private shopifyCheckInterval?: ReturnType<typeof setInterval>;
+  private formObserver?: MutationObserver; // FSR-101: stored so destroy() can disconnect it
   private destroyed = false; // set by destroy() (e.g. on opt-out) — stops any in-flight capture from re-persisting email
+
+  // FSR-49: email fields that belong to a THIRD PARTY, not the visitor — gift/recipient/
+  // refer-a-friend/"email this to" forms. Capturing these identifies the visitor as
+  // someone else (and feeds that person's email to Meta advanced matching).
+  private static THIRD_PARTY_EMAIL_FIELD =
+    /(recipient|friend|gift|refer|invite|colleague|coworker|share|to[-_]?email|email[-_]?to|second(ary)?[-_]?email)/i;
 
   constructor(config: AutoIdentifyConfig = {}) {
     this.config = {
@@ -106,12 +113,14 @@ export class AutoIdentifyManager {
     // Monitor existing forms
     this.scanForEmailForms();
 
-    // Watch for new forms (SPAs)
-    const observer = new MutationObserver(() => {
+    // Watch for new forms (SPAs). FSR-101: store the observer so destroy() (opt-out / SDK
+    // destroy) can disconnect it — previously it was a local and leaked for the page
+    // lifetime, re-scanning + re-attaching listeners on every DOM mutation after opt-out.
+    this.formObserver = new MutationObserver(() => {
       this.scanForEmailForms();
     });
 
-    observer.observe(document.body, {
+    this.formObserver.observe(document.body, {
       childList: true,
       subtree: true
     });
@@ -120,9 +129,40 @@ export class AutoIdentifyManager {
   }
 
   /**
+   * The form's email input that belongs to the VISITOR (not a gift/recipient field), or
+   * null when there's no usable / unambiguous one. (FSR-49)
+   */
+  private findVisitorEmailInput(form: HTMLFormElement): HTMLInputElement | null {
+    const all = Array.from(form.querySelectorAll<HTMLInputElement>(
+      'input[type="email"], input[name*="email" i], input[id*="email" i], input[autocomplete="email"]'
+    ));
+    // Drop third-party (gift/recipient/refer-a-friend) email fields.
+    const candidates = all.filter(i => !this.isThirdPartyEmailField(i));
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0];
+    // Multiple remain → prefer an explicit autocomplete="email" (the visitor's own field).
+    const preferred = candidates.filter(
+      i => (i.getAttribute('autocomplete') || '').toLowerCase() === 'email'
+    );
+    if (preferred.length === 1) return preferred[0];
+    // Still ambiguous → skip rather than identify as the wrong person.
+    this.log('Multiple email inputs in form; skipping auto-identify (ambiguous)');
+    return null;
+  }
+
+  private isThirdPartyEmailField(input: HTMLInputElement): boolean {
+    const haystack = [
+      input.name, input.id, input.getAttribute('autocomplete'),
+      input.getAttribute('aria-label'), input.placeholder
+    ].filter(Boolean).join(' ');
+    return AutoIdentifyManager.THIRD_PARTY_EMAIL_FIELD.test(haystack);
+  }
+
+  /**
    * Scan DOM for forms with email inputs
    */
   private scanForEmailForms(): void {
+    if (this.destroyed) return; // FSR-101: defense-in-depth after disconnect
     const forms = document.querySelectorAll('form');
 
     forms.forEach(form => {
@@ -131,10 +171,8 @@ export class AutoIdentifyManager {
         return;
       }
 
-      // Check if form has email input
-      const emailInput = form.querySelector<HTMLInputElement>(
-        'input[type="email"], input[name*="email" i], input[id*="email" i]'
-      );
+      // Only monitor forms with a capturable VISITOR email field (FSR-49).
+      const emailInput = this.findVisitorEmailInput(form);
 
       if (emailInput) {
         const handler = (e: Event) => this.handleFormSubmit(e, form);
@@ -150,10 +188,8 @@ export class AutoIdentifyManager {
    */
   private handleFormSubmit(_event: Event, form: HTMLFormElement): void {
     try {
-      // Find email input
-      const emailInput = form.querySelector<HTMLInputElement>(
-        'input[type="email"], input[name*="email" i], input[id*="email" i]'
-      );
+      // Find the visitor's own email input (excludes gift/recipient fields — FSR-49).
+      const emailInput = this.findVisitorEmailInput(form);
 
       if (!emailInput) return;
 
@@ -525,6 +561,13 @@ export class AutoIdentifyManager {
     if (this.originalXHRSend) {
       XMLHttpRequest.prototype.send = this.originalXHRSend;
       this.originalXHRSend = undefined;
+    }
+
+    // Disconnect the form MutationObserver (FSR-101) — otherwise it keeps firing
+    // scanForEmailForms on every DOM mutation after opt-out, re-attaching listeners.
+    if (this.formObserver) {
+      this.formObserver.disconnect();
+      this.formObserver = undefined;
     }
 
     // Remove form listeners

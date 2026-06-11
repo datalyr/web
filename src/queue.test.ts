@@ -77,7 +77,7 @@ describe('EventQueue — data-loss & double-send paths (WEB-1/2/3/8)', () => {
     const flushP = queue.flush(); // _flush starts; fetch pending; inFlight set
     await Promise.resolve(); // let _flush reach the await
 
-    queue.forceFlush(); // unload fires mid-flush
+    queue.forceFlush(true); // terminal unload fires mid-flush
 
     // The in-flight event is excluded (its keepalive fetch carries it) and the offline
     // queue is empty → nothing to beacon → no double-send.
@@ -88,32 +88,136 @@ describe('EventQueue — data-loss & double-send paths (WEB-1/2/3/8)', () => {
     expect(queue.getQueueSize()).toBe(0);
   });
 
-  test('WEB-3 / HIGH-2: repeated forceFlush (visibilitychange + pagehide + beforeunload) beacons once', async () => {
+  test('WEB-3 / HIGH-2: repeated terminal forceFlush (pagehide + beforeunload) beacons once', async () => {
     (global as any).fetch = jest.fn(() => Promise.resolve({ ok: true }));
     queue = newQueue();
     queue.enqueue(makeEvent('pageview', 1));
     queue.enqueue(makeEvent('pageview', 2));
 
-    await queue.forceFlush();
-    await queue.forceFlush();
-    await queue.forceFlush();
+    await queue.forceFlush(true);
+    await queue.forceFlush(true);
+    await queue.forceFlush(true);
 
-    expect(beacon).toHaveBeenCalledTimes(1); // detached synchronously → re-fires find nothing
+    expect(beacon).toHaveBeenCalledTimes(1); // in-memory detached synchronously → re-fires find nothing
     expect(queue.getQueueSize()).toBe(0);
   });
 
-  test('WEB-3: a refused beacon persists the remainder to STORAGE (not in-memory) for the next load', async () => {
+  test('WEB-3: a refused beacon persists the events to STORAGE for the next load', async () => {
     beacon.mockReturnValue(false);
     queue = newQueue();
     queue.enqueue(makeEvent('pageview', 1));
     queue.enqueue(makeEvent('pageview', 2));
 
-    await queue.forceFlush();
+    await queue.forceFlush(true);
 
     const persisted = storage.get(OFFLINE_KEY, []);
     expect(Array.isArray(persisted)).toBe(true);
     expect(persisted.length).toBe(2); // survives to next page load
-    expect(queue.getOfflineQueueSize()).toBe(0); // not left in-memory → repeat unload can't re-beacon
+    expect(queue.getOfflineQueueSize()).toBe(0); // in-memory detached → repeat unload can't re-beacon
+  });
+
+  test('FSR-15: a tab switch (non-terminal forceFlush) within the 429 window never beacons or erases the backlog', async () => {
+    const fetchMock = jest.fn(() => Promise.resolve({
+      ok: false, status: 429, statusText: 'Too Many Requests',
+      headers: { get: (h: string) => (h === 'Retry-After' ? '60' : null) },
+    }));
+    (global as any).fetch = fetchMock;
+    queue = newQueue();
+
+    queue.enqueue(makeEvent('pageview', 1));
+    await queue.flush(); // 429 → parked offline, rateLimitedUntil set
+    expect(queue.getOfflineQueueSize()).toBe(1);
+
+    // Ordinary alt-tab during the backoff. The OLD code beaconed the whole backlog into
+    // the dead endpoint and storage.remove()'d the persisted copy.
+    await queue.forceFlush(false);
+    expect(beacon).not.toHaveBeenCalled();
+    expect(queue.getOfflineQueueSize()).toBe(1);           // in-memory backlog intact
+    expect(storage.get(OFFLINE_KEY, []).length).toBe(1);   // persisted copy intact
+  });
+
+  test('FSR-15: terminal forceFlush keeps the persisted copy after a successful beacon (next-load redelivery)', async () => {
+    (global as any).fetch = jest.fn(() => Promise.resolve({ ok: true }));
+    queue = newQueue();
+    queue.enqueue(makeEvent('pageview', 1));
+    queue.enqueue(makeEvent('pageview', 2));
+
+    await queue.forceFlush(true);
+
+    expect(beacon).toHaveBeenCalledTimes(1);
+    // Persisted copy RETAINED — sendBeacon true ≠ delivered; the next load's
+    // response-checked drain clears it (server event_id dedup makes the re-send safe).
+    expect(storage.get(OFFLINE_KEY, []).length).toBe(2);
+  });
+
+  test('FSR-16: a critical event is persisted to the offline queue BEFORE its immediate send', async () => {
+    (global as any).fetch = jest.fn(() => new Promise(() => {})); // never resolves → mid-send
+    queue = newQueue();
+
+    queue.enqueue(makeEvent('purchase', 1)); // critical
+
+    // Persisted synchronously so an unload during the send/backoff can recover it.
+    expect(queue.getOfflineQueueSize()).toBe(1);
+    expect(storage.get(OFFLINE_KEY, []).length).toBe(1);
+  });
+
+  test('FSR-16: a delivered critical event is removed from the offline queue', async () => {
+    (global as any).fetch = jest.fn(() => Promise.resolve({ ok: true }));
+    queue = newQueue();
+
+    queue.enqueue(makeEvent('purchase', 1));
+    await new Promise((r) => setTimeout(r, 20)); // let the immediate send settle
+
+    expect(queue.getOfflineQueueSize()).toBe(0);
+    expect(storage.get(OFFLINE_KEY, [])).toEqual([]);
+  });
+
+  test('FSR-54: oversized batches drop keepalive (so the 64KB cap does not reject them); small batches keep it', async () => {
+    const inits: any[] = [];
+    (global as any).fetch = jest.fn((_url: string, init: any) => { inits.push(init); return Promise.resolve({ ok: true }); });
+    queue = newQueue({ batchSize: 1 });
+
+    const big = makeEvent('pageview', 1);
+    (big as any).event_data = { blob: 'x'.repeat(70000) }; // > 60KB serialized
+    queue.enqueue(big);
+    await queue.flush();
+    expect(inits[0].keepalive).toBe(false);
+
+    const small = makeEvent('pageview', 2);
+    queue.enqueue(small);
+    await queue.flush();
+    expect(inits[1].keepalive).toBe(true);
+  });
+
+  test('FSR-55: a permanent 4xx drops the batch (no retry storm, not parked)', async () => {
+    const fetchMock = jest.fn(() => Promise.resolve({
+      ok: false, status: 400, statusText: 'Bad Request', headers: { get: () => null },
+    }));
+    (global as any).fetch = fetchMock;
+    queue = newQueue();
+
+    queue.enqueue(makeEvent('pageview', 1));
+    await queue.flush();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // no fallback / backoff retries
+    expect(queue.getOfflineQueueSize()).toBe(0); // dropped, not parked
+  });
+
+  test('FSR-55: a poison 4xx batch in the offline queue is dropped on drain, unblocking the rest', async () => {
+    jest.useFakeTimers();
+    storage.set(OFFLINE_KEY, [makeEvent('poison', 1), makeEvent('good', 2)]);
+    let n = 0;
+    (global as any).fetch = jest.fn(() => {
+      n++;
+      if (n === 1) return Promise.resolve({ ok: false, status: 400, statusText: 'Bad', headers: { get: () => null } });
+      return Promise.resolve({ ok: true });
+    });
+    queue = newQueue({ batchSize: 1 }); // one event per batch → target the poison head
+
+    await jest.advanceTimersByTimeAsync(1100); // on-load drain
+
+    expect(queue.getOfflineQueueSize()).toBe(0); // poison dropped, good delivered — no head-of-line block
   });
 
   test('WEB-1: a persisted offline queue is drained on construction when online', async () => {

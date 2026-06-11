@@ -10,8 +10,13 @@ export class IdentityManager {
   private anonymousId: string;
   private userId: string | null = null;
   private sessionId: string | null = null;
+  // FSR-107: when tracking is disallowed at init (opt-out / GPC / DNT), a freshly
+  // generated id is kept in MEMORY only — no cookie / localStorage write. Events don't
+  // send anyway; a later optIn()/consent grant persists on the next identify/reset.
+  private persistNewId: boolean;
 
-  constructor() {
+  constructor(options: { persistNewId?: boolean } = {}) {
+    this.persistNewId = options.persistNewId !== false;
     this.anonymousId = this.getOrCreateAnonymousId();
     this.userId = this.getStoredUserId();
   }
@@ -20,48 +25,82 @@ export class IdentityManager {
    * Get or create anonymous ID (device/browser identifier)
    */
   private getOrCreateAnonymousId(): string {
-    // 0. Check URL parameter first (cross-domain linking via _dl_vid)
-    // This enables tracking continuity when users navigate between different root domains
-    try {
-      const urlParams = new URLSearchParams(window.location.search);
-      const urlVisitorId = urlParams.get('_dl_vid');
-      if (urlVisitorId && urlVisitorId.startsWith('anon_')) {
-        // Valid visitor ID from URL - use it and persist
-        this.setRootDomainCookie('__dl_visitor_id', urlVisitorId);
-        storage.set('dl_anonymous_id', urlVisitorId);
-        return urlVisitorId;
-      }
-    } catch (e) {
-      // URL parsing failed - continue with cookie/localStorage checks
-      console.warn('[Datalyr] Failed to parse URL for _dl_vid:', e);
-    }
-
-    // 1. Check root domain cookie first (works across subdomains)
+    // 1. An EXISTING identity always wins — check the root-domain cookie (works across
+    //    subdomains) then localStorage. FSR-50: a persisted visitor must NEVER be
+    //    silently overwritten by a ?_dl_vid in the URL, or shared links would merge
+    //    unrelated visitors (identity takeover). The CC bridge (restoreFromURL) writes
+    //    this cookie BEFORE us, so the storefront visitor_id still wins there.
     let anonymousId = cookies.get('__dl_visitor_id');
-
     if (anonymousId) {
-      // Found in cookie - sync to localStorage
-      storage.set('dl_anonymous_id', anonymousId);
+      storage.set('dl_anonymous_id', anonymousId); // sync to localStorage
       return anonymousId;
     }
-
-    // 2. Check localStorage (fallback for cookie issues)
-    anonymousId = storage.get('dl_anonymous_id');
-
+    anonymousId = storage.getString('dl_anonymous_id'); // FSR-17: raw string, no JSON.parse
     if (anonymousId) {
-      // Found in localStorage - set root domain cookie
       this.setRootDomainCookie('__dl_visitor_id', anonymousId);
       return anonymousId;
     }
 
-    // 3. Generate new ID
+    // 2. Fresh visitor (no persisted id): accept a cross-domain bridge id from the URL,
+    //    but ONLY a well-formed anon_<uuid> — reject arbitrary / oversized values (a
+    //    multi-KB or attacker-crafted _dl_vid was previously persisted verbatim). Strip
+    //    it from the address bar so a re-shared URL can't merge the next visitor. (FSR-50)
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlVisitorId = urlParams.get('_dl_vid');
+      if (urlVisitorId && this.isValidAnonymousId(urlVisitorId)) {
+        this.stripUrlParam('_dl_vid');
+        this.persistAnonymousId(urlVisitorId);
+        return urlVisitorId;
+      }
+    } catch (e) {
+      // URL parsing failed - continue to generate a fresh id
+      console.warn('[Datalyr] Failed to parse URL for _dl_vid:', e);
+    }
+
+    // 3. Generate a new ID (persisted unless tracking is disallowed at init — FSR-107).
     anonymousId = `anon_${generateUUID()}`;
-
-    // 4. Store in both cookie (primary) and localStorage (backup)
-    this.setRootDomainCookie('__dl_visitor_id', anonymousId);
-    storage.set('dl_anonymous_id', anonymousId);
-
+    this.persistAnonymousId(anonymousId);
     return anonymousId;
+  }
+
+  /**
+   * Persist a freshly-adopted/generated anonymous id to the root-domain cookie +
+   * localStorage. Gated by persistNewId (FSR-107: don't write a tracking identifier for
+   * an opted-out / GPC / DNT visitor at init).
+   */
+  private persistAnonymousId(id: string): void {
+    if (!this.persistNewId) return;
+    this.setRootDomainCookie('__dl_visitor_id', id);
+    storage.set('dl_anonymous_id', id);
+  }
+
+  /**
+   * Whether a `_dl_vid` value is a well-formed Datalyr anonymous id (anon_ + UUID).
+   * The length is bounded by the pattern, so an oversized/garbage value is rejected.
+   * (FSR-50)
+   */
+  private isValidAnonymousId(id: string): boolean {
+    return /^anon_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+  }
+
+  /**
+   * Remove a query param from the current URL via history.replaceState (best-effort).
+   * Used so a consumed `_dl_vid` doesn't linger in the address bar and get re-shared.
+   * (FSR-50)
+   */
+  private stripUrlParam(param: string): void {
+    try {
+      if (typeof window === 'undefined' || typeof window.history?.replaceState !== 'function') return;
+      const url = new URL(window.location.href);
+      if (!url.searchParams.has(param)) return;
+      url.searchParams.delete(param);
+      const search = url.searchParams.toString();
+      const newUrl = url.pathname + (search ? '?' + search : '') + url.hash;
+      window.history.replaceState(window.history.state, '', newUrl);
+    } catch {
+      // best-effort — never block init on URL rewrite
+    }
   }
 
   /**
@@ -99,7 +138,10 @@ export class IdentityManager {
    * Get stored user ID from previous session
    */
   private getStoredUserId(): string | null {
-    return storage.get('dl_user_id');
+    // FSR-17: getString (not get) so a numeric-looking user_id ('12345') doesn't come
+    // back as a JS number after reload, and a 16+-digit snowflake id isn't precision-
+    // corrupted by JSON.parse — both would fragment identity from the second page on.
+    return storage.getString('dl_user_id');
   }
 
   /**

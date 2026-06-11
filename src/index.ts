@@ -163,8 +163,11 @@ class Datalyr {
       this.restoreFromURL();
     }
 
-    // Initialize modules
-    this.identity = new IdentityManager();
+    // Initialize modules.
+    // FSR-107: don't write a persistent tracking cookie/localStorage id for a visitor who
+    // is opted-out / GPC / DNT at init — the id stays in memory only (events don't send
+    // anyway). shouldTrack() is computable here (config/opt-out/consent are all set above).
+    this.identity = new IdentityManager({ persistNewId: this.shouldTrack() });
     this.session = new SessionManager(this.config.sessionTimeout);
     this.attribution = new AttributionManager({
       attributionWindow: this.config.attributionWindow,
@@ -503,10 +506,13 @@ class Datalyr {
     }
 
     try {
-      // FIXED (DATA-05): Rotate session ID on identify to prevent session fixation
-      if (this.session) {
-        this.session.rotateSessionId();
-      }
+      // FSR-53: do NOT rotate the session id on identify(). 'Session fixation' is an
+      // auth-credential concept; a client-generated analytics session_id is not one.
+      // Rotating split every identified visit (and every auto-identify form submit) into
+      // two session_ids — inflating server-side uniq(session_id) counts by +1 per
+      // identified visitor and landing the post-login conversion in a session with zero
+      // preceding pageviews. Matches iOS/RN (no rotate-on-identify) and every major
+      // analytics SDK; keeps session-scoped attribution joins intact.
 
       // Update identity
       const identityLink = this.identity.identify(userId, traits);
@@ -679,6 +685,15 @@ class Datalyr {
     // Clear the journey too, or the next user's touchpoints append to the previous
     // user's (cross-user contamination of touchpoint_count / days_since_first_touch).
     storage.remove('dl_journey');
+    // FSR-106: clear first/last-touch attribution as well — same cross-user-contamination
+    // rationale as the journey. Otherwise the next anon visitor's events carry the
+    // PREVIOUS user's first_touch_*/last_touch_* (via getAttributionData's fallback),
+    // crediting user B's conversions to the ad click that brought user A.
+    // (Meta's _fbc/_fbp cookies are deliberately left alone — they're shared with the
+    // merchant's own Meta Pixel and clearing them could break it; the fresh anonymous_id
+    // already de-links the visitor server-side.)
+    storage.remove('dl_first_touch');
+    storage.remove('dl_last_touch');
     this.session.createNewSession();
     this.log('User reset');
   }
@@ -870,8 +885,18 @@ class Datalyr {
    * Set consent preferences
    */
   setConsent(consent: ConsentConfig): void {
+    // Always record + persist consent FIRST, even before init(). FSR-51: a consent-
+    // management platform commonly calls setConsent() before init() so tracking is gated
+    // from the very first event. The old code then dereferenced this.queue/this.config
+    // (both undefined pre-init) inside shouldTrack()/setEnabled() and threw an uncaught
+    // TypeError into the CMP's callback chain. init() re-reads dl_consent (and gates the
+    // queue) at startup, so a pre-init call is honored there.
     this.consent = consent;
     storage.set('dl_consent', consent);
+
+    if (!this.initialized) {
+      return;
+    }
 
     // Enforce it live (not just persist it). Gate the queue by the full policy
     // (analytics consent + opt-out + DNT/GPC), and on withdrawal purge buffered events
@@ -1115,6 +1140,17 @@ class Datalyr {
       const orderId = order.orderId;
       if (!orderId) return;
 
+      // FSR-102: only burn the once-per-order guard once the Meta Pixel is actually live.
+      // trackToPixels no-ops when the container config never arrived (pixels=null after a
+      // transient /container-scripts failure); setting the guard first would permanently
+      // suppress the co-fire for the rest of the funnel session even when the container
+      // loads on a later upsell page. orderData persists across upsell loads, so a later
+      // page retries. Meta's 48h event_id dedup still protects against a double-fire.
+      if (!this.container.hasMetaPixel()) {
+        this.log("CC Purchase Pixel: Meta pixel not ready; will retry on next funnel page");
+        return;
+      }
+
       // orderData persists across upsell page loads — fire the primary Purchase
       // Pixel once per order. (Meta also dedupes by event_id over 48h, so this is
       // belt-and-suspenders against a per-page re-fire.)
@@ -1179,9 +1215,16 @@ class Datalyr {
       const vid = this.identity.getAnonymousId();
       const fbc = this.cookies.get("_fbc") || (attribution as any)._fbc;
       const fbp = this.cookies.get("_fbp") || (attribution as any)._fbp;
-      const fbclid = attribution.clickIdType === "fbclid" ? attribution.clickId : null;
+      // FSR-104: read the named click-id fields directly (captureAttribution stores every
+      // present click id under its own key) so a landing URL carrying BOTH fbclid and
+      // gclid bridges both — the old `clickIdType === 'fbclid' ? clickId : null` dropped
+      // gclid whenever fbclid was the primary, silently losing Google attribution on the
+      // cross-domain CC path. Fall back to the primary clickId for older stored shapes.
+      const fbclid = (attribution as any).fbclid
+        ?? (attribution.clickIdType === "fbclid" ? attribution.clickId : null);
       const fbclidAt = this.cookies.get("_dl_fbclid_at");
-      const gclid = attribution.clickIdType === "gclid" ? attribution.clickId : null;
+      const gclid = (attribution as any).gclid
+        ?? (attribution.clickIdType === "gclid" ? attribution.clickId : null);
       const gclidAt = this.cookies.get("_dl_gclid_at");
       if (vid) out._dl_vid = vid;
       if (fbc) out._dl_fbc = String(fbc);
@@ -1270,10 +1313,11 @@ class Datalyr {
    */
   private createEventPayload(eventName: string, properties: Record<string, any>, eventIdArg?: string): IngestEventPayload {
     // NEW-2: keep the identity's cached session id in lockstep with the LIVE session.
-    // The session id changes on identify() (rotateSessionId) and on session timeout, but
-    // identity only synced it at init/start — so the top-level payload.session_id (from
-    // identity) disagreed with event_data.session_id (from session.getMetrics()). Sync
-    // here, before reading either, so every event carries a single consistent session id.
+    // The session id changes on session timeout (and previously on identify(), removed in
+    // FSR-53), but identity only synced it at init/start — so the top-level
+    // payload.session_id (from identity) could disagree with event_data.session_id (from
+    // session.getMetrics()). Sync here, before reading either, so every event carries a
+    // single consistent session id.
     this.identity.setSessionId(this.session.getSessionId());
 
     // Sanitize and merge properties
@@ -1284,11 +1328,25 @@ class Datalyr {
       sanitizedProperties
     );
 
-    // Add attribution data
-    const attributionData = this.attribution.getAttributionData();
-    Object.assign(eventData, attributionData);
+    // FSR-105: caller-passed properties take precedence over auto-captured context.
+    // Previously Object.assign clobbered them — e.g. track('purchase', { source: 'pos',
+    // campaign: 'spring-sale' }) shipped with the URL-derived source/campaign instead.
+    // Fill ONLY the attribution/browser-context keys the caller didn't set. (session
+    // metrics + fingerprint stay SDK-authoritative below: session_id is a join key.)
+    const assignMissing = (target: Record<string, any>, source: Record<string, any>) => {
+      for (const k in source) {
+        if (Object.prototype.hasOwnProperty.call(source, k) &&
+            !Object.prototype.hasOwnProperty.call(target, k)) {
+          target[k] = source[k];
+        }
+      }
+    };
 
-    // Add session metrics
+    // Add attribution data (caller wins on collisions)
+    const attributionData = this.attribution.getAttributionData();
+    assignMissing(eventData, attributionData);
+
+    // Add session metrics (SDK-authoritative — session_id et al. must not be overridden)
     const sessionMetrics = this.session.getMetrics();
     Object.assign(eventData, sessionMetrics);
 
@@ -1300,8 +1358,8 @@ class Datalyr {
       });
     }
 
-    // Add browser context
-    Object.assign(eventData, {
+    // Add browser context (caller wins on collisions)
+    assignMissing(eventData, {
       url: window.location.href,
       path: window.location.pathname,
       referrer: document.referrer,
@@ -1345,8 +1403,10 @@ class Datalyr {
       resolution_method: 'browser_sdk',
       resolution_confidence: 1.0,
 
-      // SDK metadata (keep in sync with package.json version)
-      sdk_version: '1.7.1',
+      // SDK metadata. MUST stay in sync with package.json "version" — the build guard
+      // (scripts/check-bundle.js, run by build:check) fails the build if the bundle's
+      // sdk_version doesn't match package.json. (FSR-103)
+      sdk_version: '1.7.3',
       sdk_name: 'datalyr-web-sdk'
     };
 
@@ -1445,9 +1505,12 @@ class Datalyr {
   private setupUnloadHandler(): void {
     // Store refs so destroy() can remove these — otherwise a destroy()+re-init() cycle
     // leaks listeners that keep firing forceFlush() on the OLD (destroyed) queue. (H2)
-    this.unloadHandler = () => { this.queue.forceFlush(); };
+    // FSR-15: pagehide/beforeunload are TERMINAL (beacon both queues, keep the persisted
+    // copy); a visibilitychange:hidden is just a tab switch / background, so use the
+    // non-terminal path (response-checked fetch drain that never erases the backlog).
+    this.unloadHandler = () => { this.queue.forceFlush(true); };
     this.visibilityHandler = () => {
-      if (document.visibilityState === 'hidden') this.queue.forceFlush();
+      if (document.visibilityState === 'hidden') this.queue.forceFlush(false);
     };
 
     // Use multiple events for maximum compatibility.
@@ -1548,7 +1611,10 @@ class Datalyr {
    * Debug logging
    */
   private log(...args: any[]): void {
-    if (this.config.debug) {
+    // FSR-51: optional-chain config — log() is reachable before init() (e.g.
+    // setSuperProperties() called pre-init), where this.config is undefined; the bare
+    // `this.config.debug` threw an uncaught TypeError into the caller.
+    if (this.config?.debug) {
       console.log('[Datalyr]', ...args);
     }
   }
