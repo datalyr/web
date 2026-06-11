@@ -74,6 +74,18 @@ export interface DatalyrConfig {
   platform?: 'shopify' | 'checkoutchamp' | 'generic';
   checkoutChampDomains?: string[];
 
+  // Stripe Payment Links auto-decoration (D1).
+  // - stripePaymentLinks: default ON. Stamps `client_reference_id=<visitor_id>` (and
+  //   `prefilled_email` for identified users, standard privacy mode only) onto <a> links
+  //   whose host is exactly buy.stripe.com (or a configured custom payment-link domain),
+  //   plus `client-reference-id` on <stripe-pricing-table>/<stripe-buy-button> embeds.
+  //   checkout.stripe.com Checkout Session URLs are NEVER decorated (params are ignored
+  //   there — the session already exists). Set false to opt out.
+  // - stripeLinkDomains: extra exact hostnames (merchant custom payment-link domains,
+  //   e.g. 'pay.example.com') to decorate in addition to buy.stripe.com.
+  stripePaymentLinks?: boolean;
+  stripeLinkDomains?: string[];
+
   // Fallback endpoints for resilience
   fallbackEndpoints?: string[];         // Additional endpoints to try
 

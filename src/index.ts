@@ -69,6 +69,7 @@ class Datalyr {
   private unloadHandler?: () => void;          // beforeunload + pagehide (removed in destroy)
   private visibilityHandler?: () => void;      // visibilitychange (removed in destroy)
   private outboundDisposer?: () => void;        // tears down the CC outbound-link observer/listener
+  private stripeLinksDisposer?: () => void;     // tears down the Stripe Payment Link observer/listener
   private lastSpaPath: string | null = null;    // dedups SPA pageviews (replaceState-on-mount double-fire)
   // FIXED (ISSUE-01): Async initialization promise to prevent race conditions
   private initializationPromise: Promise<void> | null = null;
@@ -354,6 +355,16 @@ class Datalyr {
           // MED-4: gated on shouldTrack() (like syncShopifyCartAttributes) so an
           // opted-out / DNT / GPC visitor's id + click-ids aren't stamped on outbound links.
           this.syncOutboundLinkParams(this.config.checkoutChampDomains);
+        }
+
+        // Stripe Payment Link auto-decoration (D1, DEFAULT ON): stamp
+        // client_reference_id=<visitor_id> (+ prefilled_email when identified) onto
+        // buy.stripe.com / custom payment-link domain anchors and Stripe embeds, so a
+        // snippet-only merchant's checkout.session.completed webhooks attribute
+        // deterministically with zero server work. Gated on shouldTrack() so
+        // opted-out / DNT / GPC visitors never get an id stamped into outbound links.
+        if (this.config.stripePaymentLinks !== false && this.shouldTrack()) {
+          this.syncStripePaymentLinks(this.config.stripeLinkDomains ?? []);
         }
 
         // Track initial page view if enabled (AFTER encryption ready)
@@ -1309,6 +1320,153 @@ class Datalyr {
   }
 
   /**
+   * Stripe Payment Link auto-decoration (D1). Structurally mirrors
+   * syncOutboundLinkParams: stampAll on init, debounced MutationObserver for
+   * SPA-rendered anchors, capture-phase click re-stamp + queue flush, disposer
+   * wired into destroy()/pagehide.
+   *
+   * Match: exact-host equality against buy.stripe.com + config.stripeLinkDomains
+   * via the URL API — NEVER substring (a[href*=...] would match
+   * evil.com/buy.stripe.com paths) and NEVER checkout.stripe.com (Checkout
+   * Session URLs ignore these params — the session is already created).
+   *
+   * Stamp (URL API preserves existing query + hash):
+   * - client_reference_id=<visitorId> only if the param is absent (merchant-set
+   *   wins) and the id passes the Stripe format guard (Stripe silently DROPS
+   *   invalid values — don't write garbage into merchant links).
+   * - prefilled_email=<email> only if identified email exists, the param is
+   *   absent, locked_prefilled_email is absent, and privacyMode !== 'strict'.
+   * - <stripe-pricing-table>/<stripe-buy-button>: client-reference-id attribute
+   *   if absent.
+   *
+   * The decorated link's checkout.session.completed arrives with
+   * client_reference_id, which stripe-connect.js already reads — zero server
+   * changes. window.open(paymentLink) is not covered (use getVisitorId()
+   * manually); iframe/shadow-DOM links are unreachable from document.
+   */
+  private syncStripePaymentLinks(extraDomains: string[]): void {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+
+    const hosts = new Set<string>(["buy.stripe.com"]);
+    for (const d of extraDomains) {
+      const h = String(d).trim().toLowerCase();
+      if (h) hosts.add(h);
+    }
+
+    const matchesPaymentLinkHost = (href: string): boolean => {
+      try {
+        const host = new URL(href, window.location.href).hostname.toLowerCase();
+        return hosts.has(host); // exact-host equality only
+      } catch {
+        return false;
+      }
+    };
+
+    // Stripe accepts alphanumeric + `-` + `_`, max 200 chars, and silently drops
+    // invalid values. Legacy/foreign persisted cookie ids are unconstrained —
+    // skip silently rather than stamp a value Stripe would discard.
+    const CLIENT_REFERENCE_ID_RE = /^[A-Za-z0-9_-]{1,200}$/;
+    const getClientReferenceId = (): string | null => {
+      const vid = this.identity.getAnonymousId();
+      return vid && CLIENT_REFERENCE_ID_RE.test(vid) ? vid : null;
+    };
+
+    const getPrefilledEmail = (): string | null => {
+      if (this.config.privacyMode === "strict") return null;
+      const email = this.userProperties?.email;
+      return typeof email === "string" && email ? email : null;
+    };
+
+    const stampLink = (anchor: HTMLAnchorElement) => {
+      if (!anchor.href || !matchesPaymentLinkHost(anchor.href)) return;
+      try {
+        const u = new URL(anchor.href, window.location.href);
+        let mutated = false;
+        const vid = getClientReferenceId();
+        if (vid && !u.searchParams.get("client_reference_id")) {
+          u.searchParams.set("client_reference_id", vid);
+          mutated = true;
+        }
+        const email = getPrefilledEmail();
+        if (
+          email &&
+          !u.searchParams.get("prefilled_email") &&
+          !u.searchParams.get("locked_prefilled_email")
+        ) {
+          // URL API percent-encodes automatically.
+          u.searchParams.set("prefilled_email", email);
+          mutated = true;
+        }
+        if (mutated) anchor.href = u.toString();
+      } catch {
+        // Ignore malformed URLs — don't break the page.
+      }
+    };
+
+    const stampEmbeds = () => {
+      const vid = getClientReferenceId();
+      if (!vid) return;
+      document.querySelectorAll("stripe-pricing-table, stripe-buy-button").forEach((el) => {
+        if (!el.getAttribute("client-reference-id")) {
+          el.setAttribute("client-reference-id", vid);
+        }
+      });
+    };
+
+    const stampAll = () => {
+      document.querySelectorAll("a[href]").forEach((el) => stampLink(el as HTMLAnchorElement));
+      stampEmbeds();
+    };
+
+    const onClick = (e: Event) => {
+      const target = (e.target as Element | null)?.closest("a[href]");
+      if (!target) return;
+      const anchor = target as HTMLAnchorElement;
+      if (!matchesPaymentLinkHost(anchor.href)) return;
+      stampLink(anchor); // re-stamp in case identify() happened since DOMReady
+      try {
+        this.queue?.flush();
+      } catch {
+        // Best-effort — never block navigation.
+      }
+    };
+
+    stampAll();
+    document.addEventListener("click", onClick, true);
+
+    try {
+      // Debounce re-stamping (same rationale as the CC sync): a busy SPA can fire
+      // thousands of mutations per second; 150ms is small enough to catch links
+      // before the user can click them, large enough to coalesce bursts. The
+      // click-time re-stamp is the final safety net — no pushState hook needed.
+      let restampTimer: ReturnType<typeof setTimeout> | null = null;
+      const scheduleRestamp = () => {
+        if (restampTimer != null) return;
+        restampTimer = setTimeout(() => {
+          restampTimer = null;
+          stampAll();
+        }, 150);
+      };
+      const observer = new MutationObserver(scheduleRestamp);
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+
+      // Observer + click listener live for the session; pagehide cleans up on
+      // full-page unload, and destroy() tears them down early via this disposer
+      // (otherwise destroy()+re-init() leaks the observer + capturing listener).
+      this.stripeLinksDisposer = () => {
+        try { observer.disconnect(); } catch { /* idempotent */ }
+        if (restampTimer != null) { clearTimeout(restampTimer); restampTimer = null; }
+        document.removeEventListener("click", onClick, true);
+      };
+      window.addEventListener("pagehide", () => this.stripeLinksDisposer?.(), { once: true });
+    } catch (error) {
+      this.log("MutationObserver setup failed (Stripe Payment Link sync):", error);
+    }
+
+    this.log("Stripe Payment Link auto-decoration active for:", Array.from(hosts));
+  }
+
+  /**
    * Create event payload
    */
   private createEventPayload(eventName: string, properties: Record<string, any>, eventIdArg?: string): IngestEventPayload {
@@ -1406,7 +1564,7 @@ class Datalyr {
       // SDK metadata. MUST stay in sync with package.json "version" — the build guard
       // (scripts/check-bundle.js, run by build:check) fails the build if the bundle's
       // sdk_version doesn't match package.json. (FSR-103)
-      sdk_version: '1.7.3',
+      sdk_version: '1.7.4',
       sdk_name: 'datalyr-web-sdk'
     };
 
@@ -1653,6 +1811,10 @@ class Datalyr {
     if (this.outboundDisposer) {
       this.outboundDisposer();
       this.outboundDisposer = undefined;
+    }
+    if (this.stripeLinksDisposer) {
+      this.stripeLinksDisposer();
+      this.stripeLinksDisposer = undefined;
     }
 
     // Clean up queue

@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.4] - 2026-06-11
+
+### Added — Stripe Payment Link auto-decoration (D1, default ON)
+- **`<a href>` links to `buy.stripe.com`** (exact-host match via the URL API — never
+  substring, never `checkout.stripe.com`) are automatically stamped with
+  `client_reference_id=<visitor_id>` (only if absent; merchant-set wins; visitor id must
+  pass Stripe's `/^[A-Za-z0-9_-]{1,200}$/` format or we skip silently) and, for identified
+  users in standard privacy mode, `prefilled_email` (only if both `prefilled_email` and
+  `locked_prefilled_email` are absent). A decorated link's `checkout.session.completed`
+  webhook is deterministically attributed with zero merchant/server work.
+- **`<stripe-pricing-table>` / `<stripe-buy-button>` embeds** get the
+  `client-reference-id` attribute when absent.
+- New config: `stripePaymentLinks?: boolean` (default ON; set `false` to opt out) and
+  `stripeLinkDomains?: string[]` (extra exact hostnames for merchant custom payment-link
+  domains). Script-tag installs: `data-stripe-payment-links="false"`,
+  `data-stripe-link-domains="pay.example.com"`.
+- Mirrors the CheckoutChamp outbound-link sync: stamp on init, debounced (150ms)
+  MutationObserver for SPA-rendered links, capture-phase click re-stamp + queue flush,
+  disposer wired into `destroy()`/`pagehide`. Gated on `shouldTrack()` — opted-out /
+  DNT / GPC visitors never get an id stamped into outbound links.
+
 ## [1.7.3] - 2026-06-10
 
 Fixes from the 2026-06-10 full-stack review (Web SDK section). FSR ids reference
