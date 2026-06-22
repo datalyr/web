@@ -339,6 +339,17 @@ export class EventQueue {
     // a normal fetch (no cap) and succeed.
     const useKeepalive = new Blob([body]).size <= 60000;
 
+    // First-party endpoint (the customer's own tracking host, never *.datalyr.com — set
+    // by the script-origin auto-derive): send the cookie cross-subdomain so the edge can
+    // read/refresh the server-set, ITP-durable visitor_id. Legacy datalyr.com endpoints
+    // stay credential-less — unchanged behavior for every existing install.
+    let firstPartyEndpoint = false;
+    try {
+      firstPartyEndpoint = !/(^|\.)datalyr\.com$/i.test(new URL(currentEndpoint).hostname);
+    } catch {
+      /* malformed endpoint — leave false */
+    }
+
     try {
       const response = await fetch(currentEndpoint, {
         method: 'POST',
@@ -347,7 +358,8 @@ export class EventQueue {
           'X-Batch-Size': events.length.toString()
         },
         body,
-        keepalive: useKeepalive
+        keepalive: useKeepalive,
+        ...(firstPartyEndpoint ? { credentials: 'include' as RequestCredentials } : {})
       });
 
       if (!response.ok) {
