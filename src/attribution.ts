@@ -4,7 +4,7 @@
  */
 
 import { storage, cookies } from './storage';
-import { getAllQueryParams, getRegistrableDomain } from './utils';
+import { getAllQueryParams, getRegistrableDomain, redactUrl } from './utils';
 import type { Attribution, TouchPoint } from './types';
 
 export class AttributionManager {
@@ -134,14 +134,16 @@ export class AttributionManager {
       }
     }
 
-    // Capture referrer
+    // Capture referrer. 9.A.4: redact secret/PII query-param values (reset tokens,
+    // OAuth codes, emails) — this attribution object is stamped onto every event AND
+    // persisted into dl_first_touch/dl_last_touch, so it must be clean at capture.
     if (document.referrer) {
-      attribution.referrer = document.referrer;
+      attribution.referrer = redactUrl(document.referrer);
       attribution.referrerHost = this.extractHostname(document.referrer);
     }
 
-    // Capture landing page
-    attribution.landingPage = window.location.href;
+    // Capture landing page (redacted — see referrer note above)
+    attribution.landingPage = redactUrl(window.location.href);
     attribution.landingPath = window.location.pathname;
 
     // Determine source if not explicitly set

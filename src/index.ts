@@ -19,7 +19,8 @@ import {
   deepMerge,
   isDoNotTrackEnabled,
   isGlobalPrivacyControlEnabled,
-  getReferrerData
+  getReferrerData,
+  redactUrl
 } from './utils';
 import type {
   DatalyrConfig,
@@ -68,6 +69,7 @@ class Datalyr {
   private hashchangeHandler?: EventListener;
   private unloadHandler?: () => void;          // beforeunload + pagehide (removed in destroy)
   private visibilityHandler?: () => void;      // visibilitychange (removed in destroy)
+  private shopifyConsentHandler?: EventListener; // Shopify visitorConsentCollected (9.A.1; removed in destroy)
   private outboundDisposer?: () => void;        // tears down the CC outbound-link observer/listener
   private stripeLinksDisposer?: () => void;     // tears down the Stripe Payment Link observer/listener
   private lastSpaPath: string | null = null;    // dedups SPA pageviews (replaceState-on-mount double-fire)
@@ -195,6 +197,10 @@ class Datalyr {
     // Setup page unload handler
     this.setupUnloadHandler();
 
+    // Shopify Customer Privacy (9.A.1): react to the native consent banner's
+    // decision mid-session (grant AND revoke), not just at the next page load.
+    this.setupShopifyConsentListener();
+
     // Initialize plugins
     if (this.config.plugins) {
       for (const plugin of this.config.plugins) {
@@ -312,7 +318,10 @@ class Datalyr {
         // Initialize auto-identify when enabled (explicit or remote) AND
         // tracking is allowed. The shouldTrack() gate keeps capture from even
         // setting up its form/API interceptors for opted-out / DNT / GPC users.
-        if (this.config.autoIdentify === true && this.shouldTrack()) {
+        // 9.A.1: the captured email feeds Meta advanced matching / CAPI, so a
+        // declined Shopify marketing consent also blocks setup (incl. the
+        // /account.json polling); null = no Shopify signal → unchanged.
+        if (this.config.autoIdentify === true && this.shouldTrack() && this.shopifyMarketingConsent() !== false) {
           this.autoIdentify = new AutoIdentifyManager({
             enabled: true,
             captureFromForms: this.config.autoIdentifyForms,
@@ -341,8 +350,10 @@ class Datalyr {
         // Stamp attribution signals into the Shopify cart (OPT-IN, default off).
         // Lets server-side order webhooks recover the browser visitor + Meta click
         // signals (the postback webhook reads these as note_attributes). Inert unless
-        // enabled; best-effort and never blocks init.
-        if (this.config.shopifyCartAttributes === true && this.shouldTrack()) {
+        // enabled; best-effort and never blocks init. 9.A.1: the stamped visitor_id +
+        // fbc/fbp/fbclid are marketing signals, so a declined Shopify marketing
+        // consent blocks stamping too (null = no signal → unchanged).
+        if (this.config.shopifyCartAttributes === true && this.shouldTrack() && this.shopifyMarketingConsent() !== false) {
           this.syncShopifyCartAttributes().catch((error) => {
             this.log('Shopify cart attribute sync failed:', error);
           });
@@ -587,12 +598,14 @@ class Datalyr {
       this.attribution.addTouchpoint(sid, this.attribution.captureAttribution());
     }
 
+    // 9.A.4: url/search/referrer are redacted (secret/PII query-param values →
+    // __redacted__) before they ever leave the browser — see redactUrl in utils.
     const pageData: PageProperties = {
       title: document.title,
-      url: window.location.href,
+      url: redactUrl(window.location.href),
       path: window.location.pathname,
-      search: window.location.search,
-      referrer: document.referrer,
+      search: redactUrl(window.location.search),
+      referrer: redactUrl(document.referrer),
       ...properties
     };
 
@@ -1516,11 +1529,12 @@ class Datalyr {
       });
     }
 
-    // Add browser context (caller wins on collisions)
+    // Add browser context (caller wins on collisions). 9.A.4: url/referrer are
+    // redacted — secret/PII query-param values must not ship on events.
     assignMissing(eventData, {
-      url: window.location.href,
+      url: redactUrl(window.location.href),
       path: window.location.pathname,
-      referrer: document.referrer,
+      referrer: redactUrl(document.referrer),
       title: document.title,
       screen_width: screen.width,
       screen_height: screen.height,
@@ -1561,10 +1575,12 @@ class Datalyr {
       resolution_method: 'browser_sdk',
       resolution_confidence: 1.0,
 
-      // SDK metadata. MUST stay in sync with package.json "version" — the build guard
-      // (scripts/check-bundle.js, run by build:check) fails the build if the bundle's
-      // sdk_version doesn't match package.json. (FSR-103)
-      sdk_version: '1.7.4',
+      // SDK metadata. The placeholder is replaced with package.json "version" at build
+      // time (rollup.config.js injectSdkVersion — 9.A.3), so the literal can never
+      // drift from the package again (it sat at 1.7.4 across the 1.7.5 release). The
+      // build guard (scripts/check-bundle.js, run by build:check) still verifies the
+      // deployable bundles carry the package.json version. (FSR-103)
+      sdk_version: '__SDK_VERSION__',
       sdk_name: 'datalyr-web-sdk'
     };
 
@@ -1582,6 +1598,14 @@ class Datalyr {
 
     // Explicit analytics-consent withdrawal (setConsent) blocks first-party tracking.
     if (this.consent && this.consent.analytics === false) {
+      return false;
+    }
+
+    // Shopify Customer Privacy (9.A.1 — LEGAL): on a Shopify storefront, a shopper who
+    // declined the native consent banner must not be tracked, even when the merchant
+    // never wired setConsent(). null = API absent (non-Plus store not using it, or
+    // script loaded off-Shopify) → fall through, behavior unchanged (fail open).
+    if (this.shopifyAnalyticsConsent() === false) {
       return false;
     }
 
@@ -1604,7 +1628,131 @@ class Datalyr {
    * pixels (which share data). No consent set = allowed (default).
    */
   private consentAllowsMarketing(): boolean {
+    // Shopify Customer Privacy (9.A.1): a declined native banner blocks marketing use
+    // (pixel loads, click-id/email forwarding) even with no setConsent() call.
+    // null = no signal → defer to the setConsent-based policy below, unchanged.
+    if (this.shopifyMarketingConsent() === false) {
+      return false;
+    }
     return !this.consent || (this.consent.marketing !== false && this.consent.sale !== false);
+  }
+
+  /**
+   * Shopify Customer Privacy API handle (9.A.1), or null when it doesn't apply:
+   * only consulted when the SDK was initialized with platform:'shopify' AND the
+   * storefront exposes window.Shopify.customerPrivacy. Every access is wrapped —
+   * a Shopify API shape change must NEVER break tracking.
+   */
+  private getShopifyCustomerPrivacy(): any {
+    if (this.config?.platform !== 'shopify') return null;
+    if (typeof window === 'undefined') return null;
+    try {
+      return (window as any).Shopify?.customerPrivacy ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Shopify's analytics-consent signal: true/false when the Customer Privacy API is
+   * present and answers, null when there's no signal (API absent / unexpected shape)
+   * — null means "no restriction from Shopify", i.e. today's behavior.
+   */
+  private shopifyAnalyticsConsent(): boolean | null {
+    try {
+      const cp = this.getShopifyCustomerPrivacy();
+      if (!cp) return null;
+      if (typeof cp.analyticsProcessingAllowed === 'function') {
+        const allowed = cp.analyticsProcessingAllowed();
+        return typeof allowed === 'boolean' ? allowed : null;
+      }
+      // Older API surface: the aggregate "can this visitor be tracked" signal.
+      if (typeof cp.userCanBeTracked === 'function') {
+        const allowed = cp.userCanBeTracked();
+        return typeof allowed === 'boolean' ? allowed : null;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Shopify's marketing-consent signal (gates pixels, click-id/email → CAPI, cart
+   * attribute stamping, auto-identify email capture). Same null semantics as
+   * shopifyAnalyticsConsent().
+   */
+  private shopifyMarketingConsent(): boolean | null {
+    try {
+      const cp = this.getShopifyCustomerPrivacy();
+      if (!cp || typeof cp.marketingAllowed !== 'function') return null;
+      const allowed = cp.marketingAllowed();
+      return typeof allowed === 'boolean' ? allowed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Listen for Shopify's `visitorConsentCollected` document event (9.A.1) so a
+   * consent decision made mid-session takes effect without a reload. Revocation is
+   * enforced immediately, mirroring setConsent(): queue gated + purged, pixels torn
+   * down, auto-identify (email capture + /account.json polling) destroyed. On grant
+   * the queue re-enables (track() re-checks shouldTrack() per event anyway) and cart
+   * attribute stamping runs; pixels / auto-identify resume on the next page load —
+   * the same convention as optIn().
+   */
+  private setupShopifyConsentListener(): void {
+    if (this.config.platform !== 'shopify') return;
+    if (typeof document === 'undefined') return;
+    try {
+      this.shopifyConsentHandler = () => {
+        try {
+          this.onShopifyConsentChanged();
+        } catch (error) {
+          this.log('Shopify consent change handling failed:', error);
+        }
+      };
+      document.addEventListener('visitorConsentCollected', this.shopifyConsentHandler);
+    } catch (error) {
+      this.log('Shopify consent listener setup failed:', error);
+    }
+  }
+
+  private onShopifyConsentChanged(): void {
+    const allowed = this.shouldTrack();
+    this.queue.setEnabled(allowed);
+    if (!allowed) {
+      // Mirror setConsent() withdrawal: purge buffered events so events captured
+      // before the decline can't drain if consent is later re-granted.
+      this.queue.clear();
+      this.queue.clearOffline();
+    }
+
+    const marketingBlocked = this.shopifyMarketingConsent() === false;
+
+    // Stop email capture (form interceptors + /account.json polling) immediately.
+    if ((!allowed || marketingBlocked) && this.autoIdentify) {
+      this.autoIdentify.destroy();
+      this.autoIdentify = undefined;
+    }
+
+    // Same caveat as setConsent(): an already-injected pixel global (fbq/gtag/ttq)
+    // keeps running in the page; full removal is on reload.
+    if (!this.consentAllowsMarketing() && this.container) {
+      this.container.cleanupAllIframes();
+      this.container = undefined;
+    }
+
+    // Grant direction: cart-attribute stamping is cheap and idempotent (merges via
+    // /cart/update.js), so run it now instead of waiting for the next page load.
+    if (allowed && !marketingBlocked && this.config.shopifyCartAttributes === true) {
+      this.syncShopifyCartAttributes().catch((error) => {
+        this.log('Shopify cart attribute sync failed:', error);
+      });
+    }
+
+    this.log('Shopify consent collected — analytics allowed:', allowed, '— marketing blocked:', marketingBlocked);
   }
 
   /**
@@ -1717,7 +1865,7 @@ class Datalyr {
       stack: error.stack,
       context,
       timestamp: new Date().toISOString(),
-      url: window.location.href
+      url: redactUrl(window.location.href) // 9.A.4: no secret query values in error logs
     };
 
     this.errors.push(errorInfo);
@@ -1807,6 +1955,10 @@ class Datalyr {
     if (this.visibilityHandler) {
       window.removeEventListener('visibilitychange', this.visibilityHandler);
       this.visibilityHandler = undefined;
+    }
+    if (this.shopifyConsentHandler) {
+      document.removeEventListener('visitorConsentCollected', this.shopifyConsentHandler);
+      this.shopifyConsentHandler = undefined;
     }
     if (this.outboundDisposer) {
       this.outboundDisposer();

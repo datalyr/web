@@ -201,6 +201,57 @@ export function sanitizeEventData(data: any, maxDepth = 5, currentDepth = 0): an
   return data;
 }
 
+// 9.A.4: query-param NAMES whose VALUES are secrets/PII — password-reset tokens,
+// OAuth codes, magic-link sessions, emails/phones prefilled into URLs. Events ship
+// `url` / `referrer` / `landingPage` with the FULL query string (sanitizeEventData
+// only strips property KEYS, not URL param values), so /reset?token=…&email=… leaked
+// verbatim into events and onward to ad platforms. Matched case-insensitively.
+const REDACTED_URL_PARAMS = new Set([
+  'token', 'access_token', 'refresh_token', 'id_token', 'auth', 'authorization',
+  'code', 'password', 'pass', 'pwd', 'secret', 'api_key', 'apikey', 'key',
+  'session', 'session_id', 'sid', 'email', 'e', 'phone', 'tel',
+  'signature', 'sig', 'otp', 'reset', 'hash'
+]);
+
+const REDACTED_URL_VALUE = '__redacted__';
+
+/**
+ * Redact secret/PII query-param VALUES in a URL (9.A.4). The param NAME is kept
+ * (value → `__redacted__`) so funnel steps that match on the param's presence still
+ * work; every other param — click IDs (fbclid/gclid/…) and utm_* — survives
+ * untouched. Only the query string is rewritten, so relative URLs, bare
+ * `?a=b` search strings, and fragments all keep their shape. Returns the input
+ * unchanged when there's no query string or on any parse failure — redaction must
+ * never break tracking.
+ */
+export function redactUrl(url: string): string {
+  if (!url || typeof url !== 'string') return url;
+  const queryStart = url.indexOf('?');
+  if (queryStart === -1) return url;
+  try {
+    // Split off the fragment so `?a=b#c` round-trips (URLSearchParams would
+    // otherwise swallow `#c` into the last value).
+    const hashStart = url.indexOf('#', queryStart);
+    const query = hashStart === -1 ? url.slice(queryStart + 1) : url.slice(queryStart + 1, hashStart);
+    const fragment = hashStart === -1 ? '' : url.slice(hashStart);
+
+    const params = new URLSearchParams(query);
+    let mutated = false;
+    // Snapshot the keys first — set() collapses duplicate keys mid-iteration.
+    for (const key of Array.from(new Set(params.keys()))) {
+      if (REDACTED_URL_PARAMS.has(key.toLowerCase())) {
+        params.set(key, REDACTED_URL_VALUE);
+        mutated = true;
+      }
+    }
+    if (!mutated) return url; // don't re-encode untouched URLs
+
+    return url.slice(0, queryStart + 1) + params.toString() + fragment;
+  } catch {
+    return url; // malformed URL → ship as-is rather than drop/break the event
+  }
+}
+
 /**
  * Deep merge objects
  */
@@ -353,18 +404,20 @@ export function getRootDomain(): string {
 export function getReferrerData(): Record<string, any> {
   const referrer = document.referrer;
   if (!referrer) return {};
-  
+
   try {
     const url = new URL(referrer);
+    // 9.A.4: the referrer can be our own /reset?token=… or an OAuth callback —
+    // redact secret/PII param values before they're stamped onto the event.
     return {
-      referrer,
+      referrer: redactUrl(referrer),
       referrer_host: url.hostname,
       referrer_path: url.pathname,
-      referrer_search: url.search,
+      referrer_search: redactUrl(url.search),
       referrer_source: detectReferrerSource(url.hostname)
     };
   } catch {
-    return { referrer };
+    return { referrer: redactUrl(referrer) };
   }
 }
 

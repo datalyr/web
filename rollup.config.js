@@ -2,6 +2,7 @@ import typescript from '@rollup/plugin-typescript';
 import resolve from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import terser from '@rollup/plugin-terser';
+import replace from '@rollup/plugin-replace';
 import { readFileSync } from 'fs';
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'));
@@ -12,6 +13,17 @@ const banner = `/**
  * (c) ${new Date().getFullYear()} ${pkg.author}
  * Released under the ${pkg.license} License
  */`;
+
+// 9.A.3: inject the sdk_version literal from package.json at build time. The
+// constant used to be hand-maintained in src/index.ts and drifted (payloads said
+// 1.7.4 while the package was 1.7.5) — with the placeholder replaced here it can
+// never drift again. Runs BEFORE typescript so the emitted JS (and its sourcemap)
+// carries the real version string, which scripts/check-bundle.js then verifies
+// against package.json in the deployable bundles.
+const injectSdkVersion = () => replace({
+  preventAssignment: true,
+  values: { __SDK_VERSION__: pkg.version }
+});
 
 export default [
   // Browser build (IIFE)
@@ -35,6 +47,7 @@ export default [
       }
     ],
     plugins: [
+      injectSdkVersion(),
       resolve({
         browser: true,
         preferBuiltins: false
@@ -67,6 +80,7 @@ export default [
       }
     ],
     plugins: [
+      injectSdkVersion(),
       resolve({
         browser: true,
         preferBuiltins: false
@@ -93,6 +107,7 @@ export default [
       }
     ],
     plugins: [
+      injectSdkVersion(),
       resolve({
         browser: true,
         preferBuiltins: false

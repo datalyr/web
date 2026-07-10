@@ -2,8 +2,8 @@
 /**
  * Build-time bundle guard. (FSR-46 + FSR-103)
  *
- * The deployable bundles (datalyr-app/public/dl.dev.js, dl.js, dl.min.js) are a
- * hand-maintained concatenation of the rollup dist + the script-tag bootstrap that
+ * The deployable bundles (datalyr-v2/infra/tracking/dl.dev.js, dl.js, dl.min.js) are
+ * a hand-maintained concatenation of the rollup dist + the script-tag bootstrap that
  * auto-inits `data-workspace-id` installs. On 2026-05-26 a `cp dist over dl.dev.js`
  * dropped that bootstrap and took customer tracking down for hours; it recurred as a
  * near-miss on 2026-05-30. The build had NO automated check — a bootstrap-less input
@@ -35,11 +35,15 @@ const REQUIRED_MARKERS = [
   'buy.stripe.com'        // D1 Stripe Payment Link auto-decoration (1.7.4+)
 ];
 
-// Default targets: the deployable bundles in the sibling datalyr-app/public.
+// Default targets: the LIVE deployable bundles in the sibling
+// datalyr-v2/infra/tracking (the R2/track.datalyr.com source of truth).
+// 9.A.3: these used to point at datalyr-app/public — datalyr-app was deprecated and
+// its infra consolidated into datalyr-v2 on 2026-06-26, so the guard was validating
+// a stale copy while the bundles that actually deploy went unchecked.
 const DEFAULT_TARGETS = [
-  path.resolve(__dirname, '..', '..', '..', 'datalyr-app', 'public', 'dl.dev.js'),
-  path.resolve(__dirname, '..', '..', '..', 'datalyr-app', 'public', 'dl.js'),
-  path.resolve(__dirname, '..', '..', '..', 'datalyr-app', 'public', 'dl.min.js'),
+  path.resolve(__dirname, '..', '..', '..', 'datalyr-v2', 'infra', 'tracking', 'dl.dev.js'),
+  path.resolve(__dirname, '..', '..', '..', 'datalyr-v2', 'infra', 'tracking', 'dl.js'),
+  path.resolve(__dirname, '..', '..', '..', 'datalyr-v2', 'infra', 'tracking', 'dl.min.js'),
 ];
 
 const targets = process.argv.slice(2);

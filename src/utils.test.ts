@@ -1,8 +1,9 @@
 /**
- * Unit tests for utils: the eTLD+1 helper (FSR-47) and sanitizeEventData (FSR-57).
+ * Unit tests for utils: the eTLD+1 helper (FSR-47), sanitizeEventData (FSR-57)
+ * and redactUrl (9.A.4).
  */
 
-import { getRegistrableDomain, sanitizeEventData } from './utils';
+import { getRegistrableDomain, sanitizeEventData, redactUrl } from './utils';
 
 describe('getRegistrableDomain (FSR-47)', () => {
   test('plain .com host → eTLD+1', () => {
@@ -77,5 +78,54 @@ describe('sanitizeEventData (FSR-57)', () => {
     const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123sig';
     const out = sanitizeEventData({ id_proof: jwt });
     expect(out.id_proof).toBe('[Redacted]');
+  });
+});
+
+describe('redactUrl (9.A.4)', () => {
+  test('redacts secret/PII param VALUES but keeps the param names', () => {
+    const out = redactUrl('https://shop.com/reset?token=abc123&email=jane%40x.com');
+    expect(out).toBe('https://shop.com/reset?token=__redacted__&email=__redacted__');
+  });
+
+  test('click IDs and UTMs survive untouched alongside a redacted param', () => {
+    const out = redactUrl(
+      'https://shop.com/?fbclid=IwAR123&utm_source=facebook&utm_campaign=spring&token=s3cret'
+    );
+    expect(out).toContain('fbclid=IwAR123');
+    expect(out).toContain('utm_source=facebook');
+    expect(out).toContain('utm_campaign=spring');
+    expect(out).toContain('token=__redacted__');
+    expect(out).not.toContain('s3cret');
+  });
+
+  test('matching is case-insensitive on the param name', () => {
+    expect(redactUrl('/cb?Code=4xyz&ACCESS_TOKEN=t')).toBe(
+      '/cb?Code=__redacted__&ACCESS_TOKEN=__redacted__'
+    );
+  });
+
+  test('relative URLs and bare search strings keep their shape', () => {
+    expect(redactUrl('/reset?token=abc')).toBe('/reset?token=__redacted__');
+    expect(redactUrl('?email=a%40b.com&plan=pro')).toBe('?email=__redacted__&plan=pro');
+  });
+
+  test('fragment survives', () => {
+    expect(redactUrl('https://a.com/p?sid=1#step-2')).toBe(
+      'https://a.com/p?sid=__redacted__#step-2'
+    );
+  });
+
+  test('URLs without a query string (or with only clean params) are returned byte-identical', () => {
+    expect(redactUrl('https://a.com/pricing')).toBe('https://a.com/pricing');
+    expect(redactUrl('')).toBe('');
+    // No re-encoding when nothing matched — the URL must ship exactly as observed.
+    const clean = 'https://a.com/?utm_source=x&ref=abc%20def';
+    expect(redactUrl(clean)).toBe(clean);
+  });
+
+  test('non-string / malformed input is returned unchanged', () => {
+    expect(redactUrl(undefined as any)).toBe(undefined);
+    expect(redactUrl(null as any)).toBe(null);
+    expect(redactUrl('not a url ? %E0%A4%A but still fine')).toContain('not a url');
   });
 });
