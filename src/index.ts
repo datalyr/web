@@ -247,7 +247,15 @@ class Datalyr {
         // touch until the first event). getAttributionData() warms queryParamsCache (freezing
         // the landing params) AND persists first/last touch immediately. Wrapped so a failure
         // never blocks init.
-        try { this.attribution.getAttributionData(); } catch (e) { this.log('Eager attribution capture failed:', e); }
+        // CONSENT (Track-3 review P1): gate the eager capture behind shouldTrack(). This call
+        // synthesizes _fbp/_fbc and persists first/last touch — which must NOT happen at page
+        // load for an opted-out / DNT / GPC visitor (shouldTrack()=false), or it undoes the
+        // id-less-at-init privacy invariant. For a TRACKED visitor with marketing declined,
+        // getAttributionData already strips the click-ids / marketing cookies (TR-03), so TR-22's
+        // early-capture benefit is preserved for consenting/default visitors.
+        if (this.shouldTrack()) {
+          try { this.attribution.getAttributionData(); } catch (e) { this.log('Eager attribution capture failed:', e); }
+        }
 
         // SEC-03: encryption is for PII-AT-REST only — it must NOT gate event delivery,
         // pageviews, or pixels. On a non-secure context (http://) or an old browser,

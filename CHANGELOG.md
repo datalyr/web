@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
   event-name charset) converged across the SDKs via the TR-* fixes.
 
 ### Fixed
+- **Track-3 review P1: the TR-22 eager attribution capture now respects consent.** `getAttributionData()`
+  ran as the first statement of `initializeAsync` with no `shouldTrack()` gate, so a returning
+  GPC / DNT / opted-out visitor landing on a `?fbclid=` URL had `_fbp`/`_fbc` synthesized and
+  first/last-touch persisted at page load — undoing the id-less-at-init privacy invariant. The eager
+  call is now gated on `shouldTrack()`; TR-22's early-capture benefit is preserved for consenting /
+  default visitors (and a tracked-but-marketing-declined visitor already has the click-ids / marketing
+  cookies stripped by TR-03).
 - **BATCH-2(e): `code` URL redaction is now OAuth-context-aware — coupon/referral codes survive.**
   `code` was in the always-redact URL denylist, so `redactUrl` replaced EVERY `code=` value with
   `__redacted__` — protecting OAuth authorization codes but silently destroying coupon / referral /
