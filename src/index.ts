@@ -1615,7 +1615,11 @@ class Datalyr {
       // build guard (scripts/check-bundle.js, run by build:check) still verifies the
       // deployable bundles carry the package.json version. (FSR-103)
       sdk_version: '__SDK_VERSION__',
-      sdk_name: 'datalyr-web-sdk'
+      sdk_name: 'datalyr-web-sdk',
+      // A3-25: versioned-envelope stamp. Every SDK emits schema_version so the ingest/contract
+      // layer can key on ONE canonical envelope version (snake_case fields, event_name/event_data
+      // keys, canonical click-ids, clamped client timestamp — all now converged across SDKs).
+      schema_version: 1
     };
 
     return payload;

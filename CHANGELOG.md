@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **A3-25: `schema_version` envelope stamp.** Every event now carries `schema_version: 1`, so
+  the ingest/contract layer can key on one canonical envelope version. The envelope's other
+  guarantees (snake_case fields, canonical click-ids, clamped client timestamp, unified
+  event-name charset) converged across the SDKs via the TR-* fixes.
+
 ### Fixed
 - **TR-23: two coexisting script tags no longer double-init (duplicate pageviews).** The IIFE
   unconditionally overwrote `window.datalyr` with a fresh instance, so a Shopify App Embed + a
