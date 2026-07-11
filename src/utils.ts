@@ -215,38 +215,75 @@ const REDACTED_URL_PARAMS = new Set([
 
 const REDACTED_URL_VALUE = '__redacted__';
 
+// Redact denylisted keys in one `k=v&k=v` string (query OR fragment). Returns the
+// re-encoded string and whether anything was rewritten (so the caller can preserve the
+// exact original bytes when nothing matched).
+function redactKvPairs(s: string): { out: string; mutated: boolean } {
+  const params = new URLSearchParams(s);
+  let mutated = false;
+  // Snapshot the keys first — set() collapses duplicate keys mid-iteration.
+  for (const key of Array.from(new Set(params.keys()))) {
+    if (REDACTED_URL_PARAMS.has(key.toLowerCase())) {
+      params.set(key, REDACTED_URL_VALUE);
+      mutated = true;
+    }
+  }
+  return { out: params.toString(), mutated };
+}
+
 /**
- * Redact secret/PII query-param VALUES in a URL (9.A.4). The param NAME is kept
+ * Redact secret/PII param VALUES in a URL (9.A.4). The param NAME is kept
  * (value → `__redacted__`) so funnel steps that match on the param's presence still
- * work; every other param — click IDs (fbclid/gclid/…) and utm_* — survives
- * untouched. Only the query string is rewritten, so relative URLs, bare
- * `?a=b` search strings, and fragments all keep their shape. Returns the input
- * unchanged when there's no query string or on any parse failure — redaction must
- * never break tracking.
+ * work; every other param — click IDs (fbclid/gclid/…) and utm_* — survives untouched.
+ * Both the query string AND a k=v fragment are rewritten: TR-04 — OAuth-implicit /
+ * Supabase magic links carry the session in the FRAGMENT (`/welcome#access_token=eyJ…`),
+ * with no query string at all; the old code returned early on a missing `?` and reattached
+ * the fragment verbatim, leaking the full JWT into `url` / `landingPage` / `dl_first_touch`
+ * (90d) and onward to ad platforms. Non-k=v fragments (`#section`, `#/spa-route`) keep their
+ * shape. Returns the input unchanged when nothing sensitive matched or on any parse
+ * failure — redaction must never break tracking.
  */
 export function redactUrl(url: string): string {
   if (!url || typeof url !== 'string') return url;
-  const queryStart = url.indexOf('?');
-  if (queryStart === -1) return url;
+  const hashStart = url.indexOf('#');
+  const qIdx = url.indexOf('?');
+  // A query string exists only when '?' appears BEFORE the fragment — a '?' after '#' is
+  // part of the fragment per the URL grammar (e.g. a SPA hash-route `#/reset?token=…`).
+  const queryStart = (qIdx !== -1 && (hashStart === -1 || qIdx < hashStart)) ? qIdx : -1;
+  if (queryStart === -1 && hashStart === -1) return url; // nothing to redact
   try {
-    // Split off the fragment so `?a=b#c` round-trips (URLSearchParams would
-    // otherwise swallow `#c` into the last value).
-    const hashStart = url.indexOf('#', queryStart);
-    const query = hashStart === -1 ? url.slice(queryStart + 1) : url.slice(queryStart + 1, hashStart);
-    const fragment = hashStart === -1 ? '' : url.slice(hashStart);
+    const base = url.slice(0, queryStart !== -1 ? queryStart : (hashStart !== -1 ? hashStart : url.length));
+    const query = queryStart === -1 ? '' : url.slice(queryStart + 1, hashStart === -1 ? url.length : hashStart);
+    const rawFragment = hashStart === -1 ? '' : url.slice(hashStart + 1);
 
-    const params = new URLSearchParams(query);
     let mutated = false;
-    // Snapshot the keys first — set() collapses duplicate keys mid-iteration.
-    for (const key of Array.from(new Set(params.keys()))) {
-      if (REDACTED_URL_PARAMS.has(key.toLowerCase())) {
-        params.set(key, REDACTED_URL_VALUE);
-        mutated = true;
+
+    let queryOut = query;
+    if (query) {
+      const r = redactKvPairs(query);
+      if (r.mutated) { queryOut = r.out; mutated = true; }
+    }
+
+    // TR-04: redact the fragment when it carries k=v pairs. Two shapes: a pure implicit-flow
+    // fragment (`#access_token=…&refresh_token=…`) and a SPA hash-route with its own query
+    // (`#/reset?access_token=…`). Leave non-k=v fragments (`#section`, `#/route`) untouched.
+    let fragmentOut = rawFragment;
+    if (rawFragment) {
+      const fragQ = rawFragment.indexOf('?');
+      if (fragQ !== -1) {
+        const r = redactKvPairs(rawFragment.slice(fragQ + 1));
+        if (r.mutated) { fragmentOut = rawFragment.slice(0, fragQ + 1) + r.out; mutated = true; }
+      } else if (/[\w-]+=/.test(rawFragment)) {
+        const r = redactKvPairs(rawFragment);
+        if (r.mutated) { fragmentOut = r.out; mutated = true; }
       }
     }
-    if (!mutated) return url; // don't re-encode untouched URLs
 
-    return url.slice(0, queryStart + 1) + params.toString() + fragment;
+    if (!mutated) return url; // nothing sensitive matched → ship the exact original bytes
+
+    return base
+      + (queryStart === -1 ? '' : '?' + queryOut)
+      + (hashStart === -1 ? '' : '#' + fragmentOut);
   } catch {
     return url; // malformed URL → ship as-is rather than drop/break the event
   }

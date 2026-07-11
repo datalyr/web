@@ -115,6 +115,41 @@ describe('redactUrl (9.A.4)', () => {
     );
   });
 
+  test('TR-04: OAuth-implicit / magic-link token in the FRAGMENT of a query-less URL is redacted', () => {
+    expect(redactUrl('https://app.com/welcome#access_token=eyJhbGciOi.payLOAD.sIg')).toBe(
+      'https://app.com/welcome#access_token=__redacted__'
+    );
+  });
+
+  test('TR-04: multi-param implicit fragment — secrets redacted, non-secret params survive', () => {
+    const out = redactUrl(
+      'https://app.com/cb#access_token=eyJ.a.b&refresh_token=r-9f&expires_in=3600&token_type=bearer'
+    );
+    expect(out).toContain('access_token=__redacted__');
+    expect(out).toContain('refresh_token=__redacted__');
+    expect(out).toContain('expires_in=3600');
+    expect(out).toContain('token_type=bearer');
+    expect(out).not.toContain('eyJ.a.b');
+    expect(out).not.toContain('r-9f');
+  });
+
+  test('TR-04: query AND fragment both carry secrets — both redacted', () => {
+    expect(redactUrl('https://a.com/p?sid=1#access_token=eyJ.x.y')).toBe(
+      'https://a.com/p?sid=__redacted__#access_token=__redacted__'
+    );
+  });
+
+  test('TR-04: SPA hash-route with a query redacts only its query portion', () => {
+    expect(redactUrl('https://a.com/app#/reset?access_token=abc&view=grid')).toBe(
+      'https://a.com/app#/reset?access_token=__redacted__&view=grid'
+    );
+  });
+
+  test('TR-04: a non-k=v fragment (SPA route / anchor) is left byte-identical', () => {
+    expect(redactUrl('https://a.com/app#/dashboard')).toBe('https://a.com/app#/dashboard');
+    expect(redactUrl('https://a.com/page#section-2')).toBe('https://a.com/page#section-2');
+  });
+
   test('URLs without a query string (or with only clean params) are returned byte-identical', () => {
     expect(redactUrl('https://a.com/pricing')).toBe('https://a.com/pricing');
     expect(redactUrl('')).toBe('');

@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **TR-04: URL fragment tokens are now redacted.** `redactUrl` only rewrote the query
+  string and returned early when there was no `?`, reattaching the fragment verbatim — so
+  OAuth-implicit / Supabase magic-link sessions (`/welcome#access_token=eyJ…`), which carry
+  the JWT in the **fragment** with no query string at all, shipped the full token in `url` /
+  pageview `url` / `landingPage` (persisted in `dl_first_touch` for 90 days and attached to
+  every event, onward to ad platforms). It now applies the same secret/PII denylist to a
+  `k=v&` fragment — both the implicit-flow shape (`#access_token=…&refresh_token=…`) and a
+  SPA hash-route with its own query (`#/reset?access_token=…`). Non-k=v fragments
+  (`#section`, `#/route`) are left byte-identical.
+
 ## [1.7.4] - 2026-06-11
 
 ### Added — Stripe Payment Link auto-decoration (D1, default ON)
