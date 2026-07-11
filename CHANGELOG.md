@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **TR-23: two coexisting script tags no longer double-init (duplicate pageviews).** The IIFE
+  unconditionally overwrote `window.datalyr` with a fresh instance, so a Shopify App Embed + a
+  manual snippet (or a double-included bundle) created two instances — each patching
+  `history.pushState` and firing its own pageviews (distinct event_ids → no server dedup). The
+  singleton now REUSES an existing `window.datalyr` instead of constructing a second one; the
+  shared instance's `initialized` guard makes the second tag's bootstrap `init()` a no-op. (The
+  CDN bootstrap also gains a `window.__datalyr_booted` sentinel — in the dl.js build artifact.)
 - **TR-22: landing attribution is captured eagerly, before the container fetch.** The first
   attribution read sat inside the initial `page()` — *after* `await container.init()` (a ~3s
   budget) — so a router / consent tool that strips `fbclid` via `history.replaceState` within

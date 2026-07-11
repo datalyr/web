@@ -2061,8 +2061,14 @@ class Datalyr {
   }
 }
 
-// Create singleton instance
-const datalyr = new Datalyr();
+// Create singleton instance. TR-23: reuse an existing window.datalyr (a prior tag's instance —
+// Shopify App Embed + a manual snippet coexisting, or a double-included bundle) instead of
+// constructing a SECOND one. Two instances each patch history.pushState and fire their own
+// pageviews (distinct event_ids → no server-side dedup). A plain truthy check (NOT instanceof):
+// two <script> tags run two separate IIFEs whose Datalyr classes are structurally identical but
+// distinct objects, so instanceof would fail across them. With one shared instance, the second
+// tag's bootstrap init() hits the instance-level `initialized` guard and no-ops.
+const datalyr: Datalyr = (typeof window !== 'undefined' && (window as any).datalyr) || new Datalyr();
 
 // Expose global API
 if (typeof window !== 'undefined') {
