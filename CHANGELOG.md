@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **TR-22: landing attribution is captured eagerly, before the container fetch.** The first
+  attribution read sat inside the initial `page()` — *after* `await container.init()` (a ~3s
+  budget) — so a router / consent tool that strips `fbclid` via `history.replaceState` within
+  that window, or a fast bounce, lost the click id entirely. `initializeAsync` now calls
+  `getAttributionData()` at the very top (before any await), warming the query-param cache and
+  persisting first/last touch immediately.
+- **9.A.6: `gbraid`/`wbraid`/`rdt_cid`/`obclid`/`irclid`/`ko_click_id` now map to their real
+  source** (google/google/reddit/outbrain/impact/klaviyo) in `determineSource` instead of the
+  generic `paid` fallback.
 - **TR-13: terminal unload no longer beacons the already-persisted offline backlog (duplicate
   purchases).** `forceFlush(terminal)` beaconed `live + offlineQueue` and persisted the same
   set; the backlog then re-drained on the next page load, so a purchase parked during an outage

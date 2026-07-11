@@ -240,6 +240,15 @@ class Datalyr {
 
     this.initializationPromise = (async () => {
       try {
+        // TR-22: capture the LANDING attribution NOW, before any await. The first read used to
+        // sit inside this.page() AFTER `await container.init()` (up to a ~3s budget), so a
+        // router / consent tool that strips fbclid via history.replaceState within that window
+        // — or a fast bounce — lost the click id entirely (nothing persisted to first/last
+        // touch until the first event). getAttributionData() warms queryParamsCache (freezing
+        // the landing params) AND persists first/last touch immediately. Wrapped so a failure
+        // never blocks init.
+        try { this.attribution.getAttributionData(); } catch (e) { this.log('Eager attribution capture failed:', e); }
+
         // SEC-03: encryption is for PII-AT-REST only — it must NOT gate event delivery,
         // pageviews, or pixels. On a non-secure context (http://) or an old browser,
         // crypto.subtle is absent and initialize() throws; isolate it so the rest of init

@@ -50,6 +50,17 @@ describe('AttributionManager — capture + last-touch (1.7.1 fixes)', () => {
     expect(a.gclid).toBe('g_1');
   });
 
+  test('9.A.6: newer click IDs resolve to their real source (not the "paid" fallback)', () => {
+    for (const [param, source] of [
+      ['gbraid', 'google'], ['wbraid', 'google'], ['rdt_cid', 'reddit'],
+      ['obclid', 'outbrain'], ['irclid', 'impact'], ['ko_click_id', 'klaviyo'],
+    ] as const) {
+      setPage(`?${param}=x`);
+      const a = new AttributionManager();
+      expect(a.captureAttribution().source).toBe(source);
+    }
+  });
+
   test('Snap: ScCid is captured and normalized to the canonical sclid field', () => {
     // Snapchat appends &ScCid= (not sclid). Must land under sclid so server-side
     // attribution + the Snap CAPI sender (sc_click_id) can read it.

@@ -520,13 +520,19 @@ export class AttributionManager {
       const clickIdSources: Record<string, string> = {
         fbclid: 'facebook',
         gclid: 'google',
+        gbraid: 'google',   // 9.A.6: Google Ads (iOS) — was falling through to 'paid'
+        wbraid: 'google',   // 9.A.6: Google Ads (web)
         ttclid: 'tiktok',
         msclkid: 'bing',
         twclid: 'twitter',
         li_fat_id: 'linkedin',
         sclid: 'snapchat',
         dclid: 'doubleclick',
-        epik: 'pinterest'
+        epik: 'pinterest',
+        rdt_cid: 'reddit',      // 9.A.6
+        obclid: 'outbrain',     // 9.A.6
+        irclid: 'impact',       // 9.A.6: Impact Radius
+        ko_click_id: 'klaviyo'  // 9.A.6
       };
       
       return clickIdSources[attribution.clickIdType] || 'paid';
