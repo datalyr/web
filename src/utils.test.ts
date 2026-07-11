@@ -99,9 +99,51 @@ describe('redactUrl (9.A.4)', () => {
   });
 
   test('matching is case-insensitive on the param name', () => {
+    // `Code` redacts here because ACCESS_TOKEN (a marker) co-occurs; both matched case-insensitively.
     expect(redactUrl('/cb?Code=4xyz&ACCESS_TOKEN=t')).toBe(
       '/cb?Code=__redacted__&ACCESS_TOKEN=__redacted__'
     );
+  });
+
+  // BATCH-2(e): `code` is redacted ONLY in an OAuth context (a flow marker co-occurs), so
+  // coupon/referral/product codes — real attribution signal — survive.
+  describe('BATCH-2(e): conditional `code` redaction', () => {
+    test('OAuth authorization code (code + state) is redacted', () => {
+      expect(redactUrl('https://app.com/auth/callback?code=4%2F0Adeu-xyz&state=abc123')).toBe(
+        'https://app.com/auth/callback?code=__redacted__&state=abc123'
+      );
+    });
+
+    test('Google-style callback (code + scope, no state) is redacted', () => {
+      const out = redactUrl('https://app.com/cb?code=4%2F0Adeu&scope=openid+email&authuser=0');
+      expect(out).toContain('code=__redacted__');
+      expect(out).toContain('authuser=0'); // non-marker, non-secret → survives
+    });
+
+    test('code in the FRAGMENT with a marker (PKCE hash flow) is redacted', () => {
+      expect(redactUrl('https://app.com/cb#code=abc&state=xyz')).toBe(
+        'https://app.com/cb#code=__redacted__&state=xyz'
+      );
+    });
+
+    test('a bare coupon code (no OAuth marker) is KEPT', () => {
+      expect(redactUrl('https://shop.com/sale?code=SUMMER20')).toBe(
+        'https://shop.com/sale?code=SUMMER20'
+      );
+    });
+
+    test('a referral code alongside utm_* is KEPT (utm is not a marker)', () => {
+      const clean = 'https://shop.com/?code=FRIEND50&utm_source=ig&utm_campaign=launch';
+      expect(redactUrl(clean)).toBe(clean);
+    });
+
+    test('code is scoped per-string: a query coupon survives even if the fragment has an OAuth code', () => {
+      // The query has no marker → its `code` (coupon) is kept; the fragment has `state` → its
+      // `code` (OAuth) is redacted. Co-occurrence is evaluated independently per k=v string.
+      expect(redactUrl('https://shop.com/?code=SAVE10#code=oauth9&state=s')).toBe(
+        'https://shop.com/?code=SAVE10#code=__redacted__&state=s'
+      );
+    });
   });
 
   test('relative URLs and bare search strings keep their shape', () => {

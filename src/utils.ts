@@ -208,9 +208,28 @@ export function sanitizeEventData(data: any, maxDepth = 5, currentDepth = 0): an
 // verbatim into events and onward to ad platforms. Matched case-insensitively.
 const REDACTED_URL_PARAMS = new Set([
   'token', 'access_token', 'refresh_token', 'id_token', 'auth', 'authorization',
-  'code', 'password', 'pass', 'pwd', 'secret', 'api_key', 'apikey', 'key',
+  'password', 'pass', 'pwd', 'secret', 'api_key', 'apikey', 'key',
   'session', 'session_id', 'sid', 'email', 'e', 'phone', 'tel',
   'signature', 'sig', 'otp', 'reset', 'hash'
+]);
+
+// BATCH-2(e): `code` is CONDITIONAL, not in the always-redact set above. An OAuth
+// authorization code (account-takeover-grade if it leaks to ad platforms) ALWAYS travels
+// with an OAuth-flow marker in the same query/fragment — the response carries `code`+`state`
+// (+`scope`/`session_state`/`iss`), the authorize request carries `client_id`/`redirect_uri`/
+// `response_type`/`code_challenge`. A coupon/referral/product code (`?code=SUMMER20`) — a real
+// attribution signal for the DTC/Shopify ICP — never does. So we redact `code` ONLY when a
+// marker co-occurs in the same k=v string, preserving marketing codes. (A bare `code=` with no
+// marker is syntactically indistinguishable from a coupon code and is kept; state-less OAuth
+// flows are rare and CSRF-unsafe.) Markers are deliberately OAuth-specific to avoid redacting
+// legitimate codes — `prompt`/`authuser` are excluded as too generic.
+const OAUTH_CODE_CONTEXT_MARKERS = new Set([
+  'state', 'client_id', 'redirect_uri', 'response_type', 'grant_type',
+  'code_challenge', 'session_state', 'scope', 'iss',
+  // Token family: the presence of any bearer/OAuth token means a bare `code` in the same
+  // string is almost certainly an auth code, not a coupon — a marketing URL never carries
+  // these. (These values are independently redacted too; this only governs `code`.)
+  'access_token', 'id_token', 'refresh_token', 'token'
 ]);
 
 const REDACTED_URL_VALUE = '__redacted__';
@@ -221,9 +240,17 @@ const REDACTED_URL_VALUE = '__redacted__';
 function redactKvPairs(s: string): { out: string; mutated: boolean } {
   const params = new URLSearchParams(s);
   let mutated = false;
+  const keysLower = Array.from(new Set(params.keys())).map(k => k.toLowerCase());
+  // `code` co-occurrence check (BATCH-2e) — evaluated per-string, since an OAuth flow puts
+  // `code` and its marker in the SAME query (or the SAME fragment).
+  const hasOAuthMarker = keysLower.some(k => OAUTH_CODE_CONTEXT_MARKERS.has(k));
   // Snapshot the keys first — set() collapses duplicate keys mid-iteration.
   for (const key of Array.from(new Set(params.keys()))) {
-    if (REDACTED_URL_PARAMS.has(key.toLowerCase())) {
+    const lower = key.toLowerCase();
+    const sensitive = lower === 'code'
+      ? hasOAuthMarker
+      : REDACTED_URL_PARAMS.has(lower);
+    if (sensitive) {
       params.set(key, REDACTED_URL_VALUE);
       mutated = true;
     }

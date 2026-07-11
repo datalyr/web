@@ -11,6 +11,16 @@ All notable changes to this project will be documented in this file.
   event-name charset) converged across the SDKs via the TR-* fixes.
 
 ### Fixed
+- **BATCH-2(e): `code` URL redaction is now OAuth-context-aware — coupon/referral codes survive.**
+  `code` was in the always-redact URL denylist, so `redactUrl` replaced EVERY `code=` value with
+  `__redacted__` — protecting OAuth authorization codes but silently destroying coupon / referral /
+  product codes (`?code=SUMMER20`), a real attribution signal for the DTC/Shopify ICP. An OAuth
+  authorization code always co-occurs with a flow marker in the same query/fragment (`state`,
+  `client_id`, `redirect_uri`, `response_type`, `grant_type`, `code_challenge`, `session_state`,
+  `scope`, `iss`, or any bearer token), while a marketing code never does. `code` is now redacted
+  ONLY when such a marker is present in the SAME `k=v` string (evaluated per-string, so a query
+  coupon survives even if the fragment carries an OAuth code); every other denylisted param
+  (`token`/`access_token`/`email`/…) is still redacted unconditionally. +6 tests.
 - **TR-23: two coexisting script tags no longer double-init (duplicate pageviews).** The IIFE
   unconditionally overwrote `window.datalyr` with a fresh instance, so a Shopify App Embed + a
   manual snippet (or a double-included bundle) created two instances — each patching
