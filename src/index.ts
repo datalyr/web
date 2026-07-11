@@ -931,6 +931,18 @@ class Datalyr {
     if (!allowed) {
       this.queue.clear();
       this.queue.clearOffline();
+      // TR-14: mirror optOut() on analytics withdrawal. Previously setConsent tore down the
+      // queue + container but left autoIdentify alive — its form/fetch interceptors and
+      // /account.json polling kept running and triggerIdentify persisted the captured email
+      // to storage AFTER withdrawal (PII newly written at rest → GDPR/consent-audit failure
+      // on non-Shopify CMP installs). Destroy it and purge PII at rest. (Auto-identify
+      // resumes on the next page load if consent is re-granted, matching optOut/optIn.)
+      this.autoIdentify?.destroy();
+      this.autoIdentify = undefined;
+      this.userProperties = {};
+      storage.remove('dl_user_traits');
+      storage.remove('dl_auto_identified_email');
+      storage.remove('dl_journey');
     }
 
     // Marketing / "do not sell" withdrawal: stop FEEDING the third-party pixels and

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **TR-14: `setConsent({analytics:false})` now fully tears down auto-identify + purges PII.**
+  On analytics withdrawal `setConsent` gated the queue and container but — unlike `optOut()`
+  — left `autoIdentify` alive: its form/fetch interceptors and `/account.json` polling kept
+  running, and `triggerIdentify` persisted the captured email to storage **after** withdrawal
+  (PII newly written at rest → a GDPR/consent-audit failure on non-Shopify CMP installs). It
+  now mirrors `optOut()`: destroys `autoIdentify` and purges `dl_user_traits` /
+  `dl_auto_identified_email` / `dl_journey` (auto-identify resumes on the next load if consent
+  is re-granted).
 - **TR-04: URL fragment tokens are now redacted.** `redactUrl` only rewrote the query
   string and returned early when there was no `?`, reattaching the fragment verbatim — so
   OAuth-implicit / Supabase magic-link sessions (`/welcome#access_token=eyJ…`), which carry
