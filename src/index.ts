@@ -878,6 +878,21 @@ class Datalyr {
   /**
    * Opt out of tracking
    */
+  /**
+   * X-1 (consent): stop the Stripe Payment Link + CheckoutChamp outbound-link decorators from
+   * stamping `client_reference_id`/`prefilled_email` onto <a> hrefs once consent/marketing is
+   * withdrawn. Their MutationObservers otherwise keep rewriting links after a CMP or Shopify
+   * decline — and the server still reads the stamped `client_reference_id` — so attribution
+   * continues post-withdrawal. Idempotent; decorators re-init on the next load if consent returns
+   * (same convention as pixels/auto-identify).
+   */
+  private disposeMarketingLinkDecorators(): void {
+    try { this.stripeLinksDisposer?.(); } catch { /* best-effort */ }
+    this.stripeLinksDisposer = undefined;
+    try { this.outboundDisposer?.(); } catch { /* best-effort */ }
+    this.outboundDisposer = undefined;
+  }
+
   optOut(): void {
     if (!this.initialized) {
       console.warn('[Datalyr] SDK not initialized. Call init() first.');
@@ -898,6 +913,8 @@ class Datalyr {
       this.container.cleanupAllIframes();
       this.container = undefined;
     }
+    // X-1: stop stamping Stripe/CC outbound links with the visitor id / email.
+    this.disposeMarketingLinkDecorators();
     // Purge PII at rest.
     this.userProperties = {};
     storage.remove('dl_user_traits');
@@ -982,6 +999,12 @@ class Datalyr {
     if (!this.consentAllowsMarketing() && this.container) {
       this.container.cleanupAllIframes();
       this.container = undefined;
+    }
+    // X-1: on marketing/sale withdrawal, stop the Stripe/CC decorators from stamping the
+    // visitor id / email onto outbound links (the observers otherwise keep rewriting hrefs
+    // after withdrawal, and the server still reads the stamped client_reference_id).
+    if (!this.consentAllowsMarketing()) {
+      this.disposeMarketingLinkDecorators();
     }
 
     this.log('Consent updated:', consent);
@@ -1684,13 +1707,17 @@ class Datalyr {
   }
 
   /**
-   * Shopify Customer Privacy API handle (9.A.1), or null when it doesn't apply:
-   * only consulted when the SDK was initialized with platform:'shopify' AND the
-   * storefront exposes window.Shopify.customerPrivacy. Every access is wrapped —
-   * a Shopify API shape change must NEVER break tracking.
+   * Shopify Customer Privacy API handle (9.A.1), or null when it doesn't apply.
+   *
+   * X-2 (LEGAL): gated on RUNTIME detection of `window.Shopify.customerPrivacy`, NOT on
+   * `config.platform === 'shopify'`. A Shopify merchant who installs via a plain <script>
+   * snippet or a headless storefront (no `platform:'shopify'`) still exposes customerPrivacy;
+   * gating on config.platform meant a shopper who DECLINED the native banner (with no
+   * setConsent() wired) was fully tracked — nullifying the consent feature for a whole install
+   * class, and unfixable server-side (platform is install-time only). Every access is wrapped —
+   * a Shopify API shape change (or a non-Shopify site) must NEVER break tracking (→ null = fail open).
    */
   private getShopifyCustomerPrivacy(): any {
-    if (this.config?.platform !== 'shopify') return null;
     if (typeof window === 'undefined') return null;
     try {
       return (window as any).Shopify?.customerPrivacy ?? null;
@@ -1749,7 +1776,10 @@ class Datalyr {
    * the same convention as optIn().
    */
   private setupShopifyConsentListener(): void {
-    if (this.config.platform !== 'shopify') return;
+    // X-2: NOT gated on config.platform — a plain-snippet/headless Shopify install must also honor
+    // a mid-session consent decision. The `visitorConsentCollected` event only fires on Shopify
+    // storefronts, and the handler + loadFeatures are fully guarded, so this is a safe no-op
+    // everywhere else.
     if (typeof document === 'undefined') return;
     try {
       this.shopifyConsentHandler = () => {
@@ -1805,6 +1835,10 @@ class Datalyr {
     if (!this.consentAllowsMarketing() && this.container) {
       this.container.cleanupAllIframes();
       this.container = undefined;
+    }
+    // X-1: marketing withdrawn (Shopify decline) → stop stamping Stripe/CC outbound links.
+    if (!this.consentAllowsMarketing()) {
+      this.disposeMarketingLinkDecorators();
     }
 
     // Grant direction: cart-attribute stamping is cheap and idempotent (merges via

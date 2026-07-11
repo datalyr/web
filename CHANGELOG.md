@@ -11,6 +11,21 @@ All notable changes to this project will be documented in this file.
   event-name charset) converged across the SDKs via the TR-* fixes.
 
 ### Fixed
+- **X-2 (LEGAL/consent): the Shopify native-consent gate now works on plain-snippet / headless
+  installs.** `getShopifyCustomerPrivacy()` was gated on `config.platform==='shopify'`, so a
+  Shopify merchant who installs via a plain `<script>` snippet or a headless storefront (no
+  `platform:'shopify'`) had `window.Shopify.customerPrivacy` present but ungated — a shopper who
+  *declined* the native banner (with no `setConsent()` wired) was fully tracked, nullifying the
+  consent feature for a whole install class (unfixable server-side). The gate now activates on
+  RUNTIME detection of `window.Shopify.customerPrivacy` (fail-open when absent), and the
+  mid-session `visitorConsentCollected` listener is likewise no longer `config.platform`-gated.
+- **X-1 (LEGAL/consent): consent withdrawal now stops the Stripe/CC link decorators.** The Stripe
+  Payment Link + CheckoutChamp outbound-link `MutationObserver`s were torn down only in
+  `destroy()`, so after a CMP withdrawal (`setConsent({marketing:false})`), an `optOut()`, or a
+  Shopify decline they kept rewriting every outbound href with `client_reference_id=<visitorId>`
+  and `prefilled_email=<email>` — and the server still reads the stamped `client_reference_id`, so
+  attribution continued post-withdrawal. A new `disposeMarketingLinkDecorators()` is invoked on all
+  three withdrawal paths (decorators re-init on the next load if consent returns).
 - **Track-3 review P2: web now captures Impact's real `irclickid` param.** The click-id alias map
   only carried canonical `irclid`, but Impact appends `&irclickid=` to the landing URL — so real
   Impact affiliate clicks were dark on web end-to-end (server + RN captured them; web didn't), and
