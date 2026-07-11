@@ -78,6 +78,15 @@ describe('AttributionManager — capture + last-touch (1.7.1 fixes)', () => {
     expect(a.sclid).toBe('snap_click_2');
   });
 
+  test('Impact: irclickid (the real landing param) is captured as canonical irclid', () => {
+    // Impact appends &irclickid= (NOT irclid). Must land under irclid so the server /
+    // MV / source map (irclid→impact) read it; bare irclid alone was dark for real clicks.
+    setPage('?irclickid=impact_click_1');
+    const a = attr.captureAttribution() as any;
+    expect(a.irclid).toBe('impact_click_1');
+    expect(a.source).toBe('impact');
+  });
+
   test('same-site referrer (internal navigation) resolves to direct, not referral', () => {
     // referrer is our own host → internal nav, must NOT count as a referral source
     setPage('', 'http://localhost/previous-page');

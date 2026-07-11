@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
   event-name charset) converged across the SDKs via the TR-* fixes.
 
 ### Fixed
+- **Track-3 review P2: web now captures Impact's real `irclickid` param.** The click-id alias map
+  only carried canonical `irclid`, but Impact appends `&irclickid=` to the landing URL — so real
+  Impact affiliate clicks were dark on web end-to-end (server + RN captured them; web didn't), and
+  the `irclid→impact` source map was dead for real traffic. Added `irclickid → irclid` to
+  `CLICK_ID_ALIASES` (mirrors `ScCid → sclid`). Corrects an earlier "no-op for web" call. **Requires
+  a dl.js R2 rebuild to reach the CDN bundle.**
 - **Track-3 review P1: the TR-22 eager attribution capture now respects consent.** `getAttributionData()`
   ran as the first statement of `initializeAsync` with no `shouldTrack()` gate, so a returning
   GPC / DNT / opted-out visitor landing on a `?fbclid=` URL had `_fbp`/`_fbc` synthesized and

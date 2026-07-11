@@ -38,6 +38,10 @@ export class AttributionManager {
   private CLICK_ID_ALIASES: Record<string, string> = {
     ScCid: 'sclid',
     sccid: 'sclid',
+    // Impact's real landing param is `irclickid`; capture it and normalize to the canonical
+    // `irclid` that ingest / the MV / the source map (`irclid→impact`) all key on. Without
+    // this, real Impact affiliate clicks were dark on web (only bare `irclid` was captured).
+    irclickid: 'irclid',
   };
   // Default tracked params matching dl.js
   private DEFAULT_TRACKED_PARAMS = [
