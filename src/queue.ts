@@ -55,6 +55,7 @@ export class EventQueue {
   private offlineProcessing = false; // FIXED (WEB-1): re-entrancy guard for processOfflineQueue
   private inFlight: IngestEventPayload[] = []; // FIXED (WEB-3): batch currently in _flight's keepalive fetch — forceFlush must NOT re-beacon it
   private enabled = true; // FIXED (consent): when false (opt-out / withdrawn analytics consent) all enqueue/flush/drain is a no-op
+  private consentCheck?: () => boolean; // TR-15: live consent gate re-evaluated at DRAIN time (not just the latched `enabled`)
   private rateLimitedUntil = 0; // FIXED (429): skip flush/drain until the server's Retry-After window passes
 
   constructor(config: any) {
@@ -569,6 +570,16 @@ export class EventQueue {
     // 'online' listener, the periodic flush, and the on-load kick); without a guard
     // two of them could splice the same offlineQueue concurrently and double-send.
     if (!this.enabled) return;
+    // TR-15: re-check consent at DRAIN time. A returning DECLINED visitor whose consent
+    // signal loads asynchronously (Shopify customerPrivacy) fires no visitorConsentCollected
+    // event, so `enabled` stayed at its fail-open init value. If consent now says no, latch
+    // off and PURGE the persisted backlog instead of draining it (a later grant re-enables
+    // via setEnabled). Mirrors the withdrawal purge in optOut()/setConsent().
+    if (this.consentCheck && this.consentCheck() === false) {
+      this.enabled = false;
+      this.clearOffline();
+      return;
+    }
     if (Date.now() < this.rateLimitedUntil) return; // FIXED (429): honor Retry-After window
     if (this.offlineProcessing) return;
     if (this.offlineQueue.length === 0) return;
@@ -766,6 +777,16 @@ export class EventQueue {
    */
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
+  }
+
+  /**
+   * TR-15: register a live consent predicate the offline drain re-evaluates at drain time.
+   * `enabled` is latched at init to a fail-open value (Shopify's customerPrivacy loads
+   * async), and a returning DECLINED visitor fires no visitorConsentCollected event — so
+   * without this, their persisted backlog would drain before the decline is known.
+   */
+  setConsentCheck(fn: () => boolean): void {
+    this.consentCheck = fn;
   }
 
   /**

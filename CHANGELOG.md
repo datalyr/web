@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **TR-15: Shopify Customer Privacy consent is enforced during its async load + at drain time.**
+  `customerPrivacy` loads asynchronously, so the pre-load window failed open (events sent) and
+  the offline drain ran on a fail-open latched flag — a returning *declined* visitor fires no
+  `visitorConsentCollected` event, so their persisted backlog drained before the decline was
+  known. The SDK now (a) calls `Shopify.loadFeatures([{name:'consent-tracking-api'}])` at init
+  and re-evaluates consent in the callback (gate + purge as soon as the API answers), (b)
+  re-checks consent *inside* the offline-drain loop via a live predicate (declined → purge the
+  backlog instead of sending), and (c) persists the in-memory anon id on a mid-session grant
+  (opt-in / consent) so that session's events don't land under a visitor_id that vanishes on
+  the next page load.
 - **TR-14: `setConsent({analytics:false})` now fully tears down auto-identify + purges PII.**
   On analytics withdrawal `setConsent` gated the queue and container but — unlike `optOut()`
   — left `autoIdentify` alive: its form/fetch interceptors and `/account.json` polling kept

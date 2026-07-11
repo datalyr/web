@@ -246,6 +246,33 @@ describe('EventQueue — data-loss & double-send paths (WEB-1/2/3/8)', () => {
     expect(fetchMock).not.toHaveBeenCalled(); // disabled → no drain of pre-opt-out events
   });
 
+  test('TR-15: consentCheck()=false at drain time purges the backlog and does NOT send', async () => {
+    jest.useFakeTimers();
+    storage.set(OFFLINE_KEY, [makeEvent('purchase', 1)]);
+    const fetchMock = jest.fn(() => Promise.resolve({ ok: true }));
+    (global as any).fetch = fetchMock;
+
+    queue = newQueue();                  // enabled=true (fail-open init latch)
+    queue.setConsentCheck(() => false);  // a returning DECLINED visitor (Shopify customerPrivacy)
+    await jest.advanceTimersByTimeAsync(1100); // on-load drain fires
+
+    expect(fetchMock).not.toHaveBeenCalled();          // declined → backlog NOT drained
+    expect(storage.get(OFFLINE_KEY, null)).toBeNull();  // and purged (mirrors withdrawal)
+  });
+
+  test('TR-15: consentCheck()=true lets the drain proceed', async () => {
+    jest.useFakeTimers();
+    storage.set(OFFLINE_KEY, [makeEvent('purchase', 1)]);
+    const fetchMock = jest.fn(() => Promise.resolve({ ok: true }));
+    (global as any).fetch = fetchMock;
+
+    queue = newQueue();
+    queue.setConsentCheck(() => true);
+    await jest.advanceTimersByTimeAsync(1100);
+
+    expect(fetchMock).toHaveBeenCalled(); // consent allows → drains normally
+  });
+
   test('consent gate: a disabled queue neither sends critical events nor flushes', async () => {
     (global as any).fetch = jest.fn(() => Promise.resolve({ ok: true }));
     queue = newQueue();

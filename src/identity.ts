@@ -76,6 +76,19 @@ export class IdentityManager {
   }
 
   /**
+   * TR-15 / FSR-107: tracking became allowed mid-session (optIn / consent grant). Start
+   * persisting AND flush the current in-memory anon id to the cookie + localStorage now.
+   * Without this, a visitor declined at init keeps a memory-only id, so that session's
+   * events land under a visitor_id that vanishes on the next page load (attribution
+   * fragmentation). Idempotent — a no-op once already persisting.
+   */
+  enablePersistence(): void {
+    if (this.persistNewId) return;
+    this.persistNewId = true;
+    this.persistAnonymousId(this.anonymousId);
+  }
+
+  /**
    * Whether a `_dl_vid` value is a well-formed Datalyr anonymous id (anon_ + UUID).
    * The length is bounded by the pattern, so an oversized/garbage value is rejected.
    * (FSR-50)

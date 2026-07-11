@@ -189,6 +189,10 @@ class Datalyr {
     // Gate the queue by the FULL tracking policy (opt-out + analytics consent + DNT +
     // GPC) so a returning opted-out / DNT / GPC visitor's persisted events don't drain.
     this.queue.setEnabled(this.shouldTrack());
+    // TR-15: also give the offline drain a LIVE consent gate. setEnabled above is latched to
+    // a fail-open value while Shopify's customerPrivacy loads async; a returning declined
+    // visitor fires no visitorConsentCollected event, so the drain must re-check per run.
+    this.queue.setConsentCheck(() => this.shouldTrack());
 
     // FIXED (ISSUE-01): Start async initialization immediately but don't block constructor
     // This allows encryption to initialize before any events are tracked
@@ -895,6 +899,8 @@ class Datalyr {
     // merely because opt-out was lifted — otherwise a GPC/DNT visitor's persisted
     // events would start draining again. (Pixels / auto-identify resume on next load.)
     this.queue.setEnabled(this.shouldTrack());
+    // TR-15 (P3): opt-in → persist the in-memory anon id now (see onShopifyConsentChanged).
+    if (this.shouldTrack()) this.identity.enablePersistence();
     this.log('User opted in');
   }
 
@@ -943,6 +949,9 @@ class Datalyr {
       storage.remove('dl_user_traits');
       storage.remove('dl_auto_identified_email');
       storage.remove('dl_journey');
+    } else {
+      // TR-15 (P3): grant → persist the in-memory anon id now (see onShopifyConsentChanged).
+      this.identity.enablePersistence();
     }
 
     // Marketing / "do not sell" withdrawal: stop FEEDING the third-party pixels and
@@ -1726,6 +1735,19 @@ class Datalyr {
         }
       };
       document.addEventListener('visitorConsentCollected', this.shopifyConsentHandler);
+
+      // TR-15: customerPrivacy loads ASYNCHRONOUSLY. Until it's present shopifyAnalyticsConsent()
+      // returns null (fail-open → events send in the pre-load window). Force the feature to load
+      // and re-run the full consent evaluation in the callback so a declined visitor is gated
+      // (queue disabled + purged) as soon as the API answers, without waiting for a reload or a
+      // banner interaction. Guarded — a missing/changed loadFeatures must never break tracking.
+      const shopify = (window as any).Shopify;
+      if (shopify && typeof shopify.loadFeatures === 'function') {
+        shopify.loadFeatures([{ name: 'consent-tracking-api', version: '0.1' }], (error: any) => {
+          if (error) { this.log('Shopify loadFeatures(consent-tracking-api) failed:', error); return; }
+          try { this.onShopifyConsentChanged(); } catch (e) { this.log('Shopify post-load consent eval failed:', e); }
+        });
+      }
     } catch (error) {
       this.log('Shopify consent listener setup failed:', error);
     }
@@ -1734,6 +1756,10 @@ class Datalyr {
   private onShopifyConsentChanged(): void {
     const allowed = this.shouldTrack();
     this.queue.setEnabled(allowed);
+    // TR-15 (P3): a mid-session grant must persist the in-memory anon id NOW — otherwise a
+    // visitor declined at init keeps a memory-only id and this session's events land under a
+    // visitor_id that vanishes on the next page load. Idempotent.
+    if (allowed) this.identity.enablePersistence();
     if (!allowed) {
       // Mirror setConsent() withdrawal: purge buffered events so events captured
       // before the decline can't drain if consent is later re-granted.

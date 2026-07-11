@@ -59,4 +59,21 @@ describe('IdentityManager — consent-gated persistence (FSR-107)', () => {
     const id = new IdentityManager();
     expect(storage.getString('dl_anonymous_id')).toBe(id.getAnonymousId());
   });
+
+  test('TR-15: enablePersistence() flushes a memory-only id to cookie + localStorage on grant', () => {
+    const id = new IdentityManager({ persistNewId: false });
+    const anon = id.getAnonymousId();
+    expect(storage.getString('dl_anonymous_id')).toBeNull(); // declined at init → memory only
+    id.enablePersistence(); // consent granted mid-session
+    expect(storage.getString('dl_anonymous_id')).toBe(anon); // same id, now persisted
+    expect(cookies.get('__dl_visitor_id')).toBe(anon);
+  });
+
+  test('TR-15: enablePersistence() is a no-op when already persisting (does not rotate the id)', () => {
+    const id = new IdentityManager(); // persistNewId default true
+    const anon = id.getAnonymousId();
+    id.enablePersistence();
+    expect(storage.getString('dl_anonymous_id')).toBe(anon);
+    expect(id.getAnonymousId()).toBe(anon);
+  });
 });
