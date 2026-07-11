@@ -178,3 +178,55 @@ describe('AttributionManager — capture + last-touch (1.7.1 fixes)', () => {
     expect(data.clickId).toBe('may_click');
   });
 });
+
+describe('AttributionManager — TR-03 marketing-consent gating', () => {
+  beforeEach(() => { clearAll(); setPage('', ''); });
+  afterEach(() => { clearAll(); });
+
+  test('marketing DECLINED: strips click IDs + ad cookies from the payload, keeps utm/source', () => {
+    const attr = new AttributionManager({ marketingAllowed: () => false });
+    setPage('?fbclid=fb_1&gclid=g_1&utm_source=facebook&utm_campaign=spring');
+    const data = attr.getAttributionData() as any;
+    // marketing signals stripped
+    expect(data.fbclid).toBeUndefined();
+    expect(data.gclid).toBeUndefined();
+    expect(data.clickId).toBeUndefined();
+    expect(data.clickIdType).toBeUndefined();
+    expect(data._fbp).toBeUndefined();
+    expect(data._fbc).toBeUndefined();
+    // analytics signals survive
+    expect(data.utm_source).toBe('facebook');
+    expect(data.utm_campaign).toBe('spring');
+    expect(data.source).toBe('facebook');
+  });
+
+  test('marketing DECLINED: does NOT synthesize/write _fbp or _fbc cookies', () => {
+    const attr = new AttributionManager({ marketingAllowed: () => false });
+    setPage('?fbclid=xyz');
+    attr.getAttributionData();
+    expect(cookies.get('_fbp')).toBeNull();
+    expect(cookies.get('_fbc')).toBeNull();
+    expect(cookies.get('_dl_fbclid_at')).toBeNull();
+  });
+
+  test('marketing ALLOWED (control): synthesizes _fbp/_fbc and ships click IDs, unchanged', () => {
+    const attr = new AttributionManager({ marketingAllowed: () => true });
+    setPage('?fbclid=abc');
+    const data = attr.getAttributionData() as any;
+    expect(data.fbclid).toBe('abc');
+    expect(data._fbp).toMatch(/^fb\.1\.\d+\.\d+$/);
+    expect(data._fbc).toMatch(/^fb\.1\.\d+\.abc$/);
+    expect(cookies.get('_fbc')).toMatch(/^fb\.1\.\d+\.abc$/);
+  });
+
+  test('live re-grant: the predicate is re-evaluated per event (declined → then granted)', () => {
+    let allowed = false;
+    const attr = new AttributionManager({ marketingAllowed: () => allowed });
+    setPage('?fbclid=lll');
+    expect((attr.getAttributionData() as any).fbclid).toBeUndefined(); // declined
+    allowed = true; // consent granted mid-session
+    attr.clearCache();
+    setPage('?fbclid=lll');
+    expect((attr.getAttributionData() as any).fbclid).toBe('lll'); // restored
+  });
+});

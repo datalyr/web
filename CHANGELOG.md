@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **TR-03: marketing-declined visitors no longer have Meta/Google ad signals captured,
+  cookie-written, or shipped.** `consentAllowsMarketing()` gated only container init / cart
+  attrs / auto-identify — never the event path — so a granular "analytics yes, marketing no"
+  shopper still had `fbclid`/`gclid`/`_fbp`/`_fbc` on every event and `captureAdCookies()`
+  actively **synthesized and wrote** `_fbp`/`_fbc` cookies, which the server then forwarded to
+  Meta/Google CAPI. `AttributionManager` now takes a live `marketingAllowed` predicate: when
+  it's false it (a) skips `_fbp`/`_fbc`/gclid-time synthesis (no cookie writes) and (b) strips
+  click-IDs + ad cookies from `getAttributionData()`'s payload, keeping analytics-scoped
+  `utm_*` / source / medium / campaign / first-last-touch / `_ga` / `_gid`. The predicate is
+  re-evaluated per event, so a later grant restores capture with no reload. Default (no consent
+  signal) is unchanged — signals are stripped only on an explicit decline.
 - **TR-15: Shopify Customer Privacy consent is enforced during its async load + at drain time.**
   `customerPrivacy` loads asynchronously, so the pre-load window failed open (events sent) and
   the offline drain ran on a fail-open latched flag — a returning *declined* visitor fires no

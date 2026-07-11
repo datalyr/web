@@ -49,13 +49,29 @@ export class AttributionManager {
     'gad_source'  // Google Ads source parameter
   ];
 
+  // TR-03: ad-cookie fields (Meta/Google Ads/TikTok/Snap) that are MARKETING-scoped. When
+  // marketing consent is declined these are neither synthesized/written nor shipped. Google
+  // Analytics cookies (_ga/_gid) and utm_* stay — they're analytics-scoped.
+  private MARKETING_COOKIES = ['_fbp', '_fbc', '_gcl_aw', '_gcl_dc', '_gcl_gb', '_gcl_ha', '_gac', '_ttp', '_ttc', '_scid'];
+  // TR-03: live marketing-consent predicate. Absent = allowed (preserves today's behavior);
+  // returns false ONLY on an explicit decline (Shopify marketing:false / setConsent
+  // marketing|sale=false), and is re-evaluated per event so a later grant restores capture.
+  private marketingAllowedFn?: () => boolean;
+
   constructor(options: {
     attributionWindow?: number;
     trackedParams?: string[];
+    marketingAllowed?: () => boolean;
   } = {}) {
     this.attributionWindow = options.attributionWindow || 90 * 24 * 60 * 60 * 1000; // 90 days (increased from 30 for B2B sales cycles)
     // Merge default tracked params with user-provided ones
     this.trackedParams = [...this.DEFAULT_TRACKED_PARAMS, ...(options.trackedParams || [])];
+    this.marketingAllowedFn = options.marketingAllowed;
+  }
+
+  // TR-03: default (no predicate / no signal) = allowed → byte-identical to prior behavior.
+  private isMarketingAllowed(): boolean {
+    return this.marketingAllowedFn ? this.marketingAllowedFn() !== false : true;
   }
 
   /**
@@ -262,7 +278,11 @@ export class AttributionManager {
    */
   private captureAdCookies(): Record<string, string | null> {
     const adCookies: Record<string, string | null> = {};
-    
+    // TR-03: when marketing consent is declined, do NOT synthesize/write the Meta/Google ad
+    // cookies below (writing _fbp/_fbc is active marketing use). Existing cookies are still
+    // read here but stripped from the event payload in getAttributionData().
+    const marketingAllowed = this.isMarketingAllowed();
+
     // Facebook/Meta cookies
     adCookies._fbp = cookies.get('_fbp');
     adCookies._fbc = cookies.get('_fbc');
@@ -286,8 +306,8 @@ export class AttributionManager {
     // cookies._scid and is sent on the Snap CAPI event as sc_cookie1 (raw).
     adCookies._scid = cookies.get('_scid');
     
-    // Generate _fbp if missing (Facebook browser ID)
-    if (!adCookies._fbp && (this.hasClickId('fbclid') || adCookies._fbc)) {
+    // Generate _fbp if missing (Facebook browser ID). TR-03: only when marketing is allowed.
+    if (marketingAllowed && !adCookies._fbp && (this.hasClickId('fbclid') || adCookies._fbc)) {
       const timestamp = Date.now();
       // Meta's _fbp format is fb.1.<creationTimeMs>.<randomNumber> where the last
       // segment MUST be a decimal integer. The old base36 string was non-conformant —
@@ -312,7 +332,8 @@ export class AttributionManager {
     // Shopify cart / server-side rebuild forward it as a time, so its format must not
     // change.
     const fbclid = this.getCurrentFbclid();
-    if (fbclid) {
+    // TR-03: skip _fbc synthesis/refresh (cookie write) when marketing is declined.
+    if (marketingAllowed && fbclid) {
       const existingFbc = adCookies._fbc; // captured above (cookies.get('_fbc'))
       const embeddedFbclid = this.extractFbclidFromFbc(existingFbc);
       if (!existingFbc) {
@@ -341,7 +362,7 @@ export class AttributionManager {
     // (gclid has no synthesized-and-going-stale artifact like _fbc, and Google does not
     // validate a creationTime window the way Meta does, so this stays once-only.)
     const gclid = this.hasClickId('gclid') ? (this.queryParamsCache?.gclid ?? null) : null;
-    if (gclid && !cookies.get('_dl_gclid_at')) {
+    if (marketingAllowed && gclid && !cookies.get('_dl_gclid_at')) {
       cookies.set('_dl_gclid_at', String(Date.now()), 90);
     }
     
@@ -437,10 +458,10 @@ export class AttributionManager {
       this.storeLastTouch(current);
     }
 
-    return {
+    const result: Record<string, any> = {
       // Current attribution
       ...current,
-      
+
       // Advertising platform cookies
       ...adCookies,
       
@@ -468,10 +489,26 @@ export class AttributionManager {
       days_since_first_touch: firstTouch?.timestamp 
         ? Math.floor((Date.now() - firstTouch.timestamp) / 86400000)
         : 0,
-      daysSinceFirstTouch: firstTouch?.timestamp 
+      daysSinceFirstTouch: firstTouch?.timestamp
         ? Math.floor((Date.now() - firstTouch.timestamp) / 86400000)
         : 0
     };
+
+    // TR-03: strip MARKETING-scoped signals (click IDs + ad cookies) from the event payload
+    // when marketing consent is declined — analytics-scoped fields (utm_*, source/medium/
+    // campaign, first/last touch, _ga/_gid) stay. Live predicate → a later grant restores
+    // them on the next event. Synthesis of _fbp/_fbc was already skipped in captureAdCookies.
+    if (!this.isMarketingAllowed()) {
+      const marketingKeys = [
+        ...this.CLICK_IDS,
+        ...Object.values(this.CLICK_ID_ALIASES),
+        'clickId', 'clickIdType',
+        ...this.MARKETING_COOKIES,
+      ];
+      for (const k of marketingKeys) delete result[k];
+    }
+
+    return result;
   }
 
   /**

@@ -174,7 +174,11 @@ class Datalyr {
     this.session = new SessionManager(this.config.sessionTimeout);
     this.attribution = new AttributionManager({
       attributionWindow: this.config.attributionWindow,
-      trackedParams: this.config.trackedParams
+      trackedParams: this.config.trackedParams,
+      // TR-03: gate ad-signal synthesis + shipping on LIVE marketing consent. Returns true by
+      // default (no consent signal) so behavior is unchanged for the common case; false only on
+      // an explicit decline (Shopify marketing:false / setConsent marketing|sale=false).
+      marketingAllowed: () => this.consentAllowsMarketing()
     });
     this.queue = new EventQueue(this.config);
     this.fingerprint = new FingerprintCollector({
