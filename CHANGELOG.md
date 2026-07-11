@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **TR-13: terminal unload no longer beacons the already-persisted offline backlog (duplicate
+  purchases).** `forceFlush(terminal)` beaconed `live + offlineQueue` and persisted the same
+  set; the backlog then re-drained on the next page load, so a purchase parked during an outage
+  was delivered at tab-close AND re-drained later — and when those land >6h apart, ingest's
+  dedup window has expired → a duplicate purchase row + double conversion. It now beacons ONLY
+  the live queue (created this session; its beacon + next-load drain both land <6h, so dedup
+  absorbs them) while still persisting the whole backlog for the next-load drain to deliver
+  exactly once. FSR-15 persist-first semantics unchanged.
 - **TR-03: marketing-declined visitors no longer have Meta/Google ad signals captured,
   cookie-written, or shipped.** `consentAllowsMarketing()` gated only container init / cart
   attrs / auto-identify — never the event path — so a granular "analytics yes, marketing no"

@@ -116,6 +116,45 @@ describe('EventQueue — data-loss & double-send paths (WEB-1/2/3/8)', () => {
     expect(queue.getOfflineQueueSize()).toBe(0); // in-memory detached → repeat unload can't re-beacon
   });
 
+  test('TR-13: an already-persisted backlog is NOT beaconed at terminal unload (drains next load only)', async () => {
+    storage.set(OFFLINE_KEY, [makeEvent('purchase', 100)]); // parked by an earlier session's failed send
+    queue = newQueue(); // loads it into the offline queue
+    // No live events this session.
+    await queue.forceFlush(true);
+
+    expect(beacon).not.toHaveBeenCalled(); // durable + delivered once by the next-load drain
+    const persisted = storage.get(OFFLINE_KEY, []);
+    expect(persisted.map((e: any) => e.event_id)).toContain('e_purchase_100'); // still persisted
+  });
+
+  test('TR-13: with a live event + a persisted backlog, the beacon carries ONLY the live event', async () => {
+    storage.set(OFFLINE_KEY, [makeEvent('purchase', 200)]); // stale backlog
+    queue = newQueue();
+    queue.enqueue(makeEvent('pageview', 201)); // created THIS session (live)
+
+    // jsdom's Blob lacks .text(); stub it to capture the payload string (with a working .size
+    // for the byte-packing math), then restore.
+    const OrigBlob = (global as any).Blob;
+    (global as any).Blob = class {
+      _t: string; size: number;
+      constructor(parts: any[]) { this._t = parts.map(String).join(''); this.size = this._t.length; }
+    };
+    try {
+      await queue.forceFlush(true);
+    } finally {
+      (global as any).Blob = OrigBlob;
+    }
+
+    expect(beacon).toHaveBeenCalled();
+    const joined = beacon.mock.calls.map((c: any[]) => c[1]._t).join('');
+    expect(joined).toContain('e_pageview_201');      // live event beaconed
+    expect(joined).not.toContain('e_purchase_200');  // backlog NOT beaconed (would double-send past dedup)
+    // both stay persisted for the dedup-safe next-load drain
+    const persistedIds = storage.get(OFFLINE_KEY, []).map((e: any) => e.event_id);
+    expect(persistedIds).toContain('e_pageview_201');
+    expect(persistedIds).toContain('e_purchase_200');
+  });
+
   test('FSR-15: a tab switch (non-terminal forceFlush) within the 429 window never beacons or erases the backlog', async () => {
     const fetchMock = jest.fn(() => Promise.resolve({
       ok: false, status: 429, statusText: 'Too Many Requests',

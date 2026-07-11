@@ -672,10 +672,13 @@ export class EventQueue {
    *  - Non-terminal (tab switch): deliver the LIVE queue via a response-checked keepalive
    *    fetch (flush) and response-check-drain the offline backlog (processOfflineQueue) —
    *    neither erases the backlog on failure. The destructive beacon path is not used.
-   *  - Terminal (unload): beacon live+offline best-effort, but PERSIST everything first
-   *    and NEVER storage.remove() on a mere beacon enqueue. The next page load's
-   *    response-checked drain (normal fetch, no 64KB cap) is the source of truth and
-   *    clears the copy; server event_id dedup makes the potential double-send safe.
+   *  - Terminal (unload): PERSIST everything first (live + the already-persisted offline
+   *    backlog) and NEVER storage.remove() on a mere beacon enqueue. Beacon ONLY the LIVE
+   *    queue best-effort — NOT the offline backlog (TR-13): the backlog is already durable and
+   *    the next-load drain delivers it exactly once, so beaconing it here too risked a
+   *    delivered-now-AND-re-drained-next-load double-send that, when >6h apart, outlives
+   *    ingest's dedup window → a duplicate purchase. The next page load's response-checked
+   *    drain (normal fetch, no 64KB cap) is the source of truth and clears the copy.
    *  - Both paths honor rateLimitedUntil (don't beacon/flush into the backoff window).
    *
    * Still excludes the in-flight _flush batch (its keepalive fetch already carries it,
@@ -719,6 +722,13 @@ export class EventQueue {
       storage.set(this.OFFLINE_QUEUE_KEY, toPersist);
     }
 
+    // TR-13: beacon ONLY the LIVE queue (never-persisted events from THIS session). The
+    // offline backlog is already durable and the next-load drain delivers it once, so
+    // beaconing it here would double-send it — and a stale backlog event (e.g. a purchase
+    // parked during an outage) re-drained on a later day lands >6h from the beacon, past
+    // ingest's dedup window. The live queue's beacon + its own next-load drain both land THIS
+    // session (<6h), so dedup absorbs that pair.
+    if (live.length === 0) return; // only the persisted backlog remained → it drains next load
     // Within the 429 window, don't beacon into it — the persisted copy drains next load.
     if (Date.now() < this.rateLimitedUntil) return;
     if (!navigator.sendBeacon) return; // no beacon API — next load fetch-drains the copy
@@ -729,7 +739,7 @@ export class EventQueue {
     const chunks: IngestEventPayload[][] = [];
     let current: IngestEventPayload[] = [];
     let currentBytes = 2; // approx for the JSON array/object wrapper
-    for (const ev of pending) {
+    for (const ev of live) {
       // Byte length (not UTF-16 .length) so multibyte product names / emoji can't
       // under-count and overflow the cap.
       const evBytes = new Blob([JSON.stringify(ev)]).size + 1;
@@ -756,7 +766,7 @@ export class EventQueue {
       if (!navigator.sendBeacon(this.config.endpoint, blob)) break;
       beaconed += chunk.length;
     }
-    this.log(`forceFlush(terminal): beaconed ${beaconed}/${pending.length} events; persisted copy retained for next-load drain`);
+    this.log(`forceFlush(terminal): beaconed ${beaconed}/${live.length} live events; backlog (${pending.length - live.length}) persisted for next-load drain`);
   }
 
   /**
