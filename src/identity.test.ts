@@ -19,11 +19,11 @@ describe('IdentityManager — _dl_vid adoption (FSR-50)', () => {
   beforeEach(() => { clearAll(); setUrl(''); });
   afterEach(() => { clearAll(); setUrl(''); });
 
-  test('a valid anon_<uuid> _dl_vid is adopted for a FRESH visitor and stripped from the URL', () => {
+  test('a valid but unsigned _dl_vid is rejected for a fresh visitor and stripped', () => {
     const vid = 'anon_12345678-1234-4234-8234-123456789012';
     setUrl('?_dl_vid=' + vid + '&keep=1');
     const id = new IdentityManager();
-    expect(id.getAnonymousId()).toBe(vid);
+    expect(id.getAnonymousId()).not.toBe(vid);
     expect(window.location.search).not.toContain('_dl_vid'); // stripped so it can't be re-shared
     expect(window.location.search).toContain('keep=1');       // other params preserved
   });

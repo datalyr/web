@@ -41,17 +41,13 @@ export class IdentityManager {
       return anonymousId;
     }
 
-    // 2. Fresh visitor (no persisted id): accept a cross-domain bridge id from the URL,
-    //    but ONLY a well-formed anon_<uuid> — reject arbitrary / oversized values (a
-    //    multi-KB or attacker-crafted _dl_vid was previously persisted verbatim). Strip
-    //    it from the address bar so a re-shared URL can't merge the next visitor. (FSR-50)
+    // 2. Raw URL visitor IDs are never identity authority. A syntactically
+    // valid ID is still replayable/attacker-chosen and can merge two people.
+    // Strip the legacy parameter and generate a fresh local identity below.
     try {
       const urlParams = new URLSearchParams(window.location.search);
-      const urlVisitorId = urlParams.get('_dl_vid');
-      if (urlVisitorId && this.isValidAnonymousId(urlVisitorId)) {
+      if (urlParams.has('_dl_vid')) {
         this.stripUrlParam('_dl_vid');
-        this.persistAnonymousId(urlVisitorId);
-        return urlVisitorId;
       }
     } catch (e) {
       // URL parsing failed - continue to generate a fresh id
@@ -86,15 +82,6 @@ export class IdentityManager {
     if (this.persistNewId) return;
     this.persistNewId = true;
     this.persistAnonymousId(this.anonymousId);
-  }
-
-  /**
-   * Whether a `_dl_vid` value is a well-formed Datalyr anonymous id (anon_ + UUID).
-   * The length is bounded by the pattern, so an oversized/garbage value is rejected.
-   * (FSR-50)
-   */
-  private isValidAnonymousId(id: string): boolean {
-    return /^anon_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
   }
 
   /**

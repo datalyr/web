@@ -553,6 +553,13 @@ class Datalyr {
     }
 
     try {
+      // A different authenticated user on the same device is a privacy
+      // boundary. Rotate the anonymous/session identities and clear the prior
+      // user's traits/attribution before creating the new link, even when the
+      // integrator forgot to call reset() on logout.
+      const currentUserId = this.identity.getUserId();
+      if (currentUserId && currentUserId !== userId) this.reset();
+
       // FSR-53: do NOT rotate the session id on identify(). 'Session fixation' is an
       // auth-credential concept; a client-generated analytics session_id is not one.
       // Rotating split every identified visit (and every auto-identify form submit) into
@@ -709,6 +716,12 @@ class Datalyr {
     }
     // Gate before mutating persisted identity (identity.alias writes dl_user_id).
     if (!this.shouldTrack()) return;
+    if (previousId && previousId !== this.identity.getAnonymousId()) {
+      console.warn('[Datalyr] alias() only accepts the current anonymous ID as previousId');
+      return;
+    }
+    const currentUserId = this.identity.getUserId();
+    if (currentUserId && currentUserId !== userId) this.reset();
     const aliasData = this.identity.alias(userId, previousId);
     this.track('$alias', aliasData);
   }
@@ -1092,91 +1105,24 @@ class Datalyr {
     }
   }
 
-  /**
-   * Restore _dl_* URL bridge params on a Checkout Champ funnel page.
-   * Runs BEFORE IdentityManager so the storefront's visitor_id wins over a
-   * freshly auto-generated one. Also restores _fbc / _fbp cookies and the
-   * fbclid click time so server-side rebuilds carry the real click moment.
-   *
-   * Strategy: stamp matching cookies (without clobbering pre-existing values),
-   * then rewrite the URL so `_dl_fbclid` becomes `fbclid` — that way the rest
-   * of the SDK's attribution layer (which reads `params.fbclid`) works
-   * unchanged, and any merchant analytics also see the canonical click ID.
-   */
+  /** Strip the retired unsigned Checkout Champ bridge parameters. */
   private restoreFromURL(): void {
     if (typeof window === "undefined" || typeof document === "undefined") return;
     try {
       const params = new URLSearchParams(window.location.search);
-      const get = (k: string) => params.get(k);
-
-      const vid = get("_dl_vid");
-      const fbc = get("_dl_fbc");
-      const fbp = get("_dl_fbp");
-      const fbclid = get("_dl_fbclid");
-      const fbclidAt = get("_dl_fbclid_at");
-      const gclid = get("_dl_gclid");
-      const gclidAt = get("_dl_gclid_at");
-
-      // visitor_id: bridge wins. The whole point of `_dl_vid` is to unify the
-      // storefront's session with the CC funnel session. A pre-existing local
-      // cookie from a prior direct CC visit would silently sink the integration
-      // (CC events stay on the local id; storefront events use the bridged id;
-      // the two never link). Overwrite — orphaned local events are fine.
-      if (vid) this.cookies.set("__dl_visitor_id", vid, 365);
-
-      // Meta cookies + click-time cookies: existing wins. _fbc / _fbp may have
-      // been written by Meta Pixel on the CC funnel page itself (more recent
-      // than the bridged value); _dl_fbclid_at should record first-touch click
-      // time per device, not get reset by a bridge from a new campaign.
-      const setIfMissing = (name: string, value: string | null) => {
-        if (!value) return;
-        if (this.cookies.get(name)) return;
-        this.cookies.set(name, value, 365);
-      };
-      setIfMissing("_fbc", fbc);
-      setIfMissing("_fbp", fbp);
-      setIfMissing("_dl_fbclid_at", fbclidAt);
-      setIfMissing("_dl_gclid_at", gclidAt);
-
-      // Rewrite URL: _dl_fbclid → fbclid (etc.) so captureAttribution() picks
-      // them up via its existing `params.fbclid` path. Strip the _dl_* params
-      // either way so they don't leak into downstream analytics URLs.
-      let rewrote = false;
-      const mappings: Array<[string, string | null]> = [
-        ["fbclid", fbclid],
-        ["gclid", gclid]
-      ];
-      for (const [canonical, value] of mappings) {
-        if (value && !params.get(canonical)) {
-          params.set(canonical, value);
-          rewrote = true;
-        }
-      }
+      let changed = false;
       for (const k of ["_dl_vid", "_dl_fbc", "_dl_fbp", "_dl_fbclid", "_dl_fbclid_at", "_dl_gclid", "_dl_gclid_at"]) {
         if (params.has(k)) {
           params.delete(k);
-          rewrote = true;
+          changed = true;
         }
       }
-      if (rewrote && typeof window.history?.replaceState === "function") {
+      if (changed && typeof window.history?.replaceState === "function") {
         const newSearch = params.toString();
-        const newUrl =
-          window.location.pathname +
-          (newSearch ? "?" + newSearch : "") +
-          window.location.hash;
+        const newUrl = window.location.pathname + (newSearch ? "?" + newSearch : "") + window.location.hash;
         window.history.replaceState(window.history.state, "", newUrl);
       }
-
-      this.log("Checkout Champ bridge restored:", {
-        had_vid: !!vid,
-        had_fbc: !!fbc,
-        had_fbp: !!fbp,
-        had_fbclid: !!fbclid,
-        had_gclid: !!gclid
-      });
     } catch (error) {
-      // Don't let bridge restoration block init — fall through to normal SDK
-      // behavior (a fresh visitor_id, no restored click signals).
       this.log("restoreFromURL failed:", error);
     }
   }
@@ -1277,124 +1223,9 @@ class Datalyr {
     }
   }
 
-  /**
-   * Storefront → Checkout Champ link stamping. Finds every `<a href>` whose host
-   * matches the configured CC domain list and appends `?_dl_vid=…&_dl_fbc=…&
-   * _dl_fbp=…&_dl_fbclid=…&_dl_fbclid_at=…&_dl_gclid=…` so the user's
-   * visitor_id + Meta click signals cross the domain. MutationObserver watches
-   * for dynamically-injected links. On click, force-flush the event queue so
-   * any pending track() events land before the browser navigates away.
-   */
+  /** Checkout Champ identity bridging remains disabled pending signed tokens. */
   private syncOutboundLinkParams(domains: string[]): void {
-    if (typeof window === "undefined" || typeof document === "undefined") return;
-
-    const lowerDomains = domains.map((d) => d.toLowerCase());
-    const matchesCcDomain = (href: string): boolean => {
-      try {
-        const host = new URL(href, window.location.href).hostname.toLowerCase();
-        return lowerDomains.some((d) => host === d || host.endsWith("." + d));
-      } catch {
-        return false;
-      }
-    };
-
-    const buildBridgeParams = (): Record<string, string> => {
-      const attribution = this.attribution.getAttributionData();
-      const out: Record<string, string> = {};
-      const vid = this.identity.getAnonymousId();
-      const fbc = this.cookies.get("_fbc") || (attribution as any)._fbc;
-      const fbp = this.cookies.get("_fbp") || (attribution as any)._fbp;
-      // FSR-104: read the named click-id fields directly (captureAttribution stores every
-      // present click id under its own key) so a landing URL carrying BOTH fbclid and
-      // gclid bridges both — the old `clickIdType === 'fbclid' ? clickId : null` dropped
-      // gclid whenever fbclid was the primary, silently losing Google attribution on the
-      // cross-domain CC path. Fall back to the primary clickId for older stored shapes.
-      const fbclid = (attribution as any).fbclid
-        ?? (attribution.clickIdType === "fbclid" ? attribution.clickId : null);
-      const fbclidAt = this.cookies.get("_dl_fbclid_at");
-      const gclid = (attribution as any).gclid
-        ?? (attribution.clickIdType === "gclid" ? attribution.clickId : null);
-      const gclidAt = this.cookies.get("_dl_gclid_at");
-      if (vid) out._dl_vid = vid;
-      if (fbc) out._dl_fbc = String(fbc);
-      if (fbp) out._dl_fbp = String(fbp);
-      if (fbclid) out._dl_fbclid = String(fbclid);
-      if (fbclidAt) out._dl_fbclid_at = String(fbclidAt);
-      if (gclid) out._dl_gclid = String(gclid);
-      if (gclidAt) out._dl_gclid_at = String(gclidAt);
-      return out;
-    };
-
-    const stampLink = (anchor: HTMLAnchorElement) => {
-      if (!anchor.href || !matchesCcDomain(anchor.href)) return;
-      try {
-        const u = new URL(anchor.href, window.location.href);
-        const bridge = buildBridgeParams();
-        let mutated = false;
-        for (const [k, v] of Object.entries(bridge)) {
-          if (!u.searchParams.get(k)) {
-            u.searchParams.set(k, v);
-            mutated = true;
-          }
-        }
-        if (mutated) anchor.href = u.toString();
-      } catch {
-        // Ignore malformed URLs — don't break the page.
-      }
-    };
-
-    const stampAll = () => {
-      document.querySelectorAll("a[href]").forEach((el) => stampLink(el as HTMLAnchorElement));
-    };
-
-    const onClick = (e: Event) => {
-      const target = (e.target as Element | null)?.closest("a[href]");
-      if (!target) return;
-      const anchor = target as HTMLAnchorElement;
-      if (!matchesCcDomain(anchor.href)) return;
-      stampLink(anchor); // re-stamp in case attribution changed since DOMReady
-      try {
-        this.queue?.flush();
-      } catch {
-        // Best-effort — never block navigation.
-      }
-    };
-
-    stampAll();
-    document.addEventListener("click", onClick, true);
-
-    try {
-      // Debounce re-stamping. A busy SPA (infinite scroll, animations,
-      // React/Vue updates) can fire thousands of mutations per second; a naive
-      // re-stamp on every notification would burn CPU pointlessly when
-      // outbound link sets only change occasionally. 150ms is small enough to
-      // catch links before the user can click them, large enough to coalesce
-      // bursts.
-      let restampTimer: ReturnType<typeof setTimeout> | null = null;
-      const scheduleRestamp = () => {
-        if (restampTimer != null) return;
-        restampTimer = setTimeout(() => {
-          restampTimer = null;
-          stampAll();
-        }, 150);
-      };
-      const observer = new MutationObserver(scheduleRestamp);
-      observer.observe(document.documentElement, { childList: true, subtree: true });
-
-      // Observer + click listener live for the session; pagehide cleans up on full-page
-      // unload, and destroy() can tear them down early via this disposer (H2 — otherwise
-      // a destroy()+re-init() leaks the observer + capturing click listener).
-      this.outboundDisposer = () => {
-        try { observer.disconnect(); } catch { /* idempotent */ }
-        if (restampTimer != null) { clearTimeout(restampTimer); restampTimer = null; }
-        document.removeEventListener("click", onClick, true);
-      };
-      window.addEventListener("pagehide", () => this.outboundDisposer?.(), { once: true });
-    } catch (error) {
-      this.log("MutationObserver setup failed (CC link sync):", error);
-    }
-
-    this.log("Checkout Champ outbound-link sync active for:", lowerDomains);
+    this.log("Checkout Champ outbound identity bridge disabled (signed token required)", domains);
   }
 
   /**
@@ -1607,6 +1438,16 @@ class Datalyr {
       viewport_height: window.innerHeight
     });
 
+    // Consent travels with the event so downstream profile enrichment and ad
+    // postbacks enforce the decision that applied at occurrence time. The SDK
+    // snapshot is authoritative over caller properties.
+    const consentSnapshot: Record<string, boolean> = { ...(this.consent ?? {}) };
+    const shopifyAnalytics = this.shopifyAnalyticsConsent();
+    const shopifyMarketing = this.shopifyMarketingConsent();
+    if (typeof shopifyAnalytics === 'boolean') consentSnapshot.analytics = shopifyAnalytics;
+    if (typeof shopifyMarketing === 'boolean') consentSnapshot.marketing = shopifyMarketing;
+    if (Object.keys(consentSnapshot).length > 0) eventData.consent = consentSnapshot;
+
     // Create payload using snake_case only (matches backend API and production script)
     const identityFields = this.identity.getIdentityFields();
     // Use the caller-provided event_id (shared with the Meta Pixel co-fire for
@@ -1673,7 +1514,8 @@ class Datalyr {
     // Shopify Customer Privacy (9.A.1 — LEGAL): on a Shopify storefront, a shopper who
     // declined the native consent banner must not be tracked, even when the merchant
     // never wired setConsent(). null = API absent (non-Plus store not using it, or
-    // script loaded off-Shopify) → fall through, behavior unchanged (fail open).
+    // script loaded off-Shopify) → fall through. A detected Shopify storefront
+    // fails closed while the asynchronous Customer Privacy API is unresolved.
     if (this.shopifyAnalyticsConsent() === false) {
       return false;
     }
@@ -1726,6 +1568,17 @@ class Datalyr {
     }
   }
 
+  private isShopifyStorefront(): boolean {
+    if (this.config?.platform === 'shopify') return true;
+    if (typeof window === 'undefined') return false;
+    try {
+      return Boolean((window as any).Shopify) ||
+        window.location.hostname.toLowerCase().endsWith('.myshopify.com');
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Shopify's analytics-consent signal: true/false when the Customer Privacy API is
    * present and answers, null when there's no signal (API absent / unexpected shape)
@@ -1734,7 +1587,7 @@ class Datalyr {
   private shopifyAnalyticsConsent(): boolean | null {
     try {
       const cp = this.getShopifyCustomerPrivacy();
-      if (!cp) return null;
+      if (!cp) return this.isShopifyStorefront() ? false : null;
       if (typeof cp.analyticsProcessingAllowed === 'function') {
         const allowed = cp.analyticsProcessingAllowed();
         return typeof allowed === 'boolean' ? allowed : null;
@@ -1744,9 +1597,9 @@ class Datalyr {
         const allowed = cp.userCanBeTracked();
         return typeof allowed === 'boolean' ? allowed : null;
       }
-      return null;
+      return this.isShopifyStorefront() ? false : null;
     } catch {
-      return null;
+      return this.isShopifyStorefront() ? false : null;
     }
   }
 
@@ -1758,11 +1611,15 @@ class Datalyr {
   private shopifyMarketingConsent(): boolean | null {
     try {
       const cp = this.getShopifyCustomerPrivacy();
-      if (!cp || typeof cp.marketingAllowed !== 'function') return null;
+      if (!cp || typeof cp.marketingAllowed !== 'function') {
+        return this.isShopifyStorefront() ? false : null;
+      }
       const allowed = cp.marketingAllowed();
-      return typeof allowed === 'boolean' ? allowed : null;
+      return typeof allowed === 'boolean'
+        ? allowed
+        : (this.isShopifyStorefront() ? false : null);
     } catch {
-      return null;
+      return this.isShopifyStorefront() ? false : null;
     }
   }
 
