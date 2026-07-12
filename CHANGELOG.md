@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.7.6] - 2026-07-12
+
 ### Added
 - **A3-25: `schema_version` envelope stamp.** Every event now carries `schema_version: 1`, so
   the ingest/contract layer can key on one canonical envelope version. The envelope's other
