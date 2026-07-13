@@ -81,6 +81,17 @@ class Datalyr {
   }
 
   /**
+   * Return the workspace configured for this instance, or null before init().
+   *
+   * CDN bootstrap uses this public accessor instead of reaching into the
+   * private runtime config when deciding whether an existing global belongs
+   * to the requested workspace.
+   */
+  getWorkspaceId(): string | null {
+    return this.config?.workspaceId ?? null;
+  }
+
+  /**
    * Initialize the SDK
    */
   init(config: DatalyrConfig): void {
@@ -1964,14 +1975,23 @@ class Datalyr {
   }
 }
 
-// Create singleton instance. TR-23: reuse an existing window.datalyr (a prior tag's instance —
-// Shopify App Embed + a manual snippet coexisting, or a double-included bundle) instead of
-// constructing a SECOND one. Two instances each patch history.pushState and fire their own
-// pageviews (distinct event_ids → no server-side dedup). A plain truthy check (NOT instanceof):
-// two <script> tags run two separate IIFEs whose Datalyr classes are structurally identical but
-// distinct objects, so instanceof would fail across them. With one shared instance, the second
-// tag's bootstrap init() hits the instance-level `initialized` guard and no-ops.
-const datalyr: Datalyr = (typeof window !== 'undefined' && (window as any).datalyr) || new Datalyr();
+/**
+ * Create an independent SDK instance without reading or mutating window.
+ *
+ * The CDN bootstrap uses this when an existing global is configured for a
+ * different workspace. Package consumers can also opt into multiple explicit
+ * instances without changing the default singleton contract below.
+ */
+export function createDatalyrInstance(): Datalyr {
+  return new Datalyr();
+}
+
+// Create the default singleton. TR-23: reuse an existing window.datalyr (a
+// prior tag's instance or a package singleton) so npm/ESM/CJS consumers retain
+// the established one-global behavior. Workspace conflict resolution belongs
+// to the CDN bootstrap, which has the authoritative script-tag configuration.
+const datalyr: Datalyr =
+  (typeof window !== 'undefined' && (window as any).datalyr) || createDatalyrInstance();
 
 // Expose global API
 if (typeof window !== 'undefined') {

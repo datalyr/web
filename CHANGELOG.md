@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **TR-23 compatibility: an explicit CDN workspace can no longer inherit a stale global SDK.**
+  The CDN bootstrap can now compare the requested workspace through the stable public
+  `getWorkspaceId()` accessor and replace a mismatched global with a side-effect-free
+  `createDatalyrInstance()`. This restores the explicit tag as the tenant authority without
+  changing the npm/ESM/CommonJS singleton contract or reintroducing duplicate pageviews for
+  valid same-workspace double installs.
+
 ## [1.7.6] - 2026-07-12
 
 ### Added
