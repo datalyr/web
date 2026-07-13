@@ -67,4 +67,43 @@ describe('Datalyr instance factory and global singleton', () => {
     expect(independent.getWorkspaceId()).toBe('workspace-factory-test');
     independent.destroy();
   });
+
+  it('releases one pending Shopify pageview after async analytics consent loads', async () => {
+    const sdk = loadSdk();
+    const independent = sdk.createDatalyrInstance();
+    const pageSpy = jest.spyOn(independent, 'page');
+    let consentReady: ((error?: unknown) => void) | undefined;
+
+    (window as any).Shopify = {
+      loadFeatures: (_features: unknown, callback: (error?: unknown) => void) => {
+        consentReady = callback;
+      },
+    };
+
+    independent.init({
+      workspaceId: 'workspace-shopify-consent-test',
+      platform: 'shopify',
+      enableContainer: false,
+      enableFingerprinting: false,
+      enablePerformanceTracking: false,
+      trackPageViews: true,
+      trackSPA: false,
+      shopifyCartAttributes: false,
+      stripePaymentLinks: false,
+    });
+    await independent.ready();
+
+    expect(pageSpy).not.toHaveBeenCalled();
+
+    (window as any).Shopify.customerPrivacy = {
+      analyticsProcessingAllowed: () => true,
+      marketingAllowed: () => false,
+    };
+    consentReady?.();
+    consentReady?.();
+
+    expect(pageSpy).toHaveBeenCalledTimes(1);
+    independent.destroy();
+    delete (window as any).Shopify;
+  });
 });

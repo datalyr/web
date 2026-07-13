@@ -73,6 +73,11 @@ class Datalyr {
   private outboundDisposer?: () => void;        // tears down the CC outbound-link observer/listener
   private stripeLinksDisposer?: () => void;     // tears down the Stripe Payment Link observer/listener
   private lastSpaPath: string | null = null;    // dedups SPA pageviews (replaceState-on-mount double-fire)
+  // Shopify loads Customer Privacy asynchronously. Keep the initial pageview
+  // pending until initialization is complete and analytics consent is known,
+  // then release it exactly once when consent allows tracking.
+  private initialPageViewReady = false;
+  private initialPageViewSent = false;
   // FIXED (ISSUE-01): Async initialization promise to prevent race conditions
   private initializationPromise: Promise<void> | null = null;
 
@@ -414,10 +419,11 @@ class Datalyr {
           this.syncStripePaymentLinks(this.config.stripeLinkDomains ?? []);
         }
 
-        // Track initial page view if enabled (AFTER encryption ready)
-        if (this.config.trackPageViews) {
-          this.page();
-        }
+        // Track the initial page view after encryption is ready. On Shopify the
+        // Customer Privacy API can still be loading, so retain one pending
+        // pageview and release it from onShopifyConsentChanged() once allowed.
+        this.initialPageViewReady = true;
+        this.trackInitialPageViewOnce();
 
         this.log('Async initialization complete');
       } catch (error) {
@@ -1683,6 +1689,7 @@ class Datalyr {
     // visitor declined at init keeps a memory-only id and this session's events land under a
     // visitor_id that vanishes on the next page load. Idempotent.
     if (allowed) this.identity.enablePersistence();
+    if (allowed) this.trackInitialPageViewOnce();
     if (!allowed) {
       // Mirror setConsent() withdrawal: purge buffered events so events captured
       // before the decline can't drain if consent is later re-granted.
@@ -1718,6 +1725,14 @@ class Datalyr {
     }
 
     this.log('Shopify consent collected — analytics allowed:', allowed, '— marketing blocked:', marketingBlocked);
+  }
+
+  /** Release the automatic landing pageview once, after init and consent. */
+  private trackInitialPageViewOnce(): void {
+    if (!this.initialPageViewReady || this.initialPageViewSent) return;
+    if (!this.config.trackPageViews || !this.initialized || !this.shouldTrack()) return;
+    this.initialPageViewSent = true;
+    this.page();
   }
 
   /**
@@ -1964,6 +1979,8 @@ class Datalyr {
     this.container = undefined;
     this.autoIdentify = undefined;
     this.lastSpaPath = null;
+    this.initialPageViewReady = false;
+    this.initialPageViewSent = false;
 
     // Clear any remaining data
     this.superProperties = {};
