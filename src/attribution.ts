@@ -429,9 +429,22 @@ export class AttributionManager {
     // The old `hasCurrentAttribution` (truthy because source is always at least 'direct')
     // made the fallback below dead code AND caused storeLastTouch to overwrite a real
     // paid last-touch with 'direct'/'none' on the next internal navigation. (WEB NEW-1)
+    // `lyr` counts as a real signal. It is the Datalyr tracking-link tag — the one
+    // attribution parameter the product itself tells customers to put on a URL — and
+    // omitting it meant a bare `?lyr=X` landing (no UTMs, no click id) scored FALSE:
+    // the fallback below then replaced `current` wholesale with the stored touch,
+    // discarding the tag that had just been parsed, and neither store* call ran, so it
+    // never persisted either. Measured 2026-07-25 on the one workspace whose links are
+    // bare: 96 landing URLs carried `lyr=`, 93 events kept it — 3 lost (3.1%), all of
+    // them returning visitors (a first-time visitor has no stored touch to be replaced
+    // by, which is the only reason the number is 3 and not 96). The edge worker's own
+    // `buildDestination` emits exactly this URL shape when a link defines no UTMs.
+    // iOS (AttributionManager.swift) and React Native persist `lyr` unconditionally;
+    // this brings web into line.
     const hasRealAttribution = !!(
       current.clickId ||
       current.campaign ||
+      current.lyr ||
       (current.source && current.source !== 'direct')
     );
 
