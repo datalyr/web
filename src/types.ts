@@ -83,6 +83,13 @@ export interface DatalyrConfig {
   //   there — the session already exists). Set false to opt out.
   // - stripeLinkDomains: extra exact hostnames (merchant custom payment-link domains,
   //   e.g. 'pay.example.com') to decorate in addition to buy.stripe.com.
+  // - stripeCheckoutSessions: default ON. Observes Stripe Checkout SESSION ids
+  //   (cs_live_…/cs_test_…) as they reach the browser and reports the pairing to
+  //   the server. This is the server-created-session case that stripePaymentLinks
+  //   structurally cannot cover: checkout.stripe.com ignores client_reference_id
+  //   once the session exists. Scans for a Stripe token only — never for PII —
+  //   which is why it defaults ON where autoIdentifyAPI does not.
+  stripeCheckoutSessions?: boolean;
   stripePaymentLinks?: boolean;
   stripeLinkDomains?: string[];
 

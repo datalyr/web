@@ -12,6 +12,7 @@ import { storage, CookieStorage } from './storage';
 import { ContainerManager } from './container';
 import { dataEncryption } from './encryption'; // SEC-03 Fix
 import { AutoIdentifyManager } from './auto-identify';
+import { StripeSessionWatcher } from './stripe-session';
 import { applyRemoteConfig } from './config';
 import {
   generateUUID,
@@ -83,6 +84,7 @@ class Datalyr {
   private shopifyConsentHandler?: EventListener; // Shopify visitorConsentCollected (9.A.1; removed in destroy)
   private outboundDisposer?: () => void;        // tears down the CC outbound-link observer/listener
   private stripeLinksDisposer?: () => void;     // tears down the Stripe Payment Link observer/listener
+  private stripeSessionWatcher?: StripeSessionWatcher; // observes Checkout Session ids (server-created sessions)
   private lastSpaPath: string | null = null;    // dedups SPA pageviews (replaceState-on-mount double-fire)
   // Shopify loads Customer Privacy asynchronously. Keep the initial pageview
   // pending until initialization is complete and analytics consent is known,
@@ -438,6 +440,18 @@ class Datalyr {
         // opted-out / DNT / GPC visitors never get an id stamped into outbound links.
         if (this.config.stripePaymentLinks !== false && this.shouldTrack()) {
           this.syncStripePaymentLinks(this.config.stripeLinkDomains ?? []);
+        }
+
+        // Checkout Session capture (DEFAULT ON). The decorator above cannot help
+        // when the merchant's BACKEND creates the session — checkout.stripe.com
+        // ignores client_reference_id post-creation — which is how most SaaS
+        // checkouts work, and why payers arrive at our webhook with no visitor
+        // (measured 0.5% and 13.3% visitor coverage on the two Stripe tenants).
+        // The session id still has to reach the browser, so we observe it and
+        // let the server join on session.id. Same shouldTrack() gate as the
+        // decorator: an opted-out visitor's id is never paired with a checkout.
+        if (this.config.stripeCheckoutSessions !== false && this.shouldTrack()) {
+          this.startStripeSessionCapture();
         }
 
         // Track the initial page view after encryption is ready. On Shopify the
@@ -1031,6 +1045,8 @@ class Datalyr {
   private disposeMarketingLinkDecorators(): void {
     try { this.stripeLinksDisposer?.(); } catch { /* best-effort */ }
     this.stripeLinksDisposer = undefined;
+    try { this.stripeSessionWatcher?.stop(); } catch { /* best-effort */ }
+    this.stripeSessionWatcher = undefined;
     try { this.outboundDisposer?.(); } catch { /* best-effort */ }
     this.outboundDisposer = undefined;
   }
@@ -1404,6 +1420,36 @@ class Datalyr {
    * changes. window.open(paymentLink) is not covered (use getVisitorId()
    * manually); iframe/shadow-DOM links are unreachable from document.
    */
+  /**
+   * Observe Stripe Checkout Session ids and report each one once.
+   *
+   * The event is what carries the pairing: the server stores
+   * (stripe_session_id -> visitor_id) and, when checkout.session.completed
+   * arrives without a client_reference_id, joins on session.id and feeds the
+   * SAME cacheCustomerVisitor path the Payment Link flow already uses — so
+   * every later invoice for that customer inherits the visitor too.
+   *
+   * Consent is re-checked at emit time, not just at init: a visitor can
+   * withdraw between page load and checkout, and this pairing is exactly the
+   * kind of identity link that must stop when they do.
+   */
+  private startStripeSessionCapture(): void {
+    if (this.stripeSessionWatcher) return;
+    const watcher = new StripeSessionWatcher();
+    this.stripeSessionWatcher = watcher;
+    watcher.start((stripeSessionId: string) => {
+      if (!this.shouldTrack()) return;
+      this.track('$stripe_checkout_session', { stripe_session_id: stripeSessionId });
+      // The very next thing this page does is navigate to Stripe, so flush now
+      // rather than let the batch timer lose the pairing to the unload.
+      try {
+        this.queue?.flush();
+      } catch {
+        /* best-effort — never block the checkout */
+      }
+    });
+  }
+
   private syncStripePaymentLinks(extraDomains: string[]): void {
     if (typeof window === "undefined" || typeof document === "undefined") return;
 
@@ -2081,6 +2127,10 @@ class Datalyr {
     if (this.stripeLinksDisposer) {
       this.stripeLinksDisposer();
       this.stripeLinksDisposer = undefined;
+    }
+    if (this.stripeSessionWatcher) {
+      this.stripeSessionWatcher.stop();
+      this.stripeSessionWatcher = undefined;
     }
 
     // Clean up queue
