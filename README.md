@@ -519,18 +519,19 @@ journey keeps the last 30 touchpoints.
 
 ### Click IDs captured
 
-The SDK reads these 15 parameters from the URL. Matching is **case-sensitive**.
+The SDK reads these 16 parameters from the URL. Matching is **case-sensitive**.
+They are listed in precedence order, down the left column then down the right.
 
 | Parameter | Platform | Parameter | Platform |
 | --- | --- | --- | --- |
-| `fbclid` | Meta | `dclid` | Google Display |
-| `gclid` | Google Ads | `epik` | Pinterest |
-| `gbraid` | Google Ads, iOS | `rdt_cid` | Reddit |
-| `wbraid` | Google Ads, web | `obclid` | Outbrain |
-| `ttclid` | TikTok | `irclid` | Impact |
-| `msclkid` | Microsoft | `ko_click_id` | Klaviyo |
-| `twclid` | X | `sclid` | Snapchat |
-| `li_fat_id` | LinkedIn | | |
+| `fbclid` | Meta | `li_fat_id` | LinkedIn |
+| `gclid` | Google Ads | `sclid` | Snapchat |
+| `gbraid` | Google Ads, iOS | `dclid` | Google Display |
+| `wbraid` | Google Ads, web | `epik` | Pinterest |
+| `ttclid` | TikTok | `rdt_cid` | Reddit |
+| `oppref` | OpenAI Ads | `obclid` | Outbrain |
+| `msclkid` | Microsoft | `irclid` | Impact |
+| `twclid` | X | `ko_click_id` | Klaviyo |
 
 Two parameters are normalized to a canonical name:
 
@@ -542,9 +543,10 @@ Two parameters are normalized to a canonical name:
 A URL carrying several click IDs sends all of them. `clickIdType` takes the first match in
 the order of the table above. Any click ID forces `medium` to `cpc`.
 
-> **The Web SDK does not capture `oppref`.** OpenAI Ads web conversions therefore deliver
-> with `attribution_type: none`. Read `oppref` from the URL yourself and pass it through
-> `setAttribution()` or as an event property. The iOS and React Native SDKs do capture it.
+`oppref` (OpenAI Ads) is captured **as of 1.7.8**. Earlier versions did not, so OpenAI Ads
+web conversions from 1.7.7 and below delivered with `attribution_type: none` unless the
+value was passed by hand. It is ordered after the Google click IDs, matching the iOS and
+React Native SDKs, so it never outranks `fbclid` or `gclid` on a URL carrying both.
 
 ### Campaign parameters captured
 
