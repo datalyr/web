@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.7.8] - 2026-07-25
+
+### Fixed
+- **`identify()` no longer re-emits an unchanged identity.** A SPA calling `identify()` in a
+  route effect emitted `$identify` on every navigation. A fingerprint of
+  `anonymousId | userId | sorted traits` is now persisted and an exact repeat is skipped.
+  Matches iOS 2.1.11 / React Native 1.7.16. `reset()`, `optOut()` and consent withdrawal all
+  clear it, so a logout→login always rebuilds the link. Plugin `identify` handlers still run
+  on every call — their contract is unchanged.
+- **Auto-identify emits one event instead of two.** It emitted `$auto_identify` and then
+  called `identify()`, producing a second event ~1ms later with the same email (measured: a
+  perfect 379/379/379 split over 7 days on one workspace). Nothing on the platform ever read
+  `$auto_identify`, so it is gone; the detector name is preserved as an `auto_identify_source`
+  trait on `$identify`.
+- **A PII `user_id` is no longer written to localStorage in the clear.** Auto-identify makes
+  the raw email the `user_id`, and `dl_user_id` held it unencrypted while the same address was
+  carefully encrypted elsewhere. An email-shaped id is now stored encrypted under
+  `dl_user_id_pii` and the plaintext key is removed (including one left by an older version).
+  Opaque application ids keep the existing synchronous plaintext path unchanged. Where
+  `crypto.subtle` is unavailable (http://, legacy browsers) the id stays in memory rather than
+  being written in the clear — event delivery is never gated on encryption. **`user_id` on the
+  wire is unchanged.**
+- **A 403 no longer destroys the batch.** Every 4xx except 408 was treated as permanent and
+  dropped. A 403 from ingest means "origin not allowed" — server configuration, which changes:
+  a 2026-07-13 regression 403'd three workspaces and was fixed 11 days later, by which point
+  every event had been discarded. A 403 now parks events in the offline queue behind a
+  5-minute backoff, like a 429. A 400/401 is still permanent and still dropped.
+- **Dropped events are now visible.** A permanent drop used to be a debug-gated log line and
+  nothing else. It now warns unconditionally and is counted in a new `getStats()`
+  (`droppedEvents`, `lastDropStatus`, `backoffUntil`).
+- **`optOut()` and consent withdrawal purge first/last-touch attribution.** `dl_first_touch` /
+  `dl_last_touch` hold redacted landing URLs, referrers and click ids for up to 90 days.
+  `reset()` always cleared them; the withdrawal paths did not.
+- **The offline-queue lock can no longer discard a batch.** Not reachable today — the locked
+  section is synchronous — but the contended branch now buffers the events instead of
+  returning, so making the persistence layer async cannot silently reintroduce data loss.
+
+
 ### Fixed
 - **TR-23 compatibility: an explicit CDN workspace can no longer inherit a stale global SDK.**
   The CDN bootstrap can now compare the requested workspace through the stable public
@@ -11,6 +49,18 @@ All notable changes to this project will be documented in this file.
   `createDatalyrInstance()`. This restores the explicit tag as the tenant authority without
   changing the npm/ESM/CommonJS singleton contract or reintroducing duplicate pageviews for
   valid same-workspace double installs.
+
+## [1.7.7] - 2026-07-13
+
+### Fixed
+- **Shopify: the landing pageview is released once analytics consent loads.** The consent gate
+  fails closed on a detected Shopify storefront, so a store whose Customer Privacy API resolves
+  asynchronously lost its initial pageview entirely. It is now retained and replayed exactly
+  once when consent arrives.
+- **Workspace-safe CDN takeover.** A second `dl.js` include for a different workspace could
+  attach to the already-booted instance. The bootstrap now verifies workspace ownership,
+  retires a stale instance and purges its offline queue before creating a fresh one, and
+  exposes `getWorkspaceId()`.
 
 ## [1.7.6] - 2026-07-12
 

@@ -40,6 +40,17 @@ import type {
 // Export types
 export * from './types';
 
+/**
+ * WEB-20. Fingerprint of the last identify() that actually emitted, so a host
+ * app calling identify() on every route change does not re-emit an unchanged
+ * identity. Cleared by reset(). Mirrors iOS `datalyr_last_identity_fingerprint`
+ * and RN `@datalyr/last_identity_fingerprint`.
+ *
+ * Not PII: the stored value is a hash, and it is written through the same
+ * `storage` wrapper as every other key (so it inherits the `dl_` prefix).
+ */
+const IDENTIFY_FINGERPRINT_KEY = 'dl_identify_fingerprint';
+
 class Datalyr {
   private config!: DatalyrConfig;
   private identity!: IdentityManager;
@@ -281,6 +292,11 @@ class Datalyr {
           const deviceId = this.identity.getAnonymousId();
           await dataEncryption.initialize(this.config.workspaceId, deviceId);
           this.userProperties = await storage.getEncrypted('dl_user_traits', {});
+          // WEB-22: restore a PII user id that was persisted encrypted. Must run
+          // here — it needs dataEncryption to be initialized, so it cannot happen
+          // in the IdentityManager constructor. It never overwrites an id already
+          // set by an explicit identify() earlier in this page load.
+          await this.identity.hydrateEncryptedUserId();
           this.log('Encryption initialized, user properties loaded');
         } catch (encErr) {
           console.warn('[Datalyr] Encryption unavailable (non-secure context?); continuing WITHOUT PII-at-rest encryption:', encErr);
@@ -376,15 +392,20 @@ class Datalyr {
           this.autoIdentify.initialize((email: string, source: string) => {
             this.log(`Auto-identified user: ${email} from ${source}`);
 
-            // Track auto-identify event
-            this.track('$auto_identify', {
-              email,
-              source,
-              timestamp: Date.now()
-            });
-
-            // Automatically call identify with email
-            this.identify(email, { email });
+            // WEB-21: ONE event, not two.
+            //
+            // This used to emit `$auto_identify` and then call identify(),
+            // which emits `$identify` — two events ~1ms apart carrying the same
+            // email. Production over 7 days on workspace f6260736 showed a
+            // perfect 379 / 379 / 379 split ($identify / $auto_identify /
+            // visitors): every auto-identification was booked twice.
+            //
+            // Nothing consumed `$auto_identify`: grepped across the whole
+            // platform (app/, lib/, all Cloudflare workers, all Tinybird pipes)
+            // — zero readers, while prod carried 6,197 of them in 30 days.
+            // The only information it added over `$identify` was WHICH detector
+            // found the email, so that is preserved as a trait instead.
+            this.identify(email, { email, auto_identify_source: source });
           });
         }
 
@@ -558,6 +579,52 @@ class Datalyr {
   /**
    * Identify a user
    */
+  /**
+   * Stable fingerprint of an identity for redundant-emit suppression (WEB-20).
+   *
+   * Keys are sorted and each value is JSON-serialized, so `{a,b}` and `{b,a}`
+   * collapse to one identity while a genuinely changed nested trait does not.
+   * (The mobile SDKs use `String(value)`, which flattens every object to
+   * `[object Object]` and can swallow a real change; web traits are plain JSON,
+   * so it can afford to be exact.)
+   *
+   * Hashed rather than stored raw so the key does not become another copy of the
+   * user's traits at rest. Being honest about the strength: a 32-bit
+   * non-cryptographic digest sitting beside a readable `dl_dl_anonymous_id` is
+   * NOT protection against a determined reader — it defeats casual inspection
+   * and bulk scraping, nothing more. The PII that matters is handled properly
+   * (encrypted `dl_user_id_pii`, encrypted `dl_user_traits`). 32 bits also means
+   * a ~1-in-4.3e9 chance per identity that a genuine change is suppressed;
+   * acceptable for change detection, which is all this is.
+   */
+  private identityFingerprint(userId: string, traits: UserTraits = {}): string {
+    const stableTraits = Object.keys(traits || {})
+      .sort()
+      .map((key) => {
+        let value: string;
+        try {
+          value = JSON.stringify((traits as Record<string, any>)[key]);
+        } catch {
+          // Circular/unserializable trait — fall back to a coarse marker rather
+          // than throwing inside identify().
+          value = '[unserializable]';
+        }
+        return `${key}=${value}`;
+      })
+      .join('&');
+
+    const input = `${this.identity.getAnonymousId()}|${userId}|${stableTraits}`;
+
+    // 32-bit FNV-1a. Not cryptographic — this only needs to detect change, and
+    // it must be synchronous (crypto.subtle is async and identify() is not).
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < input.length; i++) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16);
+  }
+
   identify(userId: string, traits: UserTraits = {}): void {
     if (!this.initialized) {
       console.warn('[Datalyr] SDK not initialized. Call init() first.');
@@ -600,11 +667,35 @@ class Datalyr {
         // and will be lost on page reload - but PII is NOT exposed in localStorage
       });
 
-      // Track $identify event
-      this.track('$identify', {
-        ...identityLink,
-        traits
-      });
+      // WEB-20: redundant-identify suppression, matching iOS 2.1.11 / RN 1.7.16.
+      //
+      // identify() is host-app-driven and SPA routers commonly call it in a
+      // route effect, so an unchanged identity was re-emitted on every
+      // navigation. The mobile SDKs got this in 2.1.10/1.7.15; web did not.
+      //
+      // Fingerprint = anonymousId | userId | sorted traits. The anonymous id is
+      // included so a reset()/rotation always re-emits and identity links are
+      // never lost — only exact repeats are skipped.
+      //
+      // Only the EVENT is suppressed. `this.identity.identify()` above has
+      // already persisted `dl_user_id`, traits are still merged and encrypted,
+      // and the plugin handlers below still run on every call — a plugin's
+      // `identify` hook is a customer extension point whose semantics we cannot
+      // assume, so its contract ("called when identify() is called") is
+      // deliberately left intact.
+      const identityFingerprint = this.identityFingerprint(userId, traits);
+      const isRedundantIdentify =
+        storage.getString(IDENTIFY_FINGERPRINT_KEY, null) === identityFingerprint;
+
+      if (isRedundantIdentify) {
+        this.log('Skipping redundant identify (unchanged identity):', userId);
+      } else {
+        storage.set(IDENTIFY_FINGERPRINT_KEY, identityFingerprint);
+        this.track('$identify', {
+          ...identityLink,
+          traits
+        });
+      }
 
       // Call plugin handlers
       if (this.config.plugins) {
@@ -623,6 +714,24 @@ class Datalyr {
     } catch (error) {
       this.trackError(error as Error, { userId });
     }
+  }
+
+  /**
+   * WEB-27: queue health, including events the SDK gave up on.
+   *
+   * `getStats()` existed on EventQueue but was unreachable — `queue` is private
+   * and nothing exposed it, so the observability fix could not actually be
+   * observed. A non-zero `droppedEvents` means data was lost.
+   */
+  getQueueStats(): {
+    queued: number;
+    offline: number;
+    droppedEvents: number;
+    lastDropStatus: number | null;
+    backoffUntil: number;
+  } | null {
+    if (!this.queue) return null;
+    return this.queue.getStats();
   }
 
   /**
@@ -757,6 +866,9 @@ class Datalyr {
     // values to the next user's events (cross-user contamination on shared devices).
     this.superProperties = {};
     storage.remove('dl_user_traits');
+    // WEB-20: drop the identify fingerprint, so a logout→login (or a different
+    // user on this browser) always re-emits $identify and the link is rebuilt.
+    storage.remove(IDENTIFY_FINGERPRINT_KEY);
     // Clear the auto-identify guard so a different user on the same browser is
     // re-captured (it short-circuits while dl_auto_identified_email is present), and so
     // the prior user's email isn't left at rest after logout.
@@ -948,8 +1060,22 @@ class Datalyr {
     // Purge PII at rest.
     this.userProperties = {};
     storage.remove('dl_user_traits');
+    // WEB-26: remove the PLAINTEXT id as well. optOut() purged only the
+    // encrypted copy, so an opted-out visitor whose email was written by an
+    // older build kept it at rest — the one state where that is least
+    // defensible.
+    storage.remove('dl_user_id');
+    storage.remove('dl_user_id_pii');
+    storage.remove(IDENTIFY_FINGERPRINT_KEY);
     storage.remove('dl_auto_identified_email');
     storage.remove('dl_journey');
+    // WEB-25: first/last touch hold redacted-but-full landing URLs, referrers and
+    // click ids for up to 90 days. reset() has always cleared them; optOut() did
+    // not — so an opted-out visitor kept marketing attribution at rest, which is
+    // the one state where it is least defensible. Same rationale as dl_journey
+    // directly above.
+    storage.remove('dl_first_touch');
+    storage.remove('dl_last_touch');
     this.log('User opted out');
   }
 
@@ -1015,8 +1141,16 @@ class Datalyr {
       this.autoIdentify = undefined;
       this.userProperties = {};
       storage.remove('dl_user_traits');
+      // WEB-26: see optOut() — the plaintext id must go too.
+      storage.remove('dl_user_id');
+      storage.remove('dl_user_id_pii');
+      storage.remove(IDENTIFY_FINGERPRINT_KEY);
       storage.remove('dl_auto_identified_email');
       storage.remove('dl_journey');
+      // WEB-25: see optOut() — withdrawn analytics consent must not leave 90-day
+      // marketing attribution at rest either.
+      storage.remove('dl_first_touch');
+      storage.remove('dl_last_touch');
     } else {
       // TR-15 (P3): grant → persist the in-memory anon id now (see onShopifyConsentChanged).
       this.identity.enablePersistence();

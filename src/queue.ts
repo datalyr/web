@@ -12,15 +12,21 @@ const DEFAULT_CRITICAL_EVENTS = ['purchase', 'signup', 'subscribe', 'lead', 'con
 // Default high priority events that use faster batching
 const DEFAULT_HIGH_PRIORITY_EVENTS = ['add_to_cart', 'begin_checkout', 'view_item', 'search'];
 
-// A 429 is a deliberate backpressure signal, not a transient failure — tagged so the
-// send path can route it to the offline queue WITHOUT retrying (which would storm the
-// already-overloaded server). See sendBatch / the rateLimitedUntil gate.
+// WEB-23: how long to stop sending after a 403 (origin not allowed). Long enough not to
+// hammer a rejecting origin, short enough that a server-side config fix is picked up
+// within the same visit. A 403 carries no Retry-After, so this is fixed.
+const ORIGIN_REJECTED_BACKOFF_MS = 5 * 60 * 1000;
+
+// Backpressure, not failure — routed to the offline queue WITHOUT retrying (which would
+// storm an already-overloaded server) and gated behind rateLimitedUntil. Raised for a 429
+// and, since WEB-23, for a 403: both mean "not now", not "never". See sendBatch.
 class RateLimitError extends Error {}
 
-// A permanent (non-retryable) failure — a 4xx other than 408/429 (invalid event shape,
-// origin not allowed, auth). Retrying or parking it just head-of-line-blocks the offline
-// queue forever and hammers ingest. Tagged so the send paths DROP the batch instead of
-// unshifting it back to the head. (FSR-55)
+// A permanent (non-retryable) failure — a 4xx other than 403/408/429, i.e. an invalid
+// event shape (400) or bad auth (401). Retrying or parking it just head-of-line-blocks
+// the offline queue forever and hammers ingest. Tagged so the send paths DROP the batch
+// instead of unshifting it back to the head. (FSR-55, narrowed by WEB-23 — a 403 is
+// server *configuration* state and does change, so it is no longer in this class.)
 class PermanentError extends Error {
   constructor(public status: number, message?: string) {
     super(message || `HTTP ${status}`);
@@ -57,6 +63,11 @@ export class EventQueue {
   private enabled = true; // FIXED (consent): when false (opt-out / withdrawn analytics consent) all enqueue/flush/drain is a no-op
   private consentCheck?: () => boolean; // TR-15: live consent gate re-evaluated at DRAIN time (not just the latched `enabled`)
   private rateLimitedUntil = 0; // FIXED (429): skip flush/drain until the server's Retry-After window passes
+  // WEB-23: permanent drops used to be invisible — a debug-gated log line and
+  // nothing else, so 11 days of 403s looked identical to a healthy queue. Counted
+  // here and exposed via getStats() so a drop is at least observable.
+  private droppedEventCount = 0;
+  private lastDropStatus: number | null = null;
 
   constructor(config: any) {
     // Coerce numeric config to sane values. The old `config.X || default` both turned a
@@ -308,7 +319,14 @@ export class EventQueue {
       // FSR-55: don't park a permanently-rejected batch — it would never succeed and
       // would block the offline drain. Drop it.
       if (error instanceof PermanentError) {
-        this.log(`Dropping ${events.length} events — permanent error ${error.status}`);
+        this.droppedEventCount += events.length;
+        this.lastDropStatus = error.status;
+        // console.warn, not this.log: a silent drop is the failure mode that let the
+        // 2026-07-13 outage run for 11 days. This must be visible without debug mode.
+        console.warn(
+          `[Datalyr Queue] Dropped ${events.length} events — permanent error ${error.status}. ` +
+          `${this.droppedEventCount} dropped this session.`
+        );
       } else {
         this.moveToOfflineQueue(events);
       }
@@ -378,9 +396,25 @@ export class EventQueue {
           throw new RateLimitError('Rate limited (429)');
         }
 
-        // FSR-55: a 4xx other than 408 (timeout) is PERMANENT — invalid event shape
-        // (400), origin not allowed (403), auth (401). Retrying / parking it just blocks
-        // the queue and hammers ingest forever. Tag it so the caller drops the batch.
+        // WEB-23: a 403 is NOT permanent — it is server *configuration* state, and it
+        // changes. On 2026-07-13 an allowed_origins regression made ingest reject three
+        // workspaces with 403; the config was fixed 11 days later, but every event sent
+        // in between had already been dropped on the floor by the FSR-55 rule below.
+        // Eleven days of data, unrecoverable, with only a debug log to show for it.
+        //
+        // Treated like 429 instead: park the events offline behind a backoff window, so
+        // we neither hammer a rejecting origin (FSR-55's real concern) nor discard data
+        // that would have been accepted an hour later. The window is fixed because a 403
+        // carries no Retry-After.
+        if (response.status === 403) {
+          this.rateLimitedUntil = Date.now() + ORIGIN_REJECTED_BACKOFF_MS;
+          this.log(`Origin rejected (403); backing off ${ORIGIN_REJECTED_BACKOFF_MS / 1000}s and parking events`);
+          throw new RateLimitError('Origin rejected (403)');
+        }
+
+        // FSR-55: a 4xx other than 403/408 (timeout) is PERMANENT — invalid event shape
+        // (400) or auth (401). Retrying / parking it just blocks the queue and hammers
+        // ingest forever. Tag it so the caller drops the batch.
         if (response.status >= 400 && response.status < 500 && response.status !== 408) {
           throw new PermanentError(response.status, `HTTP ${response.status}: ${response.statusText}`);
         }
@@ -477,9 +511,24 @@ export class EventQueue {
     // purge. Gating here (a persistence sink, not just the send sinks) closes it.
     if (!this.enabled) return;
 
-    // FIXED (DATA-03): Check if offline queue operation already in progress
+    // WEB-24. This early return used to `return` outright — losing the batch, because
+    // _flush() has ALREADY spliced these events out of the live queue before calling
+    // here, so they would exist in neither queue.
+    //
+    // Verified 2026-07-25 that the loss is NOT currently reachable: this method is the
+    // only user of offlineQueueLock, its critical section is fully synchronous (push,
+    // splice, then a synchronous saveOfflineQueue → storage.set), and JS is
+    // single-threaded — so the flag can never be observed set on entry. The path is
+    // dead code today, and the review's "drops the batch on lock contention" is REFUTED
+    // as a live loss path.
+    //
+    // It is kept and made safe anyway, because it is one `await` away from being live:
+    // the moment saveOfflineQueue becomes async (IndexedDB, encrypted-at-rest storage,
+    // anything), contention becomes real and silent data loss returns instantly.
+    // Enqueue first, then bail — the events are never dropped either way.
     if (this.offlineQueueLock) {
-      console.warn('[Datalyr Queue] Offline queue operation already in progress');
+      console.warn('[Datalyr Queue] Offline queue busy; buffering events without persisting');
+      if (events) this.offlineQueue.push(...events);
       return;
     }
 
@@ -500,6 +549,10 @@ export class EventQueue {
       if (this.offlineQueue.length > this.config.maxOfflineQueueSize) {
         const excess = this.offlineQueue.length - this.config.maxOfflineQueueSize;
         this.offlineQueue.splice(0, excess); // Remove oldest events
+        // WEB-27: overflow is data loss too, and a sustained 403/park loop is
+        // exactly what produces it. Count it rather than trimming silently.
+        this.droppedEventCount += excess;
+        console.warn(`[Datalyr Queue] Offline queue full — dropped ${excess} oldest event(s).`);
       }
 
       this.saveOfflineQueue();
@@ -603,7 +656,17 @@ export class EventQueue {
           // that would block every event behind it forever and hammer ingest every tick.
           // Drop it (already spliced off the front) and keep draining the rest.
           if (error instanceof PermanentError) {
-            this.log(`Dropping poison offline batch (${batch.length}) — permanent error ${error.status}`);
+            // WEB-27: count and surface these too. WEB-23's whole effect is to
+            // PARK more batches offline, so the drain — not the live flush — is
+            // where drops now predominantly happen. Counting only _flush left the
+            // dominant loss path invisible, which is the exact failure mode the
+            // counter was added to end.
+            this.droppedEventCount += batch.length;
+            this.lastDropStatus = error.status;
+            console.warn(
+              `[Datalyr Queue] Dropped ${batch.length} offline events — permanent error ${error.status}. ` +
+              `${this.droppedEventCount} dropped this session.`
+            );
             this.saveOfflineQueue();
             continue;
           }
@@ -636,6 +699,30 @@ export class EventQueue {
    */
   getOfflineQueueSize(): number {
     return this.offlineQueue.length;
+  }
+
+  /**
+   * WEB-23: queue health, including events the SDK gave up on.
+   *
+   * `droppedEvents` is the number this session discarded as permanently rejected
+   * (a 400/401). It exists because a silent drop is precisely the failure mode
+   * that let the 2026-07-13 `allowed_origins` outage run for eleven days looking
+   * exactly like a healthy queue. A non-zero value here means data was lost.
+   */
+  getStats(): {
+    queued: number;
+    offline: number;
+    droppedEvents: number;
+    lastDropStatus: number | null;
+    backoffUntil: number;
+  } {
+    return {
+      queued: this.queue.length,
+      offline: this.offlineQueue.length,
+      droppedEvents: this.droppedEventCount,
+      lastDropStatus: this.lastDropStatus,
+      backoffUntil: this.rateLimitedUntil,
+    };
   }
 
   /**

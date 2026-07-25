@@ -19,6 +19,12 @@ export class AttributionManager {
     'gbraid',     // Google Ads (iOS)
     'wbraid',     // Google Ads (web)
     'ttclid',     // TikTok
+    // WEB-28: OpenAI Ads. Captured by iOS and React Native since launch but
+    // never by the web SDK, so every OpenAI Ads *web* conversion delivered with
+    // attribution_type: none unless the customer passed the value by hand.
+    // Placed after the Google block to match the mobile SDKs' ordering — the
+    // first click id present wins, and this must not outrank fbclid/gclid.
+    'oppref',     // OpenAI Ads
     'msclkid',    // Microsoft/Bing
     'twclid',     // Twitter/X
     'li_fat_id',  // LinkedIn

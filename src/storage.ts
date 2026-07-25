@@ -193,8 +193,23 @@ class SafeStorage implements StorageWrapper {
           // Get value from legacy key
           const value = this.storage!.getItem(legacyKey);
           if (value) {
-            // Extract the actual key name (remove '__dl_' prefix, keep 'dl_' part)
-            const actualKey = legacyKey.slice('__dl_'.length); // e.g., '__dl_dl_anonymous_id' -> 'dl_anonymous_id'
+            // WEB-29: strip ONLY the leading '__'.
+            //
+            // This used to strip '__dl_', producing 'dl_anonymous_id' — but that
+            // is the LOGICAL key callers pass to get(), not the key it reads.
+            // get() prepends this.prefix ('dl_'), so the value actually lives at
+            // 'dl_dl_anonymous_id'. The migration therefore wrote to an address
+            // nothing reads AND then deleted the legacy key below, destroying
+            // the visitor's id instead of migrating it: a silent visitor reset
+            // and attribution loss for anyone still on the old prefix.
+            //
+            //   legacy real key : __dl_dl_anonymous_id
+            //   current real key:   dl_dl_anonymous_id   ← strip '__'
+            //   logical key     :      dl_anonymous_id   ← what get() is called with
+            //
+            // NOTE: the double 'dl_dl_' looks like a typo and is not. Renaming
+            // the prefix would orphan every stored id across the install base.
+            const actualKey = legacyKey.slice('__'.length); // '__dl_dl_anonymous_id' -> 'dl_dl_anonymous_id'
 
             // Only migrate if new key doesn't already exist (don't overwrite newer data)
             if (!this.storage!.getItem(actualKey)) {
