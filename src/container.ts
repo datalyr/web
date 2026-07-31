@@ -58,6 +58,10 @@ export interface PixelConfig {
     enabled: boolean;
     pixel_id: string;
   };
+  whop?: {
+    enabled: boolean;
+    company_id: string;
+  };
 }
 
 export class ContainerManager {
@@ -498,9 +502,7 @@ export class ContainerManager {
     document.body.appendChild(img);
   }
 
-  /**
-   * Initialize third-party pixels (Meta, Google, TikTok)
-   */
+  /** Initialize configured third-party pixels in the merchant's page context. */
   private async initializePixels(): Promise<void> {
     if (!this.pixels) return;
 
@@ -517,6 +519,56 @@ export class ContainerManager {
     // Initialize TikTok Pixel
     if (this.pixels.tiktok?.enabled && this.pixels.tiktok.pixel_id) {
       this.initializeTikTokPixel(this.pixels.tiktok);
+    }
+
+    // The Whop Pixel needs only the merchant's public company ID. Loading it
+    // here lets Whop link this external-site visitor to a later hosted or
+    // embedded Whop checkout without a Datalyr visitor_id in checkout metadata.
+    if (this.pixels.whop?.enabled && this.pixels.whop.company_id) {
+      this.initializeWhopPixel(this.pixels.whop);
+    }
+  }
+
+  /** Initialize Whop's official first-party attribution pixel. */
+  private initializeWhopPixel(config: { company_id: string }): void {
+    try {
+      const host = window as any;
+      if (!host.whop) {
+        const queue: any = host.whop = {
+          q: [],
+          t: Date.now(),
+          s: [],
+          o: 'https://t.whop.tw',
+          track: function(...args: any[]) {
+            queue.q.push([Date.now(), ...args]);
+          },
+          setScope: function(...args: any[]) {
+            queue.s = args.filter((value: unknown) => typeof value === 'string');
+            queue.q.push([Date.now(), 'setScope', ...queue.s]);
+          },
+          scope: function(...scope: any[]) {
+            return {
+              track: function(...args: any[]) {
+                queue.q.push([Date.now(), ...args, { __scope: scope }]);
+              },
+            };
+          },
+        };
+        const script = document.createElement('script');
+        script.async = true;
+        script.src = 'https://t.whop.tw/s.js';
+        const firstScript = document.getElementsByTagName('script')[0];
+        firstScript?.parentNode?.insertBefore(script, firstScript);
+        if (!firstScript) document.head.appendChild(script);
+      }
+
+      if (typeof host.whop?.setScope !== 'function') {
+        throw new Error('Existing window.whop does not expose setScope');
+      }
+      host.whop.setScope(config.company_id);
+      this.log('Whop Pixel initialized:', config.company_id);
+    } catch (error) {
+      this.log('Error initializing Whop Pixel:', error);
     }
   }
 
@@ -764,6 +816,20 @@ export class ContainerManager {
         (window as any).ttq.track(tiktokEvent, sanitizedProperties);
       } catch (error) {
         this.log('Error tracking TikTok Pixel event:', error);
+      }
+    }
+
+    // Whop records checkout and payment events server-side. Datalyr only sends
+    // page views here, including SPA navigations, so purchases are never doubled.
+    if (
+      this.pixels?.whop?.enabled &&
+      (window as any).whop &&
+      (eventName === 'pageview' || eventName === 'page_view')
+    ) {
+      try {
+        (window as any).whop.track('page');
+      } catch (error) {
+        this.log('Error tracking Whop Pixel page:', error);
       }
     }
   }
