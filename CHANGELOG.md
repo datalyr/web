@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.7.9] - 2026-07-31
+
+### Added
+- **Managed Whop Pixel support.** The browser SDK can initialize Whop's official
+  Pixel from Datalyr container configuration. It passes the current Datalyr
+  identity to Whop and sends a page-view event after initialization and on SPA
+  navigation.
+
 ## [1.7.8] - 2026-07-25
 
 ### Fixed
