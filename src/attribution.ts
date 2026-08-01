@@ -60,7 +60,11 @@ export class AttributionManager {
     'source',     // Generic source (non-UTM)
     'campaign',   // Generic campaign (non-UTM)
     'medium',     // Generic medium (non-UTM)
-    'gad_source'  // Google Ads source parameter
+    'gad_source', // Google Ads source parameter
+    // Datalyr-owned Klaviyo parameters. These live beside merchant UTMs so
+    // account-level setup never replaces customer values.
+    'dl_ksource',
+    'dl_kmessage_id'
   ];
 
   // TR-03: ad-cookie fields (Meta/Google Ads/TikTok/Snap) that are MARKETING-scoped. When
@@ -228,6 +232,13 @@ export class AttributionManager {
       if (value) {
         attribution[param] = value;
       }
+    }
+
+    // The namespaced source is Datalyr's routing authority. Keep any
+    // merchant-owned utm_source intact while still classifying this visit as
+    // Klaviyo everywhere source-level attribution is displayed.
+    if (attribution.dl_ksource === 'klaviyo') {
+      attribution.source = 'klaviyo';
     }
 
     // Capture referrer. 9.A.4: redact secret/PII query-param values (reset tokens,

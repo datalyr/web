@@ -76,6 +76,17 @@ describe('AttributionManager — capture + last-touch (1.7.1 fixes)', () => {
     expect(attr.consumeKlaviyoProfileBinding()).toBeNull();
   });
 
+  test('Klaviyo namespaced tracking preserves merchant UTMs and routes the source', () => {
+    setPage('?utm_source=retention-team&utm_id=merchant-id&dl_ksource=klaviyo&dl_kmessage_id=Welcome%20email%20(msg_123)');
+    const a = attr.captureAttribution() as any;
+
+    expect(a.utm_source).toBe('retention-team');
+    expect(a.utm_id).toBe('merchant-id');
+    expect(a.dl_ksource).toBe('klaviyo');
+    expect(a.dl_kmessage_id).toBe('Welcome email (msg_123)');
+    expect(a.source).toBe('klaviyo');
+  });
+
   test('Klaviyo profile binding is discarded when marketing consent is denied', () => {
     setPage('?dl_kprofile_id=profile_blocked');
     const denied = new AttributionManager({ marketingAllowed: () => false });
