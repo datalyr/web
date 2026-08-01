@@ -8,10 +8,14 @@ import { getAllQueryParams, getRegistrableDomain, redactUrl } from './utils';
 import type { Attribution, TouchPoint } from './types';
 
 export class AttributionManager {
+  private static readonly KLAVIYO_BINDING_KEY = 'dl_klaviyo_profile_binding';
+  private static readonly KLAVIYO_BINDING_TTL_MS = 10 * 60 * 1000;
   private attributionWindow: number;
   private trackedParams: string[];
   private queryParamsCache: Record<string, string> | null = null;
-  private UTM_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
+  private pendingKlaviyoProfileId: string | null = null;
+  private replaceVisibleUrl?: (url: string) => void;
+  private UTM_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id'];
   // Updated to match dl.js - includes ALL ad platform click IDs
   private CLICK_IDS = [
     'fbclid',     // Facebook/Meta
@@ -72,11 +76,70 @@ export class AttributionManager {
     attributionWindow?: number;
     trackedParams?: string[];
     marketingAllowed?: () => boolean;
+    replaceVisibleUrl?: (url: string) => void;
   } = {}) {
     this.attributionWindow = options.attributionWindow || 90 * 24 * 60 * 60 * 1000; // 90 days (increased from 30 for B2B sales cycles)
     // Merge default tracked params with user-provided ones
     this.trackedParams = [...this.DEFAULT_TRACKED_PARAMS, ...(options.trackedParams || [])];
     this.marketingAllowedFn = options.marketingAllowed;
+    this.replaceVisibleUrl = options.replaceVisibleUrl;
+  }
+
+  private validKlaviyoProfileId(value: unknown): string | null {
+    const id = typeof value === 'string' ? value.trim() : '';
+    if (!id || id.length > 512 || /[\u0000-\u001f\u007f]/.test(id)) return null;
+    return id;
+  }
+
+  /** Capture the dedicated Klaviyo identity parameter before URL redaction.
+   * It deliberately never enters the Attribution object or touch storage. */
+  private captureKlaviyoProfileBinding(params: Record<string, string>): void {
+    if (!Object.prototype.hasOwnProperty.call(params, 'dl_kprofile_id')) return;
+    const profileId = this.validKlaviyoProfileId(params.dl_kprofile_id);
+    delete params.dl_kprofile_id;
+    if (profileId && this.isMarketingAllowed()) this.pendingKlaviyoProfileId = profileId;
+
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('dl_kprofile_id')) {
+        url.searchParams.delete('dl_kprofile_id');
+        const clean = `${url.pathname}${url.search}${url.hash}`;
+        if (this.replaceVisibleUrl) this.replaceVisibleUrl(clean);
+        else window.history.replaceState(window.history.state, '', clean);
+      }
+    } catch {
+      // Capture still succeeds when a synthetic test/browser URL cannot parse.
+    }
+  }
+
+  /** Called once encryption is ready. The short TTL only bridges async init or
+   * a reload before the landing event is queued; it is not a profile cache. */
+  async hydrateKlaviyoProfileBinding(): Promise<void> {
+    const now = Date.now();
+    if (!this.pendingKlaviyoProfileId) {
+      const stored = await storage.getEncrypted(AttributionManager.KLAVIYO_BINDING_KEY, null);
+      const restored = this.validKlaviyoProfileId(stored?.profileId);
+      if (restored && Number(stored?.expiresAt) > now && this.isMarketingAllowed()) {
+        this.pendingKlaviyoProfileId = restored;
+      } else {
+        storage.remove(AttributionManager.KLAVIYO_BINDING_KEY);
+      }
+    }
+    if (this.pendingKlaviyoProfileId) {
+      await storage.setEncrypted(AttributionManager.KLAVIYO_BINDING_KEY, {
+        profileId: this.pendingKlaviyoProfileId,
+        expiresAt: now + AttributionManager.KLAVIYO_BINDING_TTL_MS,
+      });
+    }
+  }
+
+  /** One-shot binding for the next queued event. */
+  consumeKlaviyoProfileBinding(): string | null {
+    if (!this.isMarketingAllowed()) this.pendingKlaviyoProfileId = null;
+    const profileId = this.pendingKlaviyoProfileId;
+    this.pendingKlaviyoProfileId = null;
+    storage.remove(AttributionManager.KLAVIYO_BINDING_KEY);
+    return profileId;
   }
 
   // TR-03: default (no predicate / no signal) = allowed → byte-identical to prior behavior.
@@ -103,6 +166,8 @@ export class AttributionManager {
       this.queryParamsCache = params;
     }
 
+    this.captureKlaviyoProfileBinding(params);
+
     const attribution: Attribution = {
       timestamp: Date.now()
     };
@@ -118,8 +183,13 @@ export class AttributionManager {
       const value = params[utm];
       if (value) {
         attribution[utm] = value; // canonical: utm_source, utm_campaign, ...
-        const key = utm.replace('utm_', '') as keyof Attribution;
-        attribution[key] = value; // alias: source, campaign, ...
+        // The five original UTM dimensions keep their legacy stripped aliases.
+        // `utm_id` is intentionally canonical-only: writing it to a generic `id`
+        // property would collide with event/customer identifiers downstream.
+        if (utm !== 'utm_id') {
+          const key = utm.replace('utm_', '') as keyof Attribution;
+          attribution[key] = value; // alias: source, campaign, ...
+        }
       }
     }
 

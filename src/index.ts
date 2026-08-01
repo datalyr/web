@@ -82,6 +82,7 @@ class Datalyr {
   private unloadHandler?: () => void;          // beforeunload + pagehide (removed in destroy)
   private visibilityHandler?: () => void;      // visibilitychange (removed in destroy)
   private shopifyConsentHandler?: EventListener; // Shopify visitorConsentCollected (9.A.1; removed in destroy)
+  private shopifyConsentUnresolvable = false; // loadFeatures failed or never yielded customerPrivacy → stop fail-closing
   private outboundDisposer?: () => void;        // tears down the CC outbound-link observer/listener
   private stripeLinksDisposer?: () => void;     // tears down the Stripe Payment Link observer/listener
   private stripeSessionWatcher?: StripeSessionWatcher; // observes Checkout Session ids (server-created sessions)
@@ -207,7 +208,14 @@ class Datalyr {
       // TR-03: gate ad-signal synthesis + shipping on LIVE marketing consent. Returns true by
       // default (no consent signal) so behavior is unchanged for the common case; false only on
       // an explicit decline (Shopify marketing:false / setConsent marketing|sale=false).
-      marketingAllowed: () => this.consentAllowsMarketing()
+      marketingAllowed: () => this.consentAllowsMarketing(),
+      // Bypass our SPA wrapper when removing the one-time profile parameter,
+      // otherwise the privacy cleanup itself would manufacture a pageview.
+      replaceVisibleUrl: (url: string) => {
+        const replace = this.originalReplaceState ?? history.replaceState;
+        replace.call(history, history.state, '', url);
+        this.lastSpaPath = window.location.pathname + window.location.search + window.location.hash;
+      },
     });
     this.queue = new EventQueue(this.config);
     this.fingerprint = new FingerprintCollector({
@@ -299,6 +307,7 @@ class Datalyr {
           // in the IdentityManager constructor. It never overwrites an id already
           // set by an explicit identify() earlier in this page load.
           await this.identity.hydrateEncryptedUserId();
+          await this.attribution.hydrateKlaviyoProfileBinding();
           this.log('Encryption initialized, user properties loaded');
         } catch (encErr) {
           console.warn('[Datalyr] Encryption unavailable (non-secure context?); continuing WITHOUT PII-at-rest encryption:', encErr);
@@ -576,6 +585,7 @@ class Datalyr {
       if (lastTouch?.campaign) referrerParams.set('utm_campaign', lastTouch.campaign);
       if (lastTouch?.content) referrerParams.set('utm_content', lastTouch.content);
       if (lastTouch?.term) referrerParams.set('utm_term', lastTouch.term);
+      if (lastTouch?.utm_id) referrerParams.set('utm_id', lastTouch.utm_id);
 
       try {
         const url = new URL(options.appStoreUrl);
@@ -1610,6 +1620,20 @@ class Datalyr {
     const attributionData = this.attribution.getAttributionData();
     assignMissing(eventData, attributionData);
 
+    // A Klaviyo landing URL may carry the profile ID as a dedicated custom
+    // parameter. Emit it once through the deterministic external-id envelope;
+    // never copy it into generic attribution or user-visible URL fields.
+    const klaviyoProfileId = this.attribution.consumeKlaviyoProfileBinding();
+    if (klaviyoProfileId) {
+      const existingExternalIds = eventData.external_ids;
+      eventData.external_ids = {
+        ...(existingExternalIds && typeof existingExternalIds === 'object' && !Array.isArray(existingExternalIds)
+          ? existingExternalIds
+          : {}),
+        klaviyo: klaviyoProfileId,
+      };
+    }
+
     // Add session metrics (SDK-authoritative — session_id et al. must not be overridden)
     const sessionMetrics = this.session.getMetrics();
     Object.assign(eventData, sessionMetrics);
@@ -1777,6 +1801,24 @@ class Datalyr {
   }
 
   /**
+   * TR-15 refinement: fail closed ONLY while the Customer Privacy API can still
+   * arrive (Shopify.loadFeatures exists and hasn't failed). A storefront with no
+   * loadFeatures (headless installs, `platform:'shopify'` on a non-Shopify page)
+   * has NO path to a consent answer — blocking there is not a pre-load window,
+   * it is zero events forever, silently. No signal possible → null (fail open);
+   * false is reserved for an explicit decline from the API.
+   */
+  private shopifyConsentPendingBlock(): boolean | null {
+    if (!this.isShopifyStorefront()) return null;
+    if (this.shopifyConsentUnresolvable) return null;
+    try {
+      return typeof (window as any).Shopify?.loadFeatures === 'function' ? false : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Shopify's analytics-consent signal: true/false when the Customer Privacy API is
    * present and answers, null when there's no signal (API absent / unexpected shape)
    * — null means "no restriction from Shopify", i.e. today's behavior.
@@ -1784,7 +1826,7 @@ class Datalyr {
   private shopifyAnalyticsConsent(): boolean | null {
     try {
       const cp = this.getShopifyCustomerPrivacy();
-      if (!cp) return this.isShopifyStorefront() ? false : null;
+      if (!cp) return this.shopifyConsentPendingBlock();
       if (typeof cp.analyticsProcessingAllowed === 'function') {
         const allowed = cp.analyticsProcessingAllowed();
         return typeof allowed === 'boolean' ? allowed : null;
@@ -1794,9 +1836,9 @@ class Datalyr {
         const allowed = cp.userCanBeTracked();
         return typeof allowed === 'boolean' ? allowed : null;
       }
-      return this.isShopifyStorefront() ? false : null;
+      return this.shopifyConsentPendingBlock();
     } catch {
-      return this.isShopifyStorefront() ? false : null;
+      return this.shopifyConsentPendingBlock();
     }
   }
 
@@ -1809,14 +1851,14 @@ class Datalyr {
     try {
       const cp = this.getShopifyCustomerPrivacy();
       if (!cp || typeof cp.marketingAllowed !== 'function') {
-        return this.isShopifyStorefront() ? false : null;
+        return this.shopifyConsentPendingBlock();
       }
       const allowed = cp.marketingAllowed();
       return typeof allowed === 'boolean'
         ? allowed
-        : (this.isShopifyStorefront() ? false : null);
+        : (this.shopifyConsentPendingBlock());
     } catch {
-      return this.isShopifyStorefront() ? false : null;
+      return this.shopifyConsentPendingBlock();
     }
   }
 
@@ -1852,10 +1894,24 @@ class Datalyr {
       // banner interaction. Guarded — a missing/changed loadFeatures must never break tracking.
       const shopify = (window as any).Shopify;
       if (shopify && typeof shopify.loadFeatures === 'function') {
-        shopify.loadFeatures([{ name: 'consent-tracking-api', version: '0.1' }], (error: any) => {
-          if (error) { this.log('Shopify loadFeatures(consent-tracking-api) failed:', error); return; }
-          try { this.onShopifyConsentChanged(); } catch (e) { this.log('Shopify post-load consent eval failed:', e); }
-        });
+        // One retry before declaring the API unreachable: a TRANSIENT loadFeatures
+        // failure must not fail-open the whole session for a previously-declined
+        // shopper. Only after the retry (or a success that still yields no
+        // customerPrivacy) is the pre-load window declared over — then the
+        // fail-closed gate releases and consent re-evaluates (a decline gates).
+        const attempt = (retriesLeft: number) => {
+          shopify.loadFeatures([{ name: 'consent-tracking-api', version: '0.1' }], (error: any) => {
+            if (error && retriesLeft > 0) {
+              this.log('Shopify loadFeatures(consent-tracking-api) failed, retrying:', error);
+              setTimeout(() => attempt(retriesLeft - 1), 1000);
+              return;
+            }
+            if (error) this.log('Shopify loadFeatures(consent-tracking-api) failed:', error);
+            if (error || !this.getShopifyCustomerPrivacy()) this.shopifyConsentUnresolvable = true;
+            try { this.onShopifyConsentChanged(); } catch (e) { this.log('Shopify post-load consent eval failed:', e); }
+          });
+        };
+        attempt(1);
       }
     } catch (error) {
       this.log('Shopify consent listener setup failed:', error);

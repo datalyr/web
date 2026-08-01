@@ -120,6 +120,7 @@ export interface EventProperties {
   utm_campaign?: string;
   utm_term?: string;
   utm_content?: string;
+  utm_id?: string;
   
   // Click IDs (captured from URL if present)
   fbclid?: string;
@@ -162,6 +163,12 @@ export interface SessionData {
 }
 
 export interface Attribution {
+  utm_source?: string | null;
+  utm_medium?: string | null;
+  utm_campaign?: string | null;
+  utm_term?: string | null;
+  utm_content?: string | null;
+  utm_id?: string | null;
   source?: string | null;
   medium?: string | null;
   campaign?: string | null;
@@ -246,6 +253,7 @@ export interface IngestEventPayload {
   utm_campaign?: string;
   utm_term?: string;
   utm_content?: string;
+  utm_id?: string;
   
   // Fingerprint
   fingerprintData?: FingerprintData;

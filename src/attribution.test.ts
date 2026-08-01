@@ -61,6 +61,30 @@ describe('AttributionManager — capture + last-touch (1.7.1 fixes)', () => {
     }
   });
 
+  test('Klaviyo profile binding is one-shot and never enters attribution or the visible URL', () => {
+    setPage('?utm_source=klaviyo&utm_id=msg_123&dl_kprofile_id=profile_01HXYZ');
+    const a = attr.captureAttribution() as any;
+
+    expect(a.utm_id).toBe('msg_123');
+    expect(a.dl_kprofile_id).toBeUndefined();
+    expect(a.landingPage).not.toContain('profile_01HXYZ');
+    expect(window.location.search).not.toContain('dl_kprofile_id');
+    expect(attr.consumeKlaviyoProfileBinding()).toBe('profile_01HXYZ');
+    expect(attr.consumeKlaviyoProfileBinding()).toBeNull();
+
+    attr.captureAttribution();
+    expect(attr.consumeKlaviyoProfileBinding()).toBeNull();
+  });
+
+  test('Klaviyo profile binding is discarded when marketing consent is denied', () => {
+    setPage('?dl_kprofile_id=profile_blocked');
+    const denied = new AttributionManager({ marketingAllowed: () => false });
+    denied.captureAttribution();
+
+    expect(window.location.search).not.toContain('dl_kprofile_id');
+    expect(denied.consumeKlaviyoProfileBinding()).toBeNull();
+  });
+
   test('Snap: ScCid is captured and normalized to the canonical sclid field', () => {
     // Snapchat appends &ScCid= (not sclid). Must land under sclid so server-side
     // attribution + the Snap CAPI sender (sc_click_id) can read it.
@@ -144,14 +168,16 @@ describe('AttributionManager — capture + last-touch (1.7.1 fixes)', () => {
   });
 
   test('FSR-13: UTM params are emitted under the canonical utm_* keys (what ingest/MVs read) AND the stripped alias', () => {
-    setPage('?utm_source=newsletter&utm_campaign=spring&utm_medium=email');
+    setPage('?utm_source=klaviyo&utm_campaign=spring&utm_medium=email&utm_id=message_01HXYZ');
     const a = attr.captureAttribution() as any;
     // canonical (ingest reads event_data.utm_source; every attribution MV keys on it)
-    expect(a.utm_source).toBe('newsletter');
+    expect(a.utm_source).toBe('klaviyo');
     expect(a.utm_campaign).toBe('spring');
     expect(a.utm_medium).toBe('email');
+    expect(a.utm_id).toBe('message_01HXYZ');
+    expect(a.id).toBeUndefined();
     // stripped alias still present (dashboard MVs + determineSource/Medium read it)
-    expect(a.source).toBe('newsletter');
+    expect(a.source).toBe('klaviyo');
     expect(a.campaign).toBe('spring');
     expect(a.medium).toBe('email');
   });

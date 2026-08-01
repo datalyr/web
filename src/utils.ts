@@ -210,7 +210,11 @@ const REDACTED_URL_PARAMS = new Set([
   'token', 'access_token', 'refresh_token', 'id_token', 'auth', 'authorization',
   'password', 'pass', 'pwd', 'secret', 'api_key', 'apikey', 'key',
   'session', 'session_id', 'sid', 'email', 'e', 'phone', 'tel',
-  'signature', 'sig', 'otp', 'reset', 'hash'
+  'signature', 'sig', 'otp', 'reset', 'hash',
+  // Klaviyo profile IDs are deterministic customer identifiers. Capture them
+  // through the dedicated identity envelope, but never retain them in URLs,
+  // referrers, first/last-touch records, or generic event properties.
+  'dl_kprofile_id'
 ]);
 
 // BATCH-2(e): `code` is CONDITIONAL, not in the always-redact set above. An OAuth

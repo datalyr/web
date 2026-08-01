@@ -32,7 +32,8 @@ const expectedVersion = pkg.version;
 const REQUIRED_MARKERS = [
   'data-workspace-id',    // the script-tag bootstrap (the 2026-05-26 outage marker)
   'checkoutChampDomains', // a current feature literal — proves it's built from current src
-  'buy.stripe.com'        // D1 Stripe Payment Link auto-decoration (1.7.4+)
+  'buy.stripe.com',       // D1 Stripe Payment Link auto-decoration (1.7.4+)
+  'dl_kprofile_id'        // Klaviyo deterministic profile binding (1.7.8+)
 ];
 
 // Default targets: the LIVE deployable bundles in the sibling
