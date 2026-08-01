@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.7.10] - 2026-07-31
+
+### Added
+- **Deterministic Klaviyo profile binding.** Klaviyo message links can carry a
+  short-lived profile identifier that is removed from the visible URL, bound
+  to the next accepted Datalyr identity event, and emitted as a namespaced
+  external identifier without leaking into ordinary attribution payloads.
+
 ## [1.7.9] - 2026-07-31
 
 ### Added
