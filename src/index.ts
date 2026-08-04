@@ -586,6 +586,11 @@ class Datalyr {
       if (lastTouch?.content) referrerParams.set('utm_content', lastTouch.content);
       if (lastTouch?.term) referrerParams.set('utm_term', lastTouch.term);
       if (lastTouch?.utm_id) referrerParams.set('utm_id', lastTouch.utm_id);
+      // The trackable-link tag rides the referrer too — the edge worker's own
+      // server-side appendPlayReferrer packs it, and ingest parses it back out
+      // of install_referrer_url. Without it, interstitial-mode Android installs
+      // lose the deterministic link tag that a bare 302 would have carried.
+      if (lastTouch?.lyr) referrerParams.set('lyr', lastTouch.lyr);
 
       try {
         const url = new URL(options.appStoreUrl);
