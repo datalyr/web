@@ -550,6 +550,21 @@ export class AttributionManager {
       }
     }
 
+    // A real signal WITHOUT its own link tag must not erase the stored one. The
+    // creator/bio-link journey is click-link-today, return-from-instagram-next-week:
+    // that organic revisit scores hasRealAttribution (external referrer) with no
+    // `lyr`, and before this carry-forward storeLastTouch below replaced the tagged
+    // touch wholesale — every later event (and the Track page's conversion count,
+    // which keys on the event's own lyr) silently lost the link. Semantics = "last
+    // non-empty lyr within the window", the same answer the server's resolveLyr
+    // argMax gives webhook conversions; a NEW ?lyr= still wins because current.lyr
+    // is already set. source/medium/campaign still update — lyr is an independent
+    // dimension (which link), not a channel claim.
+    if (hasRealAttribution && !current.lyr) {
+      const storedLyr = lastTouch?.lyr || firstTouch?.lyr;
+      if (storedLyr) current.lyr = storedLyr;
+    }
+
     // Capture advertising cookies automatically
     const adCookies = this.captureAdCookies();
 

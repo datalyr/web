@@ -75,3 +75,64 @@ describe('11-track-links P1-4 — lyr persistence', () => {
     expect(data.campaign).toBe('launch');
   });
 });
+
+describe('lyr carry-forward — repeat social visits must not clobber the link tag', () => {
+  function withReferrer(url: string) {
+    Object.defineProperty(document, 'referrer', {
+      value: url,
+      configurable: true,
+    });
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+    withUrl('');
+    withReferrer('');
+  });
+
+  afterEach(() => {
+    withReferrer('');
+  });
+
+  it('keeps the stored lyr when the visitor returns from an organic social referrer', () => {
+    // The creator-audience journey: tap the bio link today, come back from an
+    // Instagram post next week WITHOUT the link. The organic revisit is a real
+    // signal (external referrer → source 'instagram'), and storeLastTouch used
+    // to replace the tagged touch wholesale — link credit silently gone.
+    withUrl('?lyr=CREATOR-9');
+    new AttributionManager({} as never).getAttributionData();
+
+    withUrl('');
+    withReferrer('https://www.instagram.com/some.creator/');
+    const data = new AttributionManager({} as never).getAttributionData();
+    expect(data.source).toBe('instagram'); // channel still updates
+    expect(data.lyr).toBe('CREATOR-9'); // link tag survives
+
+    // And it survives into the touch that got stored, not just this event.
+    withUrl('');
+    withReferrer('');
+    const later = new AttributionManager({} as never).getAttributionData();
+    expect(later.lyr).toBe('CREATOR-9');
+  });
+
+  it('a NEW lyr on the URL still wins over the stored one', () => {
+    withUrl('?lyr=CREATOR-9');
+    new AttributionManager({} as never).getAttributionData();
+
+    withUrl('?lyr=CREATOR-22');
+    const data = new AttributionManager({} as never).getAttributionData();
+    expect(data.lyr).toBe('CREATOR-22');
+  });
+
+  it('a UTM-tagged revisit updates the channel but keeps the link tag', () => {
+    withUrl('?lyr=CREATOR-9');
+    new AttributionManager({} as never).getAttributionData();
+
+    withUrl('?utm_source=tiktok&utm_campaign=spring');
+    const data = new AttributionManager({} as never).getAttributionData();
+    expect(data.source).toBe('tiktok');
+    expect(data.campaign).toBe('spring');
+    expect(data.lyr).toBe('CREATOR-9');
+  });
+});
