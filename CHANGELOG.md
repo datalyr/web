@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.7.13] - 2026-08-25
+
+### Added
+- **Ad entity IDs are captured on the landing page.** `campaign_id`, `adset_id`, `ad_id`,
+  `placement` and `site_source_name` join the default tracked parameters, so a lander
+  reached from a tagged ad stamps them onto every event. Ad identity previously reached a
+  conversion only as NAMES via the UTMs, and a name join back to synced spend breaks
+  retroactively for a whole reporting period the moment a buyer renames a campaign
+  mid-flight, and collapses when two ads share a name. These are the web leg of the same
+  chain the edge worker records at click time and the mobile SDKs carry across the
+  web→app bridge.
+
+  They are analytics-scoped, not marketing-scoped: they identify the AD, not the person,
+  exactly like `utm_campaign`, so a declined marketing consent does not strip them.
+
 ## [1.7.10] - 2026-07-31
 
 ### Added

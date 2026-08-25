@@ -61,6 +61,19 @@ export class AttributionManager {
     'campaign',   // Generic campaign (non-UTM)
     'medium',     // Generic medium (non-UTM)
     'gad_source', // Google Ads source parameter
+    // Ad ENTITY ids. Every platform exposes id macros next to the name macros
+    // ({{campaign.id}}, __CAMPAIGN_ID__, {campaignid}); ids are the only
+    // rename-proof key back to synced spend, because a campaign renamed
+    // mid-flight breaks a name join retroactively for the whole reporting
+    // window and two ads sharing a name collapse into one row. The UTMs keep
+    // carrying names for display — these carry the join.
+    'campaign_id',
+    'adset_id',
+    'ad_id',
+    // Meta-only breakdowns. No join duty: they exist so a buyer can see WHERE
+    // an install came from without exporting a Meta-side breakdown.
+    'placement',
+    'site_source_name',
     // Datalyr-owned Klaviyo parameters. These live beside merchant UTMs so
     // account-level setup never replaces customer values.
     'dl_ksource',
@@ -615,7 +628,9 @@ export class AttributionManager {
 
     // TR-03: strip MARKETING-scoped signals (click IDs + ad cookies) from the event payload
     // when marketing consent is declined — analytics-scoped fields (utm_*, source/medium/
-    // campaign, first/last touch, _ga/_gid) stay. Live predicate → a later grant restores
+    // campaign, first/last touch, _ga/_gid) stay. Ad ENTITY ids (campaign_id/adset_id/
+    // ad_id/placement/site_source_name) stay too, deliberately: they identify the AD, not
+    // the person — exactly the same class as utm_campaign, which has always stayed. Live predicate → a later grant restores
     // them on the next event. Synthesis of _fbp/_fbc was already skipped in captureAdCookies.
     if (!this.isMarketingAllowed()) {
       const marketingKeys = [
