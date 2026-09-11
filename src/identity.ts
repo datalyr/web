@@ -15,8 +15,13 @@ export class IdentityManager {
   // send anyway; a later optIn()/consent grant persists on the next identify/reset.
   private persistNewId: boolean;
   /** WEB-26: bumps whenever the persisted identity changes, so an in-flight
-   *  encrypted write can tell it has been superseded. */
+   *  encrypted write — or read (D01) — can tell it has been superseded. */
   private piiGeneration = 0;
+  /** D01: the hydration currently awaiting an encrypted read. It is both the
+   *  dedupe handle for concurrent hydrations (one decrypt per page load) and
+   *  the handle reset()/invalidateIdentity() drop, so a read that resolves
+   *  after a logout or a consent withdrawal cannot land on the new identity. */
+  private inFlightHydration: Promise<void> | null = null;
 
   constructor(options: { persistNewId?: boolean } = {}) {
     this.persistNewId = options.persistNewId !== false;
@@ -229,6 +234,68 @@ export class IdentityManager {
    * `identify()` that has already run is fresher than anything on disk.
    */
   async hydrateEncryptedUserId(): Promise<void> {
+    // D01 — stamp this hydration with the identity generation it started under.
+    // The encrypted read is async; reset() (logout) and identify() (account
+    // change) are not. Without the stamp, a read still in flight at logout
+    // resolved AFTER reset() had cleared the user and rotated the anonymous id —
+    // and the old completion check was only `!this.userId`, which reset() itself
+    // had just made true — so the previous user's address was restored onto the
+    // BRAND NEW device id. Every later event shipped their user_id and the
+    // server asserted the fresh device belongs to them: the wrong person.
+    //
+    // Concurrent callers share ONE read: index.ts hydrates during init() and a
+    // second call (a re-init, a late caller) must not start a second decrypt of
+    // the same key — two runs racing each other can re-persist a value the
+    // other just superseded. The handle is dropped as soon as the read settles,
+    // and by reset()/invalidateIdentity() the moment the identity moves on.
+    const existing = this.inFlightHydration;
+    if (existing) return existing;
+    const generation = this.piiGeneration;
+    const run = this.runHydration(generation);
+    this.inFlightHydration = run;
+    try {
+      await run;
+    } finally {
+      if (this.inFlightHydration === run) this.inFlightHydration = null;
+    }
+  }
+
+  /**
+   * Drop the current user WITHOUT rotating the anonymous id.
+   *
+   * The privacy purges (optOut(), setConsent({ analytics: false })) delete the
+   * PII at rest, but deletion alone does not stop an encrypted read that is
+   * already in flight: it resolves afterwards, `this.userId` is still null, and
+   * the hydration restores the very address the visitor just asked us to
+   * forget — every later event then ships their user_id again. Bumping the
+   * generation is what makes that late read a no-op (isSuperseded), so those
+   * paths call this next to their `storage.remove` calls.
+   *
+   * Distinct from reset(): a logout gets a brand-new device id, an opt-out
+   * keeps the visitor's id (there is nothing left to unlink) and only forgets
+   * who they are.
+   */
+  invalidateIdentity(): void {
+    this.userId = null;
+    this.piiGeneration += 1;
+    this.inFlightHydration = null;
+  }
+
+  /** Current identity generation. Bumps on reset() and on every persisted
+   *  identity change — callers that await their own identity-derived read
+   *  (index.ts's `dl_user_traits` hydration) compare it across the await and
+   *  discard the result if it moved. (D01) */
+  getIdentityGeneration(): number {
+    return this.piiGeneration;
+  }
+
+  /** True when `generation` is no longer the live identity — i.e. reset() or an
+   *  account change happened while an async read was in flight. */
+  private isSuperseded(generation: number): boolean {
+    return generation !== this.piiGeneration;
+  }
+
+  private async runHydration(generation: number): Promise<void> {
     // WEB-26 (a) — migrate a plaintext address written by <= 1.7.7.
     //
     // persistUserId() only removes `dl_user_id` when identify() runs again, and
@@ -250,14 +317,23 @@ export class IdentityManager {
     // persistUserId() before dataEncryption has a key; that write rejects and
     // nothing is persisted. By here the key exists, so retry once.
     if (this.userId && IdentityManager.looksLikePII(this.userId)) {
+      // D01: pin the address we are retrying, and re-check the generation after
+      // the await — a reset() in that window would leave `this.userId` null and
+      // re-persist nothing, while an account change must not have OUR retry
+      // overwrite the newer user's freshly-written value.
+      const retrying = this.userId;
       const alreadyStored = await storage.getEncrypted('dl_user_id_pii', null);
-      if (!alreadyStored) this.persistUserId(this.userId);
+      if (this.isSuperseded(generation)) return;
+      if (!alreadyStored) this.persistUserId(retrying);
       return;
     }
 
     if (this.userId) return;
     try {
       const stored = await storage.getEncrypted('dl_user_id_pii', null);
+      // D01: the read is only authoritative if the identity has not moved since
+      // it started. `!this.userId` alone is NOT sufficient — logout satisfies it.
+      if (this.isSuperseded(generation)) return;
       if (typeof stored === 'string' && stored && !this.userId) {
         this.userId = stored;
       }
@@ -361,9 +437,12 @@ export class IdentityManager {
    * Clears user_id but keeps anonymous_id
    */
   reset(): void {
-    this.userId = null;
     // WEB-26: invalidate any encrypted write still in flight.
-    this.piiGeneration += 1;
+    // D01: the same bump invalidates an in-flight encrypted *read* — a hydration
+    // that resolves after this point must not restore the logged-out user onto
+    // the new anonymous id generated below. Dropping the handle as well means a
+    // late resolution cannot be mistaken for the current one.
+    this.invalidateIdentity();
     storage.remove('dl_user_id');
     // WEB-22: the encrypted PII copy must go too, or a logout would leave the
     // previous user's email at rest.

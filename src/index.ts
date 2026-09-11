@@ -301,7 +301,16 @@ class Datalyr {
         try {
           const deviceId = this.identity.getAnonymousId();
           await dataEncryption.initialize(this.config.workspaceId, deviceId);
-          this.userProperties = await storage.getEncrypted('dl_user_traits', {});
+          // D01: the traits read is async and reset() is not. A logout landing
+          // during this await used to be undone by the assignment below, so the
+          // logged-out user's traits (name, email, plan) kept riding the next —
+          // anonymous — visitor's events. Same generation stamp as the user-id
+          // hydration: drop the result if the identity moved while we waited.
+          const traitGeneration = this.identity.getIdentityGeneration();
+          const storedTraits = await storage.getEncrypted('dl_user_traits', {});
+          if (this.identity.getIdentityGeneration() === traitGeneration) {
+            this.userProperties = storedTraits;
+          }
           // WEB-22: restore a PII user id that was persisted encrypted. Must run
           // here — it needs dataEncryption to be initialized, so it cannot happen
           // in the IdentityManager constructor. It never overwrites an id already
@@ -1090,6 +1099,11 @@ class Datalyr {
     this.disposeMarketingLinkDecorators();
     // Purge PII at rest.
     this.userProperties = {};
+    // D02: deleting the keys is not enough on its own — an encrypted hydration
+    // started during init() may still be in flight, and it would restore the
+    // opted-out visitor's email a tick after we erased it. Bumping the identity
+    // generation makes that late read a no-op and drops the in-memory user id.
+    this.identity.invalidateIdentity();
     storage.remove('dl_user_traits');
     // WEB-26: remove the PLAINTEXT id as well. optOut() purged only the
     // encrypted copy, so an opted-out visitor whose email was written by an
@@ -1171,6 +1185,9 @@ class Datalyr {
       this.autoIdentify?.destroy();
       this.autoIdentify = undefined;
       this.userProperties = {};
+      // D02: see optOut() — the in-flight encrypted hydration has to be
+      // invalidated too, or it restores the user we just purged.
+      this.identity.invalidateIdentity();
       storage.remove('dl_user_traits');
       // WEB-26: see optOut() — the plaintext id must go too.
       storage.remove('dl_user_id');

@@ -22,6 +22,18 @@ import { dataEncryption } from './encryption';
 // WebCrypto is substituted so these tests exercise genuine encrypt/decrypt
 // rather than a stub — this is the first coverage the encrypted-storage path
 // has had (nothing else in the suite touches setEncrypted/getEncrypted).
+/**
+ * persistUserId() fires the encrypted write and returns; the write settles over
+ * several microtask/macrotask turns (Web Crypto is genuinely async here). A
+ * single `setTimeout(0)` was enough on an idle machine and NOT enough when the
+ * whole suite runs in parallel — the hydration test then read a key that had
+ * not landed yet (~1 run in 3). Give the chain a bounded number of turns
+ * instead of exactly one.
+ */
+async function settleEncryptedWrites(turns = 12): Promise<void> {
+  for (let i = 0; i < turns; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
 const nodeWebCrypto = require('crypto').webcrypto;
 if (!globalThis.crypto?.subtle) {
   Object.defineProperty(globalThis, 'crypto', {
@@ -63,7 +75,7 @@ describe('WEB-22 — PII user ids are not persisted in plaintext', () => {
 
     // Give the async encrypted write a turn, then assert the address is not
     // present in ANY key in the clear.
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
     expect(rawLocalStorage()).not.toContain('someone@example.com');
   });
 
@@ -81,7 +93,7 @@ describe('WEB-22 — PII user ids are not persisted in plaintext', () => {
   it('restores a PII user id on the next page load via hydration', async () => {
     const first = new IdentityManager();
     first.identify('someone@example.com', {});
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
 
     // New instance = a fresh page load. The constructor is synchronous and
     // cannot decrypt, so the id arrives via hydrateEncryptedUserId().
@@ -111,7 +123,7 @@ describe('WEB-22 — PII user ids are not persisted in plaintext', () => {
 
     const identity = new IdentityManager();
     identity.identify('legacy@example.com', {});
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
 
     expect(storage.getString('dl_user_id')).toBeNull();
     expect(rawLocalStorage()).not.toContain('legacy@example.com');
@@ -120,7 +132,7 @@ describe('WEB-22 — PII user ids are not persisted in plaintext', () => {
   it('reset() clears the encrypted copy so logout leaves nothing at rest', async () => {
     const identity = new IdentityManager();
     identity.identify('someone@example.com', {});
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
 
     identity.reset();
     expect(identity.getUserId()).toBeNull();
@@ -134,7 +146,7 @@ describe('WEB-22 — PII user ids are not persisted in plaintext', () => {
   it('hydration never overwrites an id already set this page load', async () => {
     const first = new IdentityManager();
     first.identify('old@example.com', {});
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
 
     const second = new IdentityManager();
     second.identify('new@example.com', {});
@@ -154,7 +166,7 @@ describe('WEB-22 — PII user ids are not persisted in plaintext', () => {
 
     expect(identity.getUserId()).toBe('nocrypto@example.com');
 
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
     expect(storage.getString('dl_user_id')).toBeNull();
     expect(rawLocalStorage()).not.toContain('nocrypto@example.com');
   });
@@ -174,7 +186,7 @@ describe('WEB-26 — defects found by the adversarial review', () => {
     const identity = new IdentityManager();
     identity.identify('someone@example.com', {});
     identity.reset();                      // synchronously, before the write lands
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
 
     const after = new IdentityManager();
     await after.hydrateEncryptedUserId();
@@ -190,7 +202,7 @@ describe('WEB-26 — defects found by the adversarial review', () => {
 
     const identity = new IdentityManager();
     await identity.hydrateEncryptedUserId();
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
 
     expect(storage.getString('dl_user_id')).toBeNull();
     expect(identity.getUserId()).toBe('legacy@example.com');
@@ -204,11 +216,11 @@ describe('WEB-26 — defects found by the adversarial review', () => {
     const spy = jest.spyOn(dataEncryption, 'encrypt').mockRejectedValueOnce(new Error('not initialized'));
     const identity = new IdentityManager();
     identity.identify('early@example.com', {});
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
     spy.mockRestore();
 
     await identity.hydrateEncryptedUserId();
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
 
     const restored = new IdentityManager();
     await restored.hydrateEncryptedUserId();
@@ -218,11 +230,11 @@ describe('WEB-26 — defects found by the adversarial review', () => {
   it('an opaque id clears a previous user\'s encrypted email', async () => {
     const first = new IdentityManager();
     first.identify('previous@example.com', {});
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
 
     const second = new IdentityManager();
     second.identify('usr_opaque_01', {});
-    await new Promise((r) => setTimeout(r, 0));
+    await settleEncryptedWrites();
 
     const third = new IdentityManager();
     await third.hydrateEncryptedUserId();
