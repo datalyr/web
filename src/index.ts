@@ -61,6 +61,7 @@ class Datalyr {
   private fingerprint!: FingerprintCollector;
   private cookies!: CookieStorage;
   private container?: ContainerManager;
+  private pendingCheckoutChampPixels = new Set<string>();
   private autoIdentify?: AutoIdentifyManager;
   // Keys the caller passed to init() (before built-in defaults were merged).
   // Lets the remote-config merge override built-in defaults while always
@@ -341,6 +342,7 @@ class Datalyr {
             workspaceId: this.config.workspaceId,
             endpoint: this.config.endpoint,
             debug: this.config.debug,
+            canForward: () => this.shouldTrack() && this.consentAllowsMarketing() && this.config.privacyMode !== 'strict',
             // Lazy: invoked at the moment a third-party pixel inits, AFTER the
             // /container-scripts roundtrip resolves — so a pre-init identify()
             // already updated this.identity / this.userProperties. distinctId
@@ -531,7 +533,9 @@ class Datalyr {
       // Track to third-party pixels if container is initialized.
       // Pass the shared eventId so the Meta Pixel fires with the same { eventID }.
       if (this.container) {
-        this.container.trackToPixels(eventName, properties, eventId);
+        void this.container.trackToPixels(eventName, properties, eventId).catch(() => {
+          this.log("Pixel forwarding failed; event was not retried to the pixel");
+        });
       }
 
       // Call plugin handlers
@@ -1359,8 +1363,9 @@ class Datalyr {
    * own order_id + parent_order_id server-side) needs the upsell sessionStorage
    * shape confirmed on a live funnel first — tracked as a follow-up.
    */
-  private fireCheckoutChampPurchasePixel(): void {
+  private async fireCheckoutChampPurchasePixel(): Promise<void> {
     if (typeof window === "undefined") return;
+    let pendingKey: string | undefined;
     try {
       // Needs the container (where the Meta Pixel lives). trackToPixels itself
       // no-ops unless a Meta pixel is enabled + fbq is present, so an
@@ -1389,8 +1394,9 @@ class Datalyr {
       // Pixel once per order. (Meta also dedupes by event_id over 48h, so this is
       // belt-and-suspenders against a per-page re-fire.)
       const guardKey = `__dl_cc_purchase_${orderId}`;
-      if (window.sessionStorage.getItem(guardKey)) return;
-      window.sessionStorage.setItem(guardKey, "1");
+      if (window.sessionStorage.getItem(guardKey) || this.pendingCheckoutChampPixels.has(guardKey)) return;
+      this.pendingCheckoutChampPixels.add(guardKey);
+      pendingKey = guardKey;
 
       // KEEP IN SYNC with the server formula above.
       const eventId = `checkoutchamp_purchase_${orderId}`;
@@ -1409,7 +1415,9 @@ class Datalyr {
 
       // Pixel-only co-fire. 'purchase' maps to Meta 'Purchase' in trackToPixels,
       // matching the server-side rule's platform_event_name.
-      this.container.trackToPixels("purchase", properties, eventId);
+      const delivered = await this.container.trackToPixels("purchase", properties, eventId);
+      if (!delivered.includes("meta")) return;
+      window.sessionStorage.setItem(guardKey, "1");
 
       this.log("Checkout Champ Purchase Pixel co-fired (CAPI dedup):", {
         eventId,
@@ -1419,6 +1427,8 @@ class Datalyr {
     } catch (error) {
       // Never let dedup co-fire break the page or init.
       this.log("fireCheckoutChampPurchasePixel failed:", error);
+    } finally {
+      if (pendingKey) this.pendingCheckoutChampPixels.delete(pendingKey);
     }
   }
 

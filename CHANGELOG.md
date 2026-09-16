@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.15
+
+- Recheck workspace policy before SDK-controlled Meta, Google and TikTok forwarding; withhold forwarding when that check fails or consent is withdrawn.
+- Apply managed browser-tag restrictions from workspace health filtering and destination controls. Independently installed tags and vendor scripts already running remain outside immediate revocation.
+- Send custom Meta event names with the custom-event API while preserving standard event names.
+
+
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]

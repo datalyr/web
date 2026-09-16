@@ -7,6 +7,17 @@ import { storage } from './storage';
 import { sha256Hex } from './utils';
 import type { SdkRemoteConfig } from './config';
 
+// Meta Pixel reference, verified 2026-09-15:
+// https://developers.facebook.com/documentation/meta-pixel/reference
+// PageView uses track in the base Pixel implementation as well.
+const META_STANDARD_EVENTS = new Set([
+  'PageView', 'AddPaymentInfo', 'AddToCart', 'AddToWishlist', 'CompleteRegistration',
+  'Contact', 'CustomizeProduct', 'Donate', 'FindLocation', 'InitiateCheckout',
+  'Lead', 'Purchase', 'Schedule', 'Search', 'StartTrial', 'SubmitApplication',
+  'Subscribe', 'ViewContent',
+]);
+
+
 /**
  * Identity snapshot read at the moment a third-party pixel initializes.
  * Aligns the browser Pixel's advanced matching with what CAPI sends server-side
@@ -77,6 +88,7 @@ export class ContainerManager {
   private endpoint: string;
   private debug: boolean;
   private initialized = false;
+  private disposed = false;
   private sandboxedIframes: HTMLIFrameElement[] = []; // FIXED (ISSUE-02): Track iframes for cleanup
   private iframeCleanupTimeouts = new Map<HTMLIFrameElement, number>(); // FIXED (ISSUE-02): Track cleanup timeouts
   private messageHandler: ((event: MessageEvent) => void) | null = null; // FIXED (ISSUE-02): Track message listener
@@ -85,18 +97,21 @@ export class ContainerManager {
   // resolved and after any pre-init identify() has updated user state. Reading
   // through a callback avoids snapshotting stale identity at construction.
   private getIdentity?: () => PixelIdentity | undefined;
+  private canForward?: () => boolean;
 
   constructor(options: {
     workspaceId: string;
     endpoint?: string;
     debug?: boolean;
     getIdentity?: () => PixelIdentity | undefined;
+    canForward?: () => boolean;
   }) {
     this.workspaceId = options.workspaceId;
     // Container scripts use the same endpoint as tracking (ingest)
     this.endpoint = options.endpoint || 'https://ingest.datalyr.com';
     this.debug = options.debug || false;
     this.getIdentity = options.getIdentity;
+    this.canForward = options.canForward;
 
     // Load session scripts from storage
     const sessionScripts = storage.get('dl_session_scripts', []);
@@ -125,41 +140,48 @@ export class ContainerManager {
   /**
    * Initialize container and load scripts
    */
+  private forwardingAllowed(): boolean {
+    if (this.disposed) return false;
+    try { return this.canForward ? this.canForward() === true : true; }
+    catch { return false; }
+  }
+
+  private async readConfiguration(purpose?: 'pixel_forwarding'): Promise<any> {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Bound headers AND body even when a fetch wrapper ignores AbortSignal.
+    // Late responses cannot resume callers after the deadline has rejected.
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error('Container configuration deadline exceeded'));
+        controller?.abort();
+      }, 3000);
+    });
+    try {
+      return await Promise.race([
+        (async () => {
+          const response = await fetch(`${this.endpoint}/container-scripts`, {
+            method: 'POST', cache: 'no-store',
+            headers: { 'Content-Type': 'application/json', 'X-Container-Version': '1.0' },
+            body: JSON.stringify({ workspaceId: this.workspaceId, ...(purpose ? { purpose } : {}) }),
+            signal: controller?.signal,
+          });
+          if (!response.ok) throw new Error(`Failed to fetch container scripts: ${response.status}`);
+          return await response.json();
+        })(),
+        deadline,
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
   async init(): Promise<void> {
-    if (this.initialized) return;
+    if (this.initialized || !this.forwardingAllowed()) return;
     
     try {
-      // FSR-52: time-box the /container-scripts fetch. init() is awaited BEFORE the
-      // initial page() fires, and this fetch had no timeout — a slow/stalled ingest
-      // worker (the fleet has a documented history of worker-side stalls) delayed or lost
-      // the landing pageview indefinitely. Abort after 3s so page() still fires; the catch
-      // below leaves pixels/remoteConfig unset (the SDK proceeds with first-party tracking
-      // and defaults). AbortSignal.timeout isn't on every supported browser, so use a
-      // manual controller.
-      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timeoutId = controller ? setTimeout(() => controller.abort(), 3000) : null;
-      let response: Response;
-      try {
-        response = await fetch(`${this.endpoint}/container-scripts`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Container-Version': '1.0'
-          },
-          body: JSON.stringify({
-            workspaceId: this.workspaceId
-          }),
-          signal: controller ? controller.signal : undefined
-        });
-      } finally {
-        if (timeoutId) clearTimeout(timeoutId);
-      }
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch container scripts: ${response.status}`);
-      }
-
-      const data = await response.json();
+      const data = await this.readConfiguration();
+      if (!this.forwardingAllowed()) return;
       
       // Store scripts, pixels, and the SDK runtime config envelope.
       this.scripts = data.scripts || [];
@@ -173,6 +195,7 @@ export class ContainerManager {
         await this.initializePixels();
       }
       
+      if (!this.forwardingAllowed()) return;
       // Load scripts based on trigger
       this.loadScriptsByTrigger('page_load');
       
@@ -210,6 +233,7 @@ export class ContainerManager {
    * Load scripts by trigger type
    */
   private loadScriptsByTrigger(trigger: string): void {
+    if (!this.forwardingAllowed()) return;
     const scriptsToLoad = this.scripts.filter(script => 
       script.enabled && 
       script.trigger === trigger &&
@@ -433,6 +457,8 @@ export class ContainerManager {
    * FIXED (ISSUE-02): Called on SDK destroy to prevent memory leaks
    */
   public cleanupAllIframes(): void {
+    // Cancel pending policy decisions as well as sandboxed scripts.
+    this.disposed = true;
     // Clean up all iframes
     const iframes = [...this.sandboxedIframes]; // Copy array since we're modifying it
     iframes.forEach(iframe => this.cleanupIframe(iframe));
@@ -504,13 +530,14 @@ export class ContainerManager {
 
   /** Initialize configured third-party pixels in the merchant's page context. */
   private async initializePixels(): Promise<void> {
-    if (!this.pixels) return;
+    if (!this.pixels || !this.forwardingAllowed()) return;
 
     // Initialize Meta Pixel
     if (this.pixels.meta?.enabled && this.pixels.meta.pixel_id) {
       await this.initializeMetaPixel(this.pixels.meta);
     }
 
+    if (!this.forwardingAllowed()) return;
     // Initialize Google Tag
     if (this.pixels.google?.enabled && this.pixels.google.tag_id) {
       this.initializeGoogleTag(this.pixels.google);
@@ -583,6 +610,24 @@ export class ContainerManager {
    */
   private async initializeMetaPixel(config: any): Promise<void> {
     try {
+      // Build advanced-matching object. Skipped silently if Web Crypto isn't
+      // available — Pixel still initializes, just without advanced matching.
+      // Anonymous_id is stable across the session and always present, so we
+      // never need to re-init on identify(): CAPI carries both anonymous_id
+      // AND user_id in its external_id[] array, so either side matching one
+      // hash slot is enough to dedupe.
+      const advancedMatching: Record<string, string> = {};
+      const identity = this.getIdentity?.();
+      if (identity?.externalId) {
+        const hash = await sha256Hex(String(identity.externalId));
+        if (hash) advancedMatching.external_id = hash;
+      }
+      if (identity?.email) {
+        const hash = await sha256Hex(String(identity.email).toLowerCase().trim());
+        if (hash) advancedMatching.em = hash;
+      }
+
+      if (!this.forwardingAllowed()) return;
       // Load Meta Pixel script
       (function(f: any, b: any, e: any, v: any, n?: any, t?: any, s?: any) {
         if (f.fbq) return;
@@ -600,23 +645,6 @@ export class ContainerManager {
         s = b.getElementsByTagName(e)[0];
         s.parentNode.insertBefore(t, s);
       })(window, document, 'script', 'https://connect.facebook.net/en_US/fbevents.js');
-
-      // Build advanced-matching object. Skipped silently if Web Crypto isn't
-      // available — Pixel still initializes, just without advanced matching.
-      // Anonymous_id is stable across the session and always present, so we
-      // never need to re-init on identify(): CAPI carries both anonymous_id
-      // AND user_id in its external_id[] array, so either side matching one
-      // hash slot is enough to dedupe.
-      const advancedMatching: Record<string, string> = {};
-      const identity = this.getIdentity?.();
-      if (identity?.externalId) {
-        const hash = await sha256Hex(String(identity.externalId));
-        if (hash) advancedMatching.external_id = hash;
-      }
-      if (identity?.email) {
-        const hash = await sha256Hex(String(identity.email).toLowerCase().trim());
-        if (hash) advancedMatching.em = hash;
-      }
 
       // Initialize pixel only — do NOT fire PageView here. The SDK's own pageview
       // tracking (track('pageview')) routes through trackToPixels and fires a single
@@ -721,18 +749,41 @@ export class ContainerManager {
   /**
    * Track event to all initialized pixels
    */
-  trackToPixels(eventName: string, properties: any = {}, eventId?: string): void {
-    // Datalyr-internal events ($identify, $group, $alias, $auto_identify,
-    // $app_download_click, …) are not conversions — never forward them to ad
-    // pixels. (Previously they fired as noise custom events with the $ stripped.)
-    if (eventName.startsWith('$')) return;
-
-    // Sanitize inputs to prevent XSS
+  async trackToPixels(eventName: string, properties: any = {}, eventId?: string): Promise<string[]> {
+    if (!this.forwardingAllowed() || eventName.startsWith('$')) return [];
+    const initialized = this.pixels;
+    if (!initialized) return [];
+    // Snapshot before awaiting: caller mutations must not change the queued event.
     const sanitizedEventName = this.sanitizeEventName(eventName);
     const sanitizedProperties = this.sanitizeProperties(properties);
+    // Authorization is request-scoped, never a positive cached decision. Do not
+    // execute newly returned scripts or initialize a new destination here.
+    const pixels: PixelConfig = { whop: initialized.whop };
+    const platforms = ['meta', 'google', 'tiktok'] as const;
+    if (platforms.some(platform => initialized[platform]?.enabled === true)) {
+      try {
+        const data = await this.readConfiguration('pixel_forwarding');
+        if (!this.forwardingAllowed()) return [];
+        for (const platform of platforms) {
+          const prior = initialized[platform];
+          const current = data?.pixels?.[platform];
+          const id = platform === 'google' ? 'tag_id' : 'pixel_id';
+          if (prior?.enabled === true && current?.enabled === true
+            && typeof current[id] === 'string' && current[id].length > 0
+            && current[id] === (prior as any)[id]) {
+            (pixels as any)[platform] = current;
+          }
+        }
+      } catch {
+        this.log('Pixel forwarding withheld: current policy unavailable');
+        return [];
+      }
+    }
+    if (!this.forwardingAllowed()) return [];
+    const sent: string[] = [];
 
     // Track to Meta Pixel
-    if (this.pixels?.meta?.enabled && (window as any).fbq) {
+    if (pixels?.meta?.enabled && (window as any).fbq) {
       try {
         // Map our event name to Meta's standard event vocabulary so the browser
         // Pixel fires e.g. "Purchase", not "purchase". This MUST match the
@@ -759,34 +810,38 @@ export class ContainerManager {
         // /container-scripts, keyed by the exact trigger event name) — this is what
         // the server-side CAPI sends, so it guarantees event_name dedup alignment.
         // Fall back to the static default map, then the sanitized raw name.
-        const ruleEventMap = (this.pixels?.meta as any)?.event_mappings as Record<string, string> | undefined;
+        const ruleEventMap = (pixels?.meta as any)?.event_mappings as Record<string, string> | undefined;
         const metaEvent = ruleEventMap?.[eventName]
           || metaEventMap[String(eventName).toLowerCase()]
           || sanitizedEventName;
 
-        // Pass the shared eventID so this Pixel event dedupes against the
-        // server-side CAPI event carrying the same event_id.
+        // Custom names use Meta's custom-event API. This selects the correct
+        // transport call; it does not establish eligibility or rename the event.
+        const method = META_STANDARD_EVENTS.has(metaEvent) ? 'track' : 'trackCustom';
+        // Keep the same event name and ID as CAPI for deduplication.
         if (eventId) {
-          (window as any).fbq('track', metaEvent, sanitizedProperties, { eventID: eventId });
+          (window as any).fbq(method, metaEvent, sanitizedProperties, { eventID: eventId });
         } else {
-          (window as any).fbq('track', metaEvent, sanitizedProperties);
+          (window as any).fbq(method, metaEvent, sanitizedProperties);
         }
+        sent.push('meta');
       } catch (error) {
         this.log('Error tracking Meta Pixel event:', error);
       }
     }
 
     // Track to Google Tag
-    if (this.pixels?.google?.enabled && (window as any).gtag) {
+    if (pixels?.google?.enabled && (window as any).gtag) {
       try {
         (window as any).gtag('event', sanitizedEventName, sanitizedProperties);
+        sent.push('google');
       } catch (error) {
         this.log('Error tracking Google Tag event:', error);
       }
     }
 
     // Track to TikTok Pixel
-    if (this.pixels?.tiktok?.enabled && (window as any).ttq) {
+    if (pixels?.tiktok?.enabled && (window as any).ttq) {
       try {
         // Map our event names to TikTok's standard vocabulary. BUG FIX (TikTok-dead):
         // this map was keyed on Meta-standard names ('Purchase') but looked up with the
@@ -809,11 +864,12 @@ export class ContainerManager {
           complete_registration: 'CompleteRegistration', sign_up: 'CompleteRegistration', signup: 'CompleteRegistration',
           subscribe: 'Subscribe', subscription_created: 'Subscribe',
         };
-        const tiktokRuleMap = (this.pixels?.tiktok as any)?.event_mappings as Record<string, string> | undefined;
+        const tiktokRuleMap = (pixels?.tiktok as any)?.event_mappings as Record<string, string> | undefined;
         const tiktokEvent = tiktokRuleMap?.[eventName]
           || tiktokEventMap[String(eventName).toLowerCase()]
           || sanitizedEventName;
         (window as any).ttq.track(tiktokEvent, sanitizedProperties);
+        sent.push('tiktok');
       } catch (error) {
         this.log('Error tracking TikTok Pixel event:', error);
       }
@@ -822,22 +878,25 @@ export class ContainerManager {
     // Whop records checkout and payment events server-side. Datalyr only sends
     // page views here, including SPA navigations, so purchases are never doubled.
     if (
-      this.pixels?.whop?.enabled &&
+      pixels?.whop?.enabled &&
       (window as any).whop &&
       (eventName === 'pageview' || eventName === 'page_view')
     ) {
       try {
         (window as any).whop.track('page');
+        sent.push('whop');
       } catch (error) {
         this.log('Error tracking Whop Pixel page:', error);
       }
     }
+    return sent;
   }
 
   /**
    * Manually trigger a custom script
    */
   triggerCustomScript(scriptId: string): void {
+    if (!this.forwardingAllowed()) return;
     const script = this.scripts.find(s => s.id === scriptId && s.trigger === 'custom');
     if (script && this.shouldLoadScript(script)) {
       this.loadScript(script);

@@ -163,3 +163,33 @@ describe('D02 — optOut() / setConsent() invalidate the in-flight identity', ()
     instance.destroy();
   });
 });
+
+describe('Checkout Champ pixel guard follows actual SDK forwarding', () => {
+  afterEach(() => { window.sessionStorage.clear(); });
+  test('a withheld pixel can retry and a successful Meta call records the order', async () => {
+    const instance: any = loadSdk().createDatalyrInstance();
+    const forward = jest.fn().mockResolvedValueOnce([]).mockResolvedValue(['meta']);
+    instance.container = { hasMetaPixel: () => true, trackToPixels: forward };
+    window.sessionStorage.setItem('orderData', JSON.stringify({ orderId: 'order-policy', totalAmount: 12, currency: 'USD' }));
+    await instance.fireCheckoutChampPurchasePixel();
+    expect(window.sessionStorage.getItem('__dl_cc_purchase_order-policy')).toBeNull();
+    await instance.fireCheckoutChampPurchasePixel();
+    expect(window.sessionStorage.getItem('__dl_cc_purchase_order-policy')).toBe('1');
+    await instance.fireCheckoutChampPurchasePixel();
+    expect(forward).toHaveBeenCalledTimes(2);
+    expect(forward).toHaveBeenLastCalledWith('purchase', expect.objectContaining({ value: 12, currency: 'USD' }), 'checkoutchamp_purchase_order-policy');
+  });
+  test('overlapping calls do not forward the same order twice', async () => {
+    const instance: any = loadSdk().createDatalyrInstance();
+    let release!: (sent: string[]) => void;
+    const forward = jest.fn(() => new Promise(resolve => { release = resolve; }));
+    instance.container = { hasMetaPixel: () => true, trackToPixels: forward };
+    window.sessionStorage.setItem('orderData', JSON.stringify({ orderId: 'order-race' }));
+    const first = instance.fireCheckoutChampPurchasePixel();
+    await instance.fireCheckoutChampPurchasePixel();
+    expect(forward).toHaveBeenCalledTimes(1);
+    release(['meta']);
+    await first;
+    expect(window.sessionStorage.getItem('__dl_cc_purchase_order-race')).toBe('1');
+  });
+});
