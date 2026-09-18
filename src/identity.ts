@@ -83,17 +83,24 @@ export class IdentityManager {
   }
 
   /**
-   * In a REAL browser: read the `_dl_h` handoff token, strip it from the address bar, and
-   * return the visitor id it carries when it is ours and still fresh (else null). Inside an
-   * in-app browser the token in the URL is the one WE maintain for the next hop, so it is
-   * neither consumed nor adopted there (a webview -> webview share must not merge).
+   * Read the `_dl_h` handoff token and ALWAYS strip it from the address bar. Returns the
+   * visitor id it carries only in a real browser, when it is ours and still fresh. A webview
+   * never adopts (a webview -> webview share must not merge) and never forwards.
    */
   private consumeInAppHandoff(): string | null {
     try {
-      if (typeof window === 'undefined' || isInAppBrowser()) return null;
+      if (typeof window === 'undefined') return null;
       const raw = new URLSearchParams(window.location.search).get(IN_APP_HANDOFF_PARAM);
       if (raw === null) return null;
+      // Always strip. In a webview the token is not ours to adopt AND not ours to forward:
+      // if the writer cannot run here (consent unresolved, feature off) a stranger's token
+      // would otherwise sit in the address bar and ride the next "Open in Safari" or share.
+      // The writer re-adds OUR token right after, when it is allowed to.
       this.stripUrlParam(IN_APP_HANDOFF_PARAM);
+      if (isInAppBrowser()) return null;
+      // An opted-out / GPC / DNT visitor sends nothing, so adopting buys nothing — and a
+      // later consent grant would persist whatever id happened to be in the URL at load.
+      if (!this.persistNewId) return null;
       return parseInAppHandoff(raw, Date.now());
     } catch {
       return null;

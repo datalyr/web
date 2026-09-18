@@ -7,7 +7,7 @@
 import { IdentityManager } from './identity';
 import {
   IN_APP_HANDOFF_MAX_AGE_MS, IN_APP_HANDOFF_PARAM,
-  encodeInAppHandoff, isInAppBrowser, parseInAppHandoff,
+  encodeInAppHandoff, isHandoffSourceApp, isInAppBrowser, parseInAppHandoff,
 } from './in-app-handoff';
 import { redactUrl } from './utils';
 
@@ -62,6 +62,15 @@ describe('in-app handoff token', () => {
     expect(isInAppBrowser('')).toBe(false);
   });
 
+  test('the window is two minutes, and only apps that offer "Open in browser" ever write a token', () => {
+    expect(IN_APP_HANDOFF_MAX_AGE_MS).toBe(2 * 60 * 1000);
+    expect(isHandoffSourceApp(INSTAGRAM)).toBe(true);
+    const genericWebview = 'Mozilla/5.0 (Linux; Android 14; SM-S918B; wv) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36';
+    expect(isInAppBrowser(genericWebview)).toBe(true);      // never adopts / forwards
+    expect(isHandoffSourceApp(genericWebview)).toBe(false); // but never writes either
+    expect(isHandoffSourceApp(SAFARI)).toBe(false);
+  });
+
   test('the token never reaches a tracked URL', () => {
     const token = encodeInAppHandoff(VISITOR, NOW)!;
     const out = redactUrl(`https://shop.example/p?gclid=abc&${IN_APP_HANDOFF_PARAM}=${token}&utm_source=ig`);
@@ -110,12 +119,25 @@ describe('IdentityManager — _dl_h adoption', () => {
     expect(new IdentityManager().getAnonymousId()).toMatch(/^anon_/);
   });
 
-  test('another webview never adopts, and leaves the token it maintains alone', () => {
+  test('a webview never adopts AND never forwards a token it did not write', () => {
+    // A shares a link; B opens it inside Instagram where the writer cannot run (consent
+    // unresolved / feature off). If A's token stayed in B's address bar, B's "Open in
+    // Safari" would make Safari adopt A — the FSR-50 merge by the side door.
     setUserAgent(INSTAGRAM);
-    const token = encodeInAppHandoff(VISITOR, Date.now());
-    setUrl(`?${IN_APP_HANDOFF_PARAM}=${token}`);
-    const identity = new IdentityManager();
+    setUrl(`?${IN_APP_HANDOFF_PARAM}=${encodeInAppHandoff(VISITOR, Date.now())}&keep=1`);
+    const identity = new IdentityManager({ persistNewId: false });
     expect(identity.getAnonymousId()).not.toBe(VISITOR);
-    expect(window.location.search).toContain(`${IN_APP_HANDOFF_PARAM}=`);
+    expect(window.location.search).not.toContain(IN_APP_HANDOFF_PARAM);
+    expect(window.location.search).toContain('keep=1');
+  });
+
+  test('an opted-out / GPC visitor never adopts, so a later consent grant cannot persist a stranger', () => {
+    setUrl(`?${IN_APP_HANDOFF_PARAM}=${encodeInAppHandoff(VISITOR, Date.now())}`);
+    const identity = new IdentityManager({ persistNewId: false });
+    expect(identity.getAnonymousId()).not.toBe(VISITOR);
+    expect(identity.adoptedFromInAppHandoff).toBe(false);
+    identity.enablePersistence();
+    expect(new IdentityManager().getAnonymousId()).not.toBe(VISITOR);
+    expect(window.location.search).not.toContain(IN_APP_HANDOFF_PARAM);
   });
 });
