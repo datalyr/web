@@ -5,8 +5,11 @@
 
 import { storage, cookies } from './storage';
 import { generateUUID, getRootDomain } from './utils';
+import { IN_APP_HANDOFF_PARAM, isInAppBrowser, parseInAppHandoff } from './in-app-handoff';
 
 export class IdentityManager {
+  /** True when this browser continued an in-app browser's visitor (measurement only). */
+  adoptedFromInAppHandoff = false;
   private anonymousId: string;
   private userId: string | null = null;
   private sessionId: string | null = null;
@@ -38,6 +41,9 @@ export class IdentityManager {
     //    silently overwritten by a ?_dl_vid in the URL, or shared links would merge
     //    unrelated visitors (identity takeover). The CC bridge (restoreFromURL) writes
     //    this cookie BEFORE us, so the storefront visitor_id still wins there.
+    // Read (and, in a real browser, remove) an in-app handoff token first, so it never
+    // lingers in the address bar whichever branch below wins.
+    const handedOffId = this.consumeInAppHandoff();
     let anonymousId = cookies.get('__dl_visitor_id');
     if (anonymousId) {
       storage.set('dl_anonymous_id', anonymousId); // sync to localStorage
@@ -62,10 +68,36 @@ export class IdentityManager {
       console.warn('[Datalyr] Failed to parse URL for _dl_vid:', e);
     }
 
+    // 2b. A fresh in-app handoff: this browser has no visitor yet and was opened from an
+    // in-app webview on this device moments ago — continue as that visitor.
+    if (handedOffId) {
+      this.adoptedFromInAppHandoff = true;
+      this.persistAnonymousId(handedOffId);
+      return handedOffId;
+    }
+
     // 3. Generate a new ID (persisted unless tracking is disallowed at init — FSR-107).
     anonymousId = `anon_${generateUUID()}`;
     this.persistAnonymousId(anonymousId);
     return anonymousId;
+  }
+
+  /**
+   * In a REAL browser: read the `_dl_h` handoff token, strip it from the address bar, and
+   * return the visitor id it carries when it is ours and still fresh (else null). Inside an
+   * in-app browser the token in the URL is the one WE maintain for the next hop, so it is
+   * neither consumed nor adopted there (a webview -> webview share must not merge).
+   */
+  private consumeInAppHandoff(): string | null {
+    try {
+      if (typeof window === 'undefined' || isInAppBrowser()) return null;
+      const raw = new URLSearchParams(window.location.search).get(IN_APP_HANDOFF_PARAM);
+      if (raw === null) return null;
+      this.stripUrlParam(IN_APP_HANDOFF_PARAM);
+      return parseInAppHandoff(raw, Date.now());
+    } catch {
+      return null;
+    }
   }
 
   /**

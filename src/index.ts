@@ -14,6 +14,7 @@ import { dataEncryption } from './encryption'; // SEC-03 Fix
 import { AutoIdentifyManager } from './auto-identify';
 import { StripeSessionWatcher } from './stripe-session';
 import { applyRemoteConfig } from './config';
+import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isInAppBrowser } from './in-app-handoff';
 import {
   generateUUID,
   sanitizeEventData,
@@ -87,6 +88,8 @@ class Datalyr {
   private outboundDisposer?: () => void;        // tears down the CC outbound-link observer/listener
   private stripeLinksDisposer?: () => void;     // tears down the Stripe Payment Link observer/listener
   private stripeSessionWatcher?: StripeSessionWatcher; // observes Checkout Session ids (server-created sessions)
+  private inAppHandoffTimer: ReturnType<typeof setInterval> | null = null;
+  private inAppHandoffWrite: (() => void) | null = null;
   private lastSpaPath: string | null = null;    // dedups SPA pageviews (replaceState-on-mount double-fire)
   // Shopify loads Customer Privacy asynchronously. Keep the initial pageview
   // pending until initialization is complete and analytics consent is known,
@@ -472,6 +475,16 @@ class Datalyr {
         // decorator: an opted-out visitor's id is never paired with a checkout.
         if (this.config.stripeCheckoutSessions !== false && this.shouldTrack()) {
           this.startStripeSessionCapture();
+        }
+
+        // In-app browser -> real browser handoff (see in-app-handoff.ts). Same
+        // shouldTrack() gate: an opted-out visitor's id never goes into a URL.
+        if (this.config.inAppHandoff !== false && this.shouldTrack()) {
+          this.startInAppHandoff();
+        }
+        if (this.identity.adoptedFromInAppHandoff) {
+          // Measurement only: how often the handoff actually recovers a visitor.
+          this.track('$in_app_handoff', { adopted: true });
         }
 
         // Track the initial page view after encryption is ready. On Shopify the
@@ -1475,6 +1488,37 @@ class Datalyr {
    * withdraw between page load and checkout, and this pairing is exactly the
    * kind of identity link that must stop when they do.
    */
+  /**
+   * Keep a fresh handoff token in the address bar while running inside an in-app browser.
+   * Uses the ORIGINAL replaceState (not our SPA wrapper) and re-seeds lastSpaPath, so the
+   * rewrite can never manufacture a pageview. Re-checks shouldTrack() on every write: a
+   * consent withdrawal mid-session removes the token instead of refreshing it.
+   */
+  private startInAppHandoff(): void {
+    if (this.inAppHandoffTimer || typeof window === 'undefined' || !isInAppBrowser()) return;
+    const write = (): void => {
+      try {
+        const replace = this.originalReplaceState ?? window.history?.replaceState;
+        if (typeof replace !== 'function') return;
+        const url = new URL(window.location.href);
+        const token = this.shouldTrack() && this.config.inAppHandoff !== false
+          ? encodeInAppHandoff(this.identity.getAnonymousId(), Date.now())
+          : null;
+        if (token) url.searchParams.set(IN_APP_HANDOFF_PARAM, token);
+        else url.searchParams.delete(IN_APP_HANDOFF_PARAM);
+        const next = url.pathname + url.search + url.hash;
+        if (next === window.location.pathname + window.location.search + window.location.hash) return;
+        replace.call(window.history, window.history.state, '', next);
+        this.lastSpaPath = window.location.pathname + window.location.search + window.location.hash;
+      } catch {
+        // best-effort — a URL rewrite must never break the page or tracking
+      }
+    };
+    write();
+    this.inAppHandoffTimer = setInterval(write, IN_APP_HANDOFF_REFRESH_MS);
+    this.inAppHandoffWrite = write;
+  }
+
   private startStripeSessionCapture(): void {
     if (this.stripeSessionWatcher) return;
     const watcher = new StripeSessionWatcher();
@@ -2051,6 +2095,8 @@ class Datalyr {
     this.lastSpaPath = path;
     this.attribution.clearCache();
     this.page();
+    // A router navigation replaces the URL and drops the in-app handoff token.
+    this.inAppHandoffWrite?.();
   }
 
   /**
@@ -2183,6 +2229,11 @@ class Datalyr {
     }
     if (this.originalReplaceState) {
       history.replaceState = this.originalReplaceState;
+    }
+    if (this.inAppHandoffTimer) {
+      clearInterval(this.inAppHandoffTimer);
+      this.inAppHandoffTimer = null;
+      this.inAppHandoffWrite = null;
     }
 
     // Remove event listeners (Issue #15)
