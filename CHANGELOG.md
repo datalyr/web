@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.7.16
+
+- In-app browser handoff. Inside an Instagram / Facebook / TikTok in-app browser the SDK keeps a short-lived `_dl_h=<visitor>.<time>` token in the address bar, so tapping the app's "Open in Safari/Chrome" continues as the same visitor instead of starting a new one. The token is written only inside apps that offer "Open in browser", expires after 2 minutes, is adopted only by a real browser that has no visitor yet (and never by an opted-out one); a webview always strips an inbound token so it can never forward a stranger's, accepts only ids the SDK minted, is removed from the address bar on arrival and never appears in a tracked URL. On by default; set `inAppHandoff: false` to disable. Follows consent changes immediately (grant starts it, withdrawal/opt-out/reset rewrite the URL at once). The first pageview of a continued visitor carries `in_app_handoff: true`.
+
 ## 1.7.15
 
 - Recheck workspace policy before SDK-controlled Meta, Google and TikTok forwarding; withhold forwarding when that check fails or consent is withdrawn.

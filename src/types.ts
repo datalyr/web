@@ -90,6 +90,13 @@ export interface DatalyrConfig {
   //   once the session exists. Scans for a Stripe token only — never for PII —
   //   which is why it defaults ON where autoIdentifyAPI does not.
   stripeCheckoutSessions?: boolean;
+  // - inAppHandoff: default ON. Inside an Instagram/Facebook/TikTok in-app browser the
+  //   SDK keeps a short-lived `_dl_h=<visitor>.<time>` token in the address bar, so
+  //   "Open in Safari/Chrome" continues as the same visitor instead of a new one. It
+  //   carries the pseudonymous visitor id only, expires in 10 minutes, is adopted only
+  //   by a browser with no visitor yet, and never reaches a tracked URL. Set false if
+  //   your own scripts cannot tolerate an unexpected query parameter.
+  inAppHandoff?: boolean;
   stripePaymentLinks?: boolean;
   stripeLinkDomains?: string[];
 

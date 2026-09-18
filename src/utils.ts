@@ -1,3 +1,4 @@
+import { IN_APP_HANDOFF_PARAM } from './in-app-handoff';
 /**
  * Utility Functions
  */
@@ -251,6 +252,13 @@ function redactKvPairs(s: string): { out: string; mutated: boolean } {
   // Snapshot the keys first — set() collapses duplicate keys mid-iteration.
   for (const key of Array.from(new Set(params.keys()))) {
     const lower = key.toLowerCase();
+    // The in-app handoff token is ours, carries a visitor id, and is not part of the
+    // merchant's URL: drop it entirely so page URLs / landing pages stay clean.
+    if (lower === IN_APP_HANDOFF_PARAM) {
+      params.delete(key);
+      mutated = true;
+      continue;
+    }
     const sensitive = lower === 'code'
       ? hasOAuthMarker
       : REDACTED_URL_PARAMS.has(lower);

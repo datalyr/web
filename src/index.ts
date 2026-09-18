@@ -14,6 +14,7 @@ import { dataEncryption } from './encryption'; // SEC-03 Fix
 import { AutoIdentifyManager } from './auto-identify';
 import { StripeSessionWatcher } from './stripe-session';
 import { applyRemoteConfig } from './config';
+import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
 import {
   generateUUID,
   sanitizeEventData,
@@ -87,6 +88,9 @@ class Datalyr {
   private outboundDisposer?: () => void;        // tears down the CC outbound-link observer/listener
   private stripeLinksDisposer?: () => void;     // tears down the Stripe Payment Link observer/listener
   private stripeSessionWatcher?: StripeSessionWatcher; // observes Checkout Session ids (server-created sessions)
+  private inAppHandoffTimer: ReturnType<typeof setInterval> | null = null;
+  private inAppHandoffWrite: (() => void) | null = null;
+  private inAppHandoffReported = false;
   private lastSpaPath: string | null = null;    // dedups SPA pageviews (replaceState-on-mount double-fire)
   // Shopify loads Customer Privacy asynchronously. Keep the initial pageview
   // pending until initialization is complete and analytics consent is known,
@@ -474,6 +478,10 @@ class Datalyr {
           this.startStripeSessionCapture();
         }
 
+        // In-app browser -> real browser handoff (see in-app-handoff.ts). Same
+        // shouldTrack() gate: an opted-out visitor's id never goes into a URL.
+        this.syncInAppHandoff();
+
         // Track the initial page view after encryption is ready. On Shopify the
         // Customer Privacy API can still be loading, so retain one pending
         // pageview and release it from onShopifyConsentChanged() once allowed.
@@ -813,6 +821,14 @@ class Datalyr {
     const referrerData = getReferrerData();
     Object.assign(pageData, referrerData);
 
+    // Measurement only: mark the FIRST pageview of a browser that continued an in-app
+    // visitor. A property on the landing pageview (not a separate event) so it shares that
+    // event's consent gating and retry, and never opens a session with a synthetic event.
+    if (this.identity.adoptedFromInAppHandoff && !this.inAppHandoffReported) {
+      this.inAppHandoffReported = true;
+      (pageData as Record<string, unknown>).in_app_handoff = true;
+    }
+
     // Add performance metrics if enabled
     if (this.config.enablePerformanceTracking) {
       const metrics = this.getPerformanceMetrics();
@@ -903,6 +919,7 @@ class Datalyr {
       return;
     }
     this.identity.reset();
+    this.syncInAppHandoff(); // the URL must not keep the pre-reset visitor id
     this.userProperties = {};
     // Clear super properties too — they'd otherwise keep attaching the previous user's
     // values to the next user's events (cross-user contamination on shared devices).
@@ -1085,6 +1102,7 @@ class Datalyr {
       return;
     }
     this.optedOut = true;
+    this.syncInAppHandoff(); // remove the visitor id from the address bar now, not in 30s
     this.cookies.set('__dl_opt_out', 'true', this.config.cookieExpires);
     // Stop the queue from sending OR draining anything persisted before opt-out, and
     // purge what's already buffered (the periodic/on-load drain has no other gate).
@@ -1144,6 +1162,7 @@ class Datalyr {
     this.queue.setEnabled(this.shouldTrack());
     // TR-15 (P3): opt-in → persist the in-memory anon id now (see onShopifyConsentChanged).
     if (this.shouldTrack()) this.identity.enablePersistence();
+    this.syncInAppHandoff();
     this.log('User opted in');
   }
 
@@ -1207,6 +1226,7 @@ class Datalyr {
       // TR-15 (P3): grant → persist the in-memory anon id now (see onShopifyConsentChanged).
       this.identity.enablePersistence();
     }
+    this.syncInAppHandoff(); // grant starts the writer; withdrawal removes the token now
 
     // Marketing / "do not sell" withdrawal: stop FEEDING the third-party pixels and
     // prevent them from being initialized on the next page load. NOTE: an
@@ -1475,6 +1495,52 @@ class Datalyr {
    * withdraw between page load and checkout, and this pairing is exactly the
    * kind of identity link that must stop when they do.
    */
+  /**
+   * Keep a fresh handoff token in the address bar while running inside an in-app browser.
+   * Uses the ORIGINAL replaceState (not our SPA wrapper) and re-seeds lastSpaPath, so the
+   * rewrite can never manufacture a pageview. Re-checks shouldTrack() on every write: a
+   * consent withdrawal mid-session removes the token instead of refreshing it.
+   */
+  /**
+   * Bring the handoff in line with the CURRENT consent state. Called at init and from every
+   * path that changes whether tracking is allowed (optIn/optOut/setConsent/Shopify consent/
+   * reset): a mid-session grant starts the writer (on Shopify the Customer Privacy API
+   * resolves after init, so an init-only check would leave the feature dead there), and a
+   * withdrawal or reset rewrites the URL NOW instead of leaving the old id for up to 30s.
+   */
+  private syncInAppHandoff(): void {
+    if (this.inAppHandoffWrite) {
+      this.inAppHandoffWrite();
+      return;
+    }
+    if (this.config.inAppHandoff !== false && this.shouldTrack()) this.startInAppHandoff();
+  }
+
+  private startInAppHandoff(): void {
+    if (this.inAppHandoffTimer || typeof window === 'undefined' || !isHandoffSourceApp()) return;
+    const write = (): void => {
+      try {
+        const replace = this.originalReplaceState ?? window.history?.replaceState;
+        if (typeof replace !== 'function') return;
+        const url = new URL(window.location.href);
+        const token = this.shouldTrack() && this.config.inAppHandoff !== false
+          ? encodeInAppHandoff(this.identity.getAnonymousId(), Date.now())
+          : null;
+        if (token) url.searchParams.set(IN_APP_HANDOFF_PARAM, token);
+        else url.searchParams.delete(IN_APP_HANDOFF_PARAM);
+        const next = url.pathname + url.search + url.hash;
+        if (next === window.location.pathname + window.location.search + window.location.hash) return;
+        replace.call(window.history, window.history.state, '', next);
+        this.lastSpaPath = window.location.pathname + window.location.search + window.location.hash;
+      } catch {
+        // best-effort — a URL rewrite must never break the page or tracking
+      }
+    };
+    write();
+    this.inAppHandoffTimer = setInterval(write, IN_APP_HANDOFF_REFRESH_MS);
+    this.inAppHandoffWrite = write;
+  }
+
   private startStripeSessionCapture(): void {
     if (this.stripeSessionWatcher) return;
     const watcher = new StripeSessionWatcher();
@@ -1957,6 +2023,7 @@ class Datalyr {
     // visitor declined at init keeps a memory-only id and this session's events land under a
     // visitor_id that vanishes on the next page load. Idempotent.
     if (allowed) this.identity.enablePersistence();
+    this.syncInAppHandoff();
     if (allowed) this.trackInitialPageViewOnce();
     if (!allowed) {
       // Mirror setConsent() withdrawal: purge buffered events so events captured
@@ -2051,6 +2118,8 @@ class Datalyr {
     this.lastSpaPath = path;
     this.attribution.clearCache();
     this.page();
+    // A router navigation replaces the URL and drops the in-app handoff token.
+    this.inAppHandoffWrite?.();
   }
 
   /**
@@ -2183,6 +2252,21 @@ class Datalyr {
     }
     if (this.originalReplaceState) {
       history.replaceState = this.originalReplaceState;
+    }
+    if (this.inAppHandoffTimer) {
+      clearInterval(this.inAppHandoffTimer);
+      this.inAppHandoffTimer = null;
+      this.inAppHandoffWrite = null;
+      // Leave no token behind: nothing will refresh or remove it after this.
+      try {
+        const url = new URL(window.location.href);
+        if (url.searchParams.has(IN_APP_HANDOFF_PARAM)) {
+          url.searchParams.delete(IN_APP_HANDOFF_PARAM);
+          window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
+        }
+      } catch {
+        // best-effort
+      }
     }
 
     // Remove event listeners (Issue #15)

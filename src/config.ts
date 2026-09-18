@@ -19,6 +19,7 @@ export interface SdkRemoteConfig {
   autoIdentifyShopify?: boolean;
   shopifyCartAttributes?: boolean;
   stripeCheckoutSessions?: boolean;
+  inAppHandoff?: boolean;
   checkoutChampDomains?: string[];
   // NOTE: `platform` is intentionally NOT here. It's an install-time snippet
   // attribute (data-platform) the installer sets, because the CC behaviors
@@ -38,6 +39,7 @@ const REMOTE_KEYS: ReadonlyArray<keyof SdkRemoteConfig> = [
   'autoIdentifyShopify',
   'shopifyCartAttributes',
   'stripeCheckoutSessions',
+  'inAppHandoff',
   'checkoutChampDomains',
   'respectGlobalPrivacyControl',
   'respectDoNotTrack',
