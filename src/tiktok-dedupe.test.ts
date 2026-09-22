@@ -74,6 +74,54 @@ describe('TikTok Pixel mirror carries the Events API dedup id', () => {
     expect(ttq.track).toHaveBeenCalledWith('PlaceAnOrder', {}, { event_id: 'rule-id' });
   });
 
+  /**
+   * The other half of TikTok's dedup key is the event NAME, and the Events API
+   * sender takes it from the conversion rule (`rule.platform_event_name ||
+   * event.event_name`). The rule map now reaches the browser as
+   * pixels.tiktok.event_mappings, so it has to win over the SDK's static default
+   * — otherwise a renamed rule sends CompletePayment from the server and
+   * PlaceAnOrder from the browser, and neither copy dedupes.
+   */
+  describe('event name resolution matches the Events API sender', () => {
+    async function nameFor(ours: string, tiktokConfig: Record<string, unknown>): Promise<string> {
+      const config = { tiktok: { ...pixels.tiktok, ...tiktokConfig } };
+      global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ pixels: config }) }) as any;
+      (manager as any).pixels = config;
+      ttq.track.mockClear();
+      await manager.trackToPixels(ours, {}, 'id');
+      expect(ttq.track).toHaveBeenCalledTimes(1);
+      return ttq.track.mock.calls[0][0];
+    }
+
+    test('a rule overrides the static default for that event', async () => {
+      expect(await nameFor('purchase', {})).toBe('CompletePayment');
+      expect(await nameFor('purchase', { event_mappings: { purchase: 'PlaceAnOrder' } })).toBe('PlaceAnOrder');
+    });
+
+    test('a rule for a custom event name is used verbatim', async () => {
+      expect(await nameFor('quiz_done', { event_mappings: { quiz_done: 'SubmitForm' } })).toBe('SubmitForm');
+    });
+
+    test('the static default still applies to events the rule map does not cover', async () => {
+      const event_mappings = { purchase: 'PlaceAnOrder' };
+      expect(await nameFor('add_to_cart', { event_mappings })).toBe('AddToCart');
+      // An empty map (what a fail-open DB error in /container-scripts yields)
+      // must leave the static default in charge, not blank the name.
+      expect(await nameFor('add_to_cart', { event_mappings: {} })).toBe('AddToCart');
+      expect(await nameFor('add_to_cart', {})).toBe('AddToCart');
+    });
+
+    test('an uncovered custom event falls through to the sanitized raw name', async () => {
+      expect(await nameFor('quiz_done', { event_mappings: { purchase: 'PlaceAnOrder' } })).toBe('quiz_done');
+    });
+
+    test('the rule map is keyed on the exact trigger name the rule stores', async () => {
+      // /container-scripts keys it by trigger_event_name verbatim, so a differently
+      // cased key is not a match and the static default takes over.
+      expect(await nameFor('purchase', { event_mappings: { Purchase: 'PlaceAnOrder' } })).toBe('CompletePayment');
+    });
+  });
+
   test('without an event id the call keeps its two-argument shape', async () => {
     await manager.trackToPixels('add_to_cart', { value: 3 });
     expect(ttq.track).toHaveBeenCalledWith('AddToCart', { value: 3 });

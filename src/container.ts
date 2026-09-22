@@ -1361,6 +1361,14 @@ export class ContainerManager {
   /**
    * TikTok event name for one of our events: the workspace rule map first,
    * then the static default map, then the sanitized raw name.
+   *
+   * Source of truth is the rule map (tiktok.event_mappings from
+   * /container-scripts, keyed by the exact trigger event name), because the
+   * Events API sender resolves the name the same way — postback
+   * platforms/tiktok.js sends `rule.platform_event_name || event.event_name`.
+   * TikTok dedupes on event_name AND event_id, so a rule renamed off the static
+   * default below would double-count if the browser ignored the map. Same
+   * ordering, and the same reason, as resolveMetaEventName.
    */
   private resolveTikTokEventName(tiktokConfig: any, eventName: string, sanitizedEventName: string): string {
     // Map our event names to TikTok's standard vocabulary. BUG FIX (TikTok-dead):
