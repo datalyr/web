@@ -31,20 +31,20 @@ describe('current workspace policy before SDK-controlled pixel calls', () => {
   test('allowed events retain mapped names, money and shared Meta dedup id; each event rechecks', async () => {
     global.fetch = jest.fn().mockResolvedValue(response(enabled));
     expect(await manager.trackToPixels('purchase', { value: 12, currency: 'EUR' }, 'shared-id')).toEqual(['meta', 'google', 'tiktok']);
-    expect((window as any).fbq).toHaveBeenCalledWith('track', 'Purchase', { value: 12, currency: 'EUR' }, { eventID: 'shared-id' });
+    expect((window as any).fbq).toHaveBeenCalledWith('trackSingle', 'meta', 'Purchase', { value: 12, currency: 'EUR' }, { eventID: 'shared-id' });
     await manager.trackToPixels('purchase');
     expect(global.fetch).toHaveBeenCalledTimes(2);
     expect(global.fetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ cache: 'no-store', body: JSON.stringify({ workspaceId: 'workspace', purpose: 'pixel_forwarding' }) }));
   });
-  test.each(['OrderCompleted', 'TrialBegan'])('configured custom money event %s uses trackCustom with unchanged money and dedup ID', async mapped => {
+  test.each(['OrderCompleted', 'TrialBegan'])('configured custom money event %s uses trackSingleCustom with unchanged money and dedup ID', async mapped => {
     global.fetch = jest.fn().mockResolvedValue(response({ meta: { ...enabled.meta, event_mappings: { purchase: mapped } } }));
     expect(await manager.trackToPixels('purchase', { value: 12, currency: 'EUR' }, 'custom-shared-id')).toEqual(['meta']);
-    expect((window as any).fbq).toHaveBeenCalledWith('trackCustom', mapped, { value: 12, currency: 'EUR' }, { eventID: 'custom-shared-id' });
+    expect((window as any).fbq).toHaveBeenCalledWith('trackSingleCustom', 'meta', mapped, { value: 12, currency: 'EUR' }, { eventID: 'custom-shared-id' });
   });
-  test.each(['Purchase', 'StartTrial', 'Subscribe', 'PageView', 'Donate'])('configured standard event %s retains track', async mapped => {
+  test.each(['Purchase', 'StartTrial', 'Subscribe', 'PageView', 'Donate'])('configured standard event %s retains trackSingle', async mapped => {
     global.fetch = jest.fn().mockResolvedValue(response({ meta: { ...enabled.meta, event_mappings: { purchase: mapped } } }));
     await manager.trackToPixels('purchase', { value: 12, currency: 'EUR' });
-    expect((window as any).fbq).toHaveBeenCalledWith('track', mapped, { value: 12, currency: 'EUR' });
+    expect((window as any).fbq).toHaveBeenCalledWith('trackSingle', 'meta', mapped, { value: 12, currency: 'EUR' });
   });
   test('new restriction suppresses already initialized vendors', async () => {
     global.fetch = jest.fn().mockResolvedValue(response({ meta: { ...enabled.meta, enabled: false }, google: { ...enabled.google, enabled: false }, tiktok: { ...enabled.tiktok, enabled: false } }));
@@ -92,7 +92,7 @@ describe('current workspace policy before SDK-controlled pixel calls', () => {
     properties.contents[0].id = 'changed';
     release(response(enabled));
     await pending;
-    expect((window as any).fbq).toHaveBeenCalledWith('track', 'Purchase', {
+    expect((window as any).fbq).toHaveBeenCalledWith('trackSingle', 'meta', 'Purchase', {
       value: 12, currency: 'EUR', contents: [{ id: 'original' }],
     }, { eventID: 'event' });
   });

@@ -97,6 +97,13 @@ class Datalyr {
   // then release it exactly once when consent allows tracking.
   private initialPageViewReady = false;
   private initialPageViewSent = false;
+  // Container lifecycle (see startContainer): created at most once per page.
+  // containerGateReached = initializeAsync() has evaluated the container gate, so
+  // a later Shopify consent grant may start it (earlier grants are picked up by
+  // initializeAsync itself, after identity hydration).
+  private containerStarted = false;
+  private containerGateReached = false;
+  private containerReady?: Promise<void>;
   // FIXED (ISSUE-01): Async initialization promise to prevent race conditions
   private initializationPromise: Promise<void> | null = null;
 
@@ -337,31 +344,17 @@ class Datalyr {
         // WEB-4 (privacy gate): the container loads third-party pixels (Meta/Google/
         // TikTok) and calls fbq('init', …, advancedMatching) with the visitor's
         // SHA-256 email/id — so it must NOT initialize for opted-out / DNT / GPC
-        // visitors, nor when privacyMode is explicitly 'strict'. (Remote config can't
-        // gate this: the container fetch is what delivers the remote config, so only
-        // local consent signals + an explicit strict init() are knowable here.)
-        const privacyStrict = this.config.privacyMode === 'strict';
-        if (this.config.enableContainer !== false && this.shouldTrack() && !privacyStrict && this.consentAllowsMarketing()) {
-          this.container = new ContainerManager({
-            workspaceId: this.config.workspaceId,
-            endpoint: this.config.endpoint,
-            debug: this.config.debug,
-            canForward: () => this.shouldTrack() && this.consentAllowsMarketing() && this.config.privacyMode !== 'strict',
-            // Lazy: invoked at the moment a third-party pixel inits, AFTER the
-            // /container-scripts roundtrip resolves — so a pre-init identify()
-            // already updated this.identity / this.userProperties. distinctId
-            // mirrors what CAPI puts in external_id[] (user_id || anonymous_id);
-            // email lets the Pixel match on em with the same hash CAPI sends.
-            getIdentity: () => ({
-              externalId: this.identity?.getDistinctId(),
-              email: this.userProperties?.email,
-            })
-          });
-
-          // Initialize container asynchronously
-          await this.container.init().catch(error => {
-            this.log('Container initialization failed:', error);
-          });
+        // visitors, nor when privacyMode is explicitly 'strict'. Only local consent
+        // signals and an explicit strict init() are knowable here; the dashboard's
+        // strict/DNT/GPC settings arrive with the container fetch and are applied
+        // before any pixel loads.
+        // On Shopify the gate usually reads false here: consent is unknown until
+        // the Customer Privacy API loads. onShopifyConsentChanged() then starts the
+        // container once consent resolves to allowed (containerGateReached).
+        const containerReady = this.startContainer();
+        this.containerGateReached = true;
+        if (containerReady) {
+          await containerReady;
 
           // Checkout Champ thank-you/upsell page: co-fire the browser Meta Pixel
           // Purchase with the SAME deterministic event_id the CC webhook stamps
@@ -497,6 +490,54 @@ class Datalyr {
     })();
 
     return this.initializationPromise;
+  }
+
+  /**
+   * Create and initialize the container (third-party pixels) at most once per
+   * page, and only while tracking and marketing consent allow it (WEB-4 gate:
+   * never for opted-out / DNT / GPC visitors or privacyMode 'strict').
+   *
+   * Called from initializeAsync() and again from onShopifyConsentChanged(): on
+   * Shopify the Customer Privacy API loads after init, so the init-time gate
+   * reads false and the Meta pixel would otherwise never load on that page.
+   * Once started it is never re-created on this page, even after a withdrawal
+   * tore it down (pixels resume on the next load, as with optIn()).
+   * Returns the init promise, or undefined when the container is not allowed.
+   */
+  private startContainer(): Promise<void> | undefined {
+    if (this.containerStarted) return this.containerReady;
+    if (this.config.enableContainer === false || this.config.privacyMode === 'strict') return undefined;
+    if (!this.shouldTrack() || !this.consentAllowsMarketing()) return undefined;
+    this.containerStarted = true;
+    this.container = new ContainerManager({
+      workspaceId: this.config.workspaceId,
+      endpoint: this.config.endpoint,
+      debug: this.config.debug,
+      platform: this.config.platform,
+      canForward: () => this.shouldTrack() && this.consentAllowsMarketing() && this.config.privacyMode !== 'strict',
+      // Fold the dashboard config in the moment the container reads it, BEFORE
+      // any pixel loads: canForward above then already sees a dashboard
+      // privacyMode 'strict' / respectDoNotTrack / respectGlobalPrivacyControl.
+      // This is also the only merge a container started late (after Shopify
+      // consent resolved) gets: initializeAsync's applyRemoteConfig has run by then.
+      onRemoteConfig: (remote) => {
+        applyRemoteConfig(this.config, remote, this.explicitConfigKeys);
+        if (this.config.privacyMode === 'strict') this.config.autoIdentify = false;
+      },
+      // Lazy: invoked at the moment a third-party pixel inits, AFTER the
+      // /container-scripts roundtrip resolves — so a pre-init identify()
+      // already updated this.identity / this.userProperties. distinctId
+      // mirrors what CAPI puts in external_id[] (user_id || anonymous_id);
+      // email lets the Pixel match on em with the same hash CAPI sends.
+      getIdentity: () => ({
+        externalId: this.identity?.getDistinctId(),
+        email: this.userProperties?.email,
+      })
+    });
+    this.containerReady = this.container.init().catch(error => {
+      this.log('Container initialization failed:', error);
+    });
+    return this.containerReady;
   }
 
   /**
@@ -1861,6 +1902,11 @@ class Datalyr {
     // Shopify Customer Privacy (9.A.1): a declined native banner blocks marketing use
     // (pixel loads, click-id/email forwarding) even with no setConsent() call.
     // null = no signal → defer to the setConsent-based policy below, unchanged.
+    // Deliberately follows Shopify's marketingAllowed() only, NOT
+    // saleOfDataAllowed(): a product decision by the owner (2026-09-22) — data
+    // keeps flowing to the merchant's own ad pixels when a visitor opts out of
+    // the sale of data. Do not add a saleOfDataAllowed() gate without that
+    // decision changing. (An explicit setConsent({ sale: false }) still blocks.)
     if (this.shopifyMarketingConsent() === false) {
       return false;
     }
@@ -1965,8 +2011,10 @@ class Datalyr {
    * consent decision made mid-session takes effect without a reload. Revocation is
    * enforced immediately, mirroring setConsent(): queue gated + purged, pixels torn
    * down, auto-identify (email capture + /account.json polling) destroyed. On grant
-   * the queue re-enables (track() re-checks shouldTrack() per event anyway) and cart
-   * attribute stamping runs; pixels / auto-identify resume on the next page load —
+   * the queue re-enables (track() re-checks shouldTrack() per event anyway), cart
+   * attribute stamping runs, and the container starts if it never started on this
+   * page (the usual Shopify case: consent was still loading at init). A container
+   * torn down by a withdrawal, and auto-identify, resume on the next page load —
    * the same convention as optIn().
    */
   private setupShopifyConsentListener(): void {
@@ -2024,7 +2072,21 @@ class Datalyr {
     // visitor_id that vanishes on the next page load. Idempotent.
     if (allowed) this.identity.enablePersistence();
     this.syncInAppHandoff();
-    if (allowed) this.trackInitialPageViewOnce();
+    // Late grant: the init-time container gate read false (Customer Privacy API
+    // still loading, or no decision yet), so no pixel loaded on this page. Start
+    // the container now and release the held pageview once its config is in —
+    // as at init, where the pageview follows container.init(): the dashboard
+    // config (DNT / GPC / strict) then gates that pageview too, and it reaches
+    // the pixel once. startContainer() re-checks marketing consent and runs at
+    // most once per page.
+    if (allowed) {
+      const containerReady = this.containerGateReached ? this.startContainer() : undefined;
+      if (containerReady) {
+        void containerReady.then(() => this.trackInitialPageViewOnce());
+      } else {
+        this.trackInitialPageViewOnce();
+      }
+    }
     if (!allowed) {
       // Mirror setConsent() withdrawal: purge buffered events so events captured
       // before the decline can't drain if consent is later re-granted.
@@ -2333,6 +2395,9 @@ class Datalyr {
     // promise and the SDK comes back half-initialized (no container/pixels/SPA/pageview).
     this.initializationPromise = null;
     this.container = undefined;
+    this.containerStarted = false;
+    this.containerGateReached = false;
+    this.containerReady = undefined;
     this.autoIdentify = undefined;
     this.lastSpaPath = null;
     this.initialPageViewReady = false;
