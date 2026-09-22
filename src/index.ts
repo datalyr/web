@@ -514,6 +514,15 @@ class Datalyr {
       debug: this.config.debug,
       platform: this.config.platform,
       canForward: () => this.shouldTrack() && this.consentAllowsMarketing() && this.config.privacyMode !== 'strict',
+      // Fold the dashboard config in the moment the container reads it, BEFORE
+      // any pixel loads: canForward above then already sees a dashboard
+      // privacyMode 'strict' / respectDoNotTrack / respectGlobalPrivacyControl.
+      // This is also the only merge a container started late (after Shopify
+      // consent resolved) gets: initializeAsync's applyRemoteConfig has run by then.
+      onRemoteConfig: (remote) => {
+        applyRemoteConfig(this.config, remote, this.explicitConfigKeys);
+        if (this.config.privacyMode === 'strict') this.config.autoIdentify = false;
+      },
       // Lazy: invoked at the moment a third-party pixel inits, AFTER the
       // /container-scripts roundtrip resolves — so a pre-init identify()
       // already updated this.identity / this.userProperties. distinctId
@@ -1892,6 +1901,11 @@ class Datalyr {
     // Shopify Customer Privacy (9.A.1): a declined native banner blocks marketing use
     // (pixel loads, click-id/email forwarding) even with no setConsent() call.
     // null = no signal → defer to the setConsent-based policy below, unchanged.
+    // Deliberately follows Shopify's marketingAllowed() only, NOT
+    // saleOfDataAllowed(): a product decision by the owner (2026-09-22) — data
+    // keeps flowing to the merchant's own ad pixels when a visitor opts out of
+    // the sale of data. Do not add a saleOfDataAllowed() gate without that
+    // decision changing. (An explicit setConsent({ sale: false }) still blocks.)
     if (this.shopifyMarketingConsent() === false) {
       return false;
     }
@@ -2059,11 +2073,19 @@ class Datalyr {
     this.syncInAppHandoff();
     // Late grant: the init-time container gate read false (Customer Privacy API
     // still loading, or no decision yet), so no pixel loaded on this page. Start
-    // the container now, BEFORE releasing the held pageview: trackToPixels waits
-    // for the in-flight container init, so that single pageview reaches the pixel
-    // once. startContainer() re-checks marketing consent and runs at most once.
-    if (allowed && this.containerGateReached) this.startContainer();
-    if (allowed) this.trackInitialPageViewOnce();
+    // the container now and release the held pageview once its config is in —
+    // as at init, where the pageview follows container.init(): the dashboard
+    // config (DNT / GPC / strict) then gates that pageview too, and it reaches
+    // the pixel once. startContainer() re-checks marketing consent and runs at
+    // most once per page.
+    if (allowed) {
+      const containerReady = this.containerGateReached ? this.startContainer() : undefined;
+      if (containerReady) {
+        void containerReady.then(() => this.trackInitialPageViewOnce());
+      } else {
+        this.trackInitialPageViewOnce();
+      }
+    }
     if (!allowed) {
       // Mirror setConsent() withdrawal: purge buffered events so events captured
       // before the decline can't drain if consent is later re-granted.
