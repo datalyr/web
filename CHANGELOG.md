@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.17
+
+- Shopify: works alongside Shopify's own Facebook & Instagram app. When that app already runs the same Meta pixel on the page, the container no longer loads fbevents, initializes the pixel or sends PageView (the app does); SDK-tracked events are still mirrored to the pixel with `trackSingle` and the SDK's `eventID`, so they dedupe against the server-side copy. The same applies to Shopify's Google & YouTube app (tag id) and TikTok app (pixel code). Detection reads Shopify's page config, so load order does not matter.
+- Shopify: the container now starts once Shopify's Customer Privacy API resolves marketing consent to allowed. Before, it only started when consent was already known at init, which on Shopify it never is, so the container pixels never loaded there. The dashboard's strict / Do Not Track / GPC settings are applied before any pixel loads, on this late path too.
+- Meta: the container turns off Meta's automatic event detection (`autoConfig`) for the pixels it initializes; those browser events carry no `eventID` and could never dedupe. Container events go out with `trackSingle` to the configured pixel; `trackSingleOnly` is set only where a Shopify Facebook app runs a different pixel on the same `fbq`.
+
 ## 1.7.16
 
 - In-app browser handoff. Inside an Instagram / Facebook / TikTok in-app browser the SDK keeps a short-lived `_dl_h=<visitor>.<time>` token in the address bar, so tapping the app's "Open in Safari/Chrome" continues as the same visitor instead of starting a new one. The token is written only inside apps that offer "Open in browser", expires after 2 minutes, is adopted only by a real browser that has no visitor yet (and never by an opted-out one); a webview always strips an inbound token so it can never forward a stranger's, accepts only ids the SDK minted, is removed from the address bar on arrival and never appears in a tracked URL. On by default; set `inAppHandoff: false` to disable. Follows consent changes immediately (grant starts it, withdrawal/opt-out/reset rewrite the URL at once). The first pageview of a continued visitor carries `in_app_handoff: true`.
