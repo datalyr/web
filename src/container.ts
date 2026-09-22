@@ -1305,6 +1305,21 @@ export class ContainerManager {
     if (pixels?.tiktok?.enabled) {
       try {
         const tiktokEvent = this.resolveTikTokEventName(pixels.tiktok, eventName, sanitizedEventName);
+        // Keep the same event name AND event_id as the Events API copy. TikTok
+        // dedupes a Pixel event against an Events API event only when both the
+        // event and event_id parameters are identical (48h window, first copy
+        // wins), so without this the browser and server copies of every
+        // conversion were counted twice. The id is the SDK's per-event uuid,
+        // which reaches the postback worker as the event's event_id — the same
+        // value postback/platforms/tiktok.js already sends as `event_id`.
+        // Third positional arg per TikTok's Pixel SDK: ttq.track(event, properties, { event_id }).
+        const send = (target: any) => {
+          if (eventId) {
+            target.track(tiktokEvent, sanitizedProperties, { event_id: eventId });
+          } else {
+            target.track(tiktokEvent, sanitizedProperties);
+          }
+        };
         if (this.companion.tiktok) {
           // Shopify's TikTok app runs this pixel in a sandboxed worker, so the
           // top page normally has no ttq holding it. Mirror only when one does
@@ -1313,11 +1328,11 @@ export class ContainerManager {
           const code = String(pixels.tiktok.pixel_id);
           const ttq = host.ttq;
           if (!isPageEvent(eventName) && ttq && typeof ttq.instance === 'function' && ttq._i && ttq._i[code]) {
-            ttq.instance(code).track(tiktokEvent, sanitizedProperties);
+            send(ttq.instance(code));
             delivered.add('tiktok');
           }
         } else if (host.ttq) {
-          host.ttq.track(tiktokEvent, sanitizedProperties);
+          send(host.ttq);
           delivered.add('tiktok');
         }
       } catch (error) {

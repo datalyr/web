@@ -655,7 +655,9 @@ describe('Google & YouTube and TikTok companion mode on Shopify', () => {
     expect(await manager.trackToPixels('pageview', {}, 'pv-t')).toEqual([]);
     expect(await manager.trackToPixels('add_to_cart', { value: 5 }, 'atc-t')).toEqual(['tiktok']);
     expect(ttq.instance).toHaveBeenCalledWith(TIKTOK_CODE);
-    expect(instance.track).toHaveBeenCalledWith('AddToCart', { value: 5 });
+    // Same dedup id as the Events API copy, so the app's pixel copy, our mirror
+    // and the server copy of this AddToCart collapse into one.
+    expect(instance.track).toHaveBeenCalledWith('AddToCart', { value: 5 }, { event_id: 'atc-t' });
     expect(ttq.track).not.toHaveBeenCalled();
   });
 
