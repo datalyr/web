@@ -143,6 +143,20 @@ export function shopifyPageConfiguresFacebookAppPixel(pixelId: string, doc?: Doc
     configuration?.pixel_type === 'facebook_pixel' && String(configuration.pixel_id ?? '').trim() === wanted);
 }
 
+/**
+ * Facebook & Instagram app running a DIFFERENT pixel on this Shopify page. Its
+ * trackShopify broadcasts to every pixel initialized on the shared window.fbq,
+ * so our pixel would receive its events (with Shopify ids our CAPI never sends).
+ */
+export function shopifyPageConfiguresOtherFacebookAppPixel(pixelId: string, doc?: Document, entries?: ShopifyWebPixelEntry[]): boolean {
+  const own = String(pixelId || '').trim();
+  return (entries || readShopifyWebPixelsConfig(doc)).some(({ configuration }) => {
+    if (configuration?.pixel_type !== 'facebook_pixel') return false;
+    const id = String(configuration.pixel_id ?? '').trim();
+    return id !== '' && id !== own;
+  });
+}
+
 /** Google & YouTube app: our tag id is one of the ids it configures. */
 export function shopifyPageConfiguresGoogleAppTag(tagId: string, doc?: Document, entries?: ShopifyWebPixelEntry[]): boolean {
   const wanted = String(tagId || '').trim();
@@ -987,10 +1001,13 @@ export class ContainerManager {
 
       // fbevents sends a plain fbq('track') — and a Shopify app's
       // trackShopify — to EVERY pixel initialized on window.fbq, skipping only
-      // pixels marked trackSingleOnly. Mark ours (fbevents accepts this only
-      // after init) so another pixel's events, carrying ids our CAPI never
-      // sends, cannot land on it; our own events go out with trackSingle.
-      if (!initializedByOthers) {
+      // pixels marked trackSingleOnly (accepted only after init). Mark ours only
+      // where another pixel shares this fbq: a Shopify Facebook & Instagram app
+      // running a different pixel id. Set everywhere, it also silenced a merchant's
+      // own tag for this pixel when GTM or a plugin inits it after us (fbevents
+      // ignores the duplicate init, so the flag stays). Our own events always go
+      // out with trackSingle.
+      if (!initializedByOthers && shopifyPageConfiguresOtherFacebookAppPixel(pixelId)) {
         (window as any).fbq('set', 'trackSingleOnly', true, pixelId);
       }
     } catch (error) {

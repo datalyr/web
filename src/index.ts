@@ -344,9 +344,10 @@ class Datalyr {
         // WEB-4 (privacy gate): the container loads third-party pixels (Meta/Google/
         // TikTok) and calls fbq('init', …, advancedMatching) with the visitor's
         // SHA-256 email/id — so it must NOT initialize for opted-out / DNT / GPC
-        // visitors, nor when privacyMode is explicitly 'strict'. (Remote config can't
-        // gate this: the container fetch is what delivers the remote config, so only
-        // local consent signals + an explicit strict init() are knowable here.)
+        // visitors, nor when privacyMode is explicitly 'strict'. Only local consent
+        // signals and an explicit strict init() are knowable here; the dashboard's
+        // strict/DNT/GPC settings arrive with the container fetch and are applied
+        // before any pixel loads.
         // On Shopify the gate usually reads false here: consent is unknown until
         // the Customer Privacy API loads. onShopifyConsentChanged() then starts the
         // container once consent resolves to allowed (containerGateReached).

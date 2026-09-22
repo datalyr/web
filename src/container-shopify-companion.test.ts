@@ -460,7 +460,7 @@ describe('Meta pixel initialized by the container', () => {
     resetPage();
   });
 
-  test('autoConfig off before init; trackSingleOnly set after init', async () => {
+  test('autoConfig off before init; no trackSingleOnly when no other pixel shares fbq', async () => {
     mockPixels();
     const fbq: any = jest.fn();
     (window as any).fbq = fbq;
@@ -470,9 +470,22 @@ describe('Meta pixel initialized by the container', () => {
     });
     await manager.init();
 
+    // A merchant tag (GTM, a plugin) that inits this pixel after us must keep
+    // its broadcast track() calls: trackSingleOnly would silence them.
+    const calls = fbq.mock.calls.map((c: unknown[]) => c.slice(0, 2).join(':'));
+    expect(calls).toEqual(['set:autoConfig', 'init:' + PIXEL]);
+    expect(fbq.mock.calls[0]).toEqual(['set', 'autoConfig', false, PIXEL]);
+  });
+
+  test('trackSingleOnly only when the Shopify page runs a Facebook app pixel with another id', async () => {
+    addShopifyPixelsConfig([fbAppEntry('999')]);
+    mockPixels();
+    const fbq: any = jest.fn();
+    (window as any).fbq = fbq;
+    manager = new ContainerManager({ workspaceId: 'ws', platform: 'shopify' });
+    await manager.init();
     const calls = fbq.mock.calls.map((c: unknown[]) => c.slice(0, 2).join(':'));
     expect(calls).toEqual(['set:autoConfig', 'init:' + PIXEL, 'set:trackSingleOnly']);
-    expect(fbq.mock.calls[0]).toEqual(['set', 'autoConfig', false, PIXEL]);
     expect(fbq.mock.calls[2]).toEqual(['set', 'trackSingleOnly', true, PIXEL]);
   });
 
@@ -546,7 +559,8 @@ describe('Meta pixel initialized by the container', () => {
     const forwarded = manager.trackToPixels('pageview', {}, 'pv-early');
     await initialized;
     expect(await forwarded).toEqual(['meta']);
-    expect(fbq.mock.calls.map((c: unknown[]) => c[0])).toEqual(['set', 'init', 'set', 'trackSingle']);
+    // autoConfig, init, then our event; no trackSingleOnly (no other pixel shares fbq).
+    expect(fbq.mock.calls.map((c: unknown[]) => c[0])).toEqual(['set', 'init', 'trackSingle']);
     expect(fbq).toHaveBeenLastCalledWith('trackSingle', PIXEL, 'PageView', {}, { eventID: 'pv-early' });
   });
 
