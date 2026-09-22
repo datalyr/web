@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.7.18
+
+- TikTok: browser events now carry the same `event_id` as the server-side Events API copy, so TikTok stops counting the two copies of every conversion separately. TikTok deduplicates only when the event name AND `event_id` both match, and the event name already came from the workspace's conversion rules, so this completes the pair.
+
 ## 1.7.17
 
 - Shopify: works alongside Shopify's own Facebook & Instagram app. When that app already runs the same Meta pixel on the page, the container no longer loads fbevents, initializes the pixel or sends PageView (the app does); SDK-tracked events are still mirrored to the pixel with `trackSingle` and the SDK's `eventID`, so they dedupe against the server-side copy. The same applies to Shopify's Google & YouTube app (tag id) and TikTok app (pixel code). Detection reads Shopify's page config, so load order does not matter.
