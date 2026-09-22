@@ -17,6 +17,148 @@ const META_STANDARD_EVENTS = new Set([
   'Subscribe', 'ViewContent',
 ]);
 
+/**
+ * Shopify "Facebook & Instagram" app ("companion mode").
+ *
+ * On most Shopify stores Meta's own sales-channel app runs the SAME pixel as a
+ * web pixel in Shopify's OPEN runtime (the top page, not a sandbox). It loads
+ * fbevents.js into window.fbq, calls
+ *   fbq('init', pixelId, {}, { agent: 'shopify_web_pixel' })
+ * and sends PageView / ViewContent / AddToCart / InitiateCheckout /
+ * AddPaymentInfo / Search / Purchase with Shopify's event ids. If the container
+ * also initialized that pixel and sent our own PageView, Meta would count every
+ * page view twice. In companion mode the container therefore does not load
+ * fbevents, init the pixel or send PageView; it only mirrors the other events
+ * dl.js tracks, through the app's fbq, with our event id (for CAPI dedup).
+ */
+export const SHOPIFY_FACEBOOK_APP_AGENT = 'shopify_web_pixel';
+/** How long a mirrored event waits for the app's fbq to have our pixel initialized. */
+const COMPANION_FBQ_WAIT_MS = 10000;
+const COMPANION_FBQ_POLL_MS = 250;
+/** Events allowed to wait at once; beyond this the browser copy is skipped (CAPI still sends). */
+const COMPANION_MAX_PENDING = 50;
+/** Upper bound on waiting for the HTML to finish parsing before deciding on companion mode. */
+const COMPANION_DOM_WAIT_MS = 2000;
+
+/** fbq's pre-load command queue as plain arrays (the stub stores Arrays or `arguments`). */
+function fbqQueuedCalls(fbq: any): unknown[][] {
+  try {
+    const queue = fbq?.queue;
+    if (!queue || typeof queue.length !== 'number') return [];
+    const calls: unknown[][] = [];
+    for (let i = 0; i < queue.length; i++) {
+      const entry = queue[i];
+      if (entry && typeof entry.length === 'number') calls.push(Array.prototype.slice.call(entry));
+    }
+    return calls;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Pixel records fbevents exposes once it has loaded: `fbq.instance.pixelsByID`
+ * and `fbq.getState().pixels`. Both are undocumented internals, so every read
+ * is guarded. Returns null when neither can be read (we cannot tell).
+ */
+function fbqLoadedPixels(fbq: any): Array<Record<string, unknown>> | null {
+  let pixels: Array<Record<string, unknown>> | null = null;
+  try {
+    const byId = fbq?.instance?.pixelsByID;
+    if (byId && typeof byId === 'object') {
+      pixels = Object.keys(byId).map((id) => ({ id, ...(byId[id] || {}) }));
+    }
+  } catch { /* internals changed */ }
+  try {
+    const state = typeof fbq?.getState === 'function' ? fbq.getState() : null;
+    if (state && Array.isArray(state.pixels)) {
+      pixels = (pixels || []).concat(state.pixels.filter((p: unknown) => p && typeof p === 'object'));
+    }
+  } catch { /* internals changed */ }
+  return pixels;
+}
+
+/**
+ * Deterministic signal: Shopify's inline web-pixels config (the
+ * `wpmLoader({ ..., webPixelsConfigList: [...] })` script in the page HTML)
+ * lists a facebook_pixel web pixel for this pixel id. The config is part of
+ * the server-rendered HTML, so it is present before the app's pixel code has
+ * loaded — which is what makes it safe against the async load order.
+ */
+export function shopifyPageConfiguresFacebookAppPixel(pixelId: string, doc?: Document): boolean {
+  const wanted = String(pixelId || '').trim();
+  if (!wanted) return false;
+  try {
+    const root = doc || (typeof document !== 'undefined' ? document : undefined);
+    if (!root) return false;
+    const scripts = root.getElementsByTagName('script');
+    for (let i = 0; i < scripts.length; i++) {
+      const script = scripts[i];
+      if (script.src) continue;
+      const text = script.text || script.textContent || '';
+      if (text.indexOf('webPixelsConfigList') === -1 || text.indexOf('facebook_pixel') === -1) continue;
+      // Each web pixel's `configuration` is a JSON document serialized as a
+      // string, e.g. "configuration":"{\"pixel_id\":\"123\",\"pixel_type\":\"facebook_pixel\"}".
+      const pattern = /"configuration"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(text)) !== null) {
+        try {
+          const configuration = JSON.parse(JSON.parse(`"${match[1]}"`));
+          if (configuration && configuration.pixel_type === 'facebook_pixel'
+            && String(configuration.pixel_id ?? '').trim() === wanted) {
+            return true;
+          }
+        } catch { /* not a JSON configuration; keep scanning */ }
+      }
+    }
+  } catch { /* DOM access failed: no signal */ }
+  return false;
+}
+
+/**
+ * Runtime signal (fallback when the page config is unavailable): the app has
+ * already queued or performed its init of this pixel on window.fbq, which it
+ * tags with agent "shopify_web_pixel", or has set its sandbox context for it.
+ * Only visible once the app's pixel code has run.
+ */
+export function shopifyFacebookAppPixelRunning(fbq: any, pixelId: string): boolean {
+  const wanted = String(pixelId || '').trim();
+  if (!wanted || typeof fbq !== 'function') return false;
+  for (const call of fbqQueuedCalls(fbq)) {
+    const [command, first, , fourth] = call as any[];
+    if (command === 'init' && String(first) === wanted && fourth?.agent === SHOPIFY_FACEBOOK_APP_AGENT) return true;
+    if (command === 'set' && first === 'shopifySandboxContext' && String((call as any[])[2]?.pixelId) === wanted) return true;
+  }
+  const loaded = fbqLoadedPixels(fbq);
+  return !!loaded?.some((pixel) => String(pixel.id) === wanted && pixel.agent === SHOPIFY_FACEBOOK_APP_AGENT);
+}
+
+/**
+ * Whether a trackSingle for this pixel would be accepted right now: fbq exists
+ * and the pixel's init is either queued ahead of us (stub) or done (loaded).
+ * When fbevents is loaded but its internals cannot be read, assume ready.
+ */
+function companionFbqReady(fbq: any, pixelId: string): boolean {
+  if (typeof fbq !== 'function') return false;
+  const wanted = String(pixelId);
+  if (fbqQueuedCalls(fbq).some((call) => call[0] === 'init' && String(call[1]) === wanted)) return true;
+  if (typeof fbq.callMethod !== 'function') return false; // stub, init not queued yet
+  const loaded = fbqLoadedPixels(fbq);
+  return loaded === null || loaded.some((pixel) => String(pixel.id) === wanted);
+}
+
+function waitForDomContentLoaded(timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const done = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      document.removeEventListener('DOMContentLoaded', done);
+      resolve();
+    };
+    document.addEventListener('DOMContentLoaded', done);
+    timer = setTimeout(done, timeoutMs);
+  });
+}
 
 /**
  * Identity snapshot read at the moment a third-party pixel initializes.
@@ -98,6 +240,17 @@ export class ContainerManager {
   // through a callback avoids snapshotting stale identity at construction.
   private getIdentity?: () => PixelIdentity | undefined;
   private canForward?: () => boolean;
+  /** Install platform (data-platform). Companion mode applies only to 'shopify'. */
+  private platform?: string;
+  /** In-flight or completed init(); trackToPixels waits on it so events tracked
+   *  while the container is still initializing are forwarded, not dropped. */
+  private initPromise: Promise<void> | null = null;
+  /** Shopify's Facebook & Instagram app owns the Meta pixel on this page. */
+  private metaCompanion = false;
+  private companionWait: Promise<any> | null = null;
+  private companionTimer: ReturnType<typeof setInterval> | null = null;
+  private companionResolve: ((fbq: any) => void) | null = null;
+  private companionPending = 0;
 
   constructor(options: {
     workspaceId: string;
@@ -105,6 +258,7 @@ export class ContainerManager {
     debug?: boolean;
     getIdentity?: () => PixelIdentity | undefined;
     canForward?: () => boolean;
+    platform?: string;
   }) {
     this.workspaceId = options.workspaceId;
     // Container scripts use the same endpoint as tracking (ingest)
@@ -112,6 +266,7 @@ export class ContainerManager {
     this.debug = options.debug || false;
     this.getIdentity = options.getIdentity;
     this.canForward = options.canForward;
+    this.platform = options.platform;
 
     // Load session scripts from storage
     const sessionScripts = storage.get('dl_session_scripts', []);
@@ -176,9 +331,22 @@ export class ContainerManager {
     }
   }
 
-  async init(): Promise<void> {
-    if (this.initialized || !this.forwardingAllowed()) return;
-    
+  /**
+   * Initialize the container. Concurrent calls share one run, so the Meta pixel
+   * is never initialized twice; a run that did not complete (policy read
+   * failed, consent withdrawn) can be retried by a later call.
+   */
+  init(): Promise<void> {
+    if (this.initPromise) return this.initPromise;
+    if (this.initialized || !this.forwardingAllowed()) return Promise.resolve();
+    const run = this.runInit().finally(() => {
+      if (!this.initialized && this.initPromise === run) this.initPromise = null;
+    });
+    this.initPromise = run;
+    return run;
+  }
+
+  private async runInit(): Promise<void> {
     try {
       const data = await this.readConfiguration();
       if (!this.forwardingAllowed()) return;
@@ -459,6 +627,8 @@ export class ContainerManager {
   public cleanupAllIframes(): void {
     // Cancel pending policy decisions as well as sandboxed scripts.
     this.disposed = true;
+    // Release events waiting for Shopify's app pixel; they are not sent.
+    this.finishCompanionWait(null);
     // Clean up all iframes
     const iframes = [...this.sandboxedIframes]; // Copy array since we're modifying it
     iframes.forEach(iframe => this.cleanupIframe(iframe));
@@ -610,6 +780,16 @@ export class ContainerManager {
    */
   private async initializeMetaPixel(config: any): Promise<void> {
     try {
+      // Companion mode: Shopify's Facebook & Instagram app already runs this
+      // pixel on the page (and sends its own PageView). Loading fbevents,
+      // calling init or sending PageView here would double-count; events are
+      // mirrored through the app's fbq instead (see trackToPixels).
+      if (this.platform === 'shopify' && await this.detectShopifyFacebookApp(String(config.pixel_id))) {
+        this.metaCompanion = true;
+        this.log('Meta Pixel companion mode: Shopify Facebook & Instagram app runs pixel', config.pixel_id);
+        return;
+      }
+
       // Build advanced-matching object. Skipped silently if Web Crypto isn't
       // available — Pixel still initializes, just without advanced matching.
       // Anonymous_id is stable across the session and always present, so we
@@ -646,6 +826,11 @@ export class ContainerManager {
         s.parentNode.insertBefore(t, s);
       })(window, document, 'script', 'https://connect.facebook.net/en_US/fbevents.js');
 
+      // Turn off Meta's automatic event detection (button clicks, page
+      // metadata) for this pixel. Those browser events carry no eventID, so
+      // they can never dedupe against CAPI. Must be queued BEFORE init.
+      (window as any).fbq('set', 'autoConfig', false, config.pixel_id);
+
       // Initialize pixel only — do NOT fire PageView here. The SDK's own pageview
       // tracking (track('pageview')) routes through trackToPixels and fires a single
       // mapped PageView with a shared eventID. Firing it again here produced TWO
@@ -660,6 +845,112 @@ export class ContainerManager {
       }
     } catch (error) {
       this.log('Error initializing Meta Pixel:', error);
+    }
+  }
+
+  /**
+   * Is Shopify's Facebook & Instagram app running this pixel on the page?
+   * Page config first (deterministic, present before the app loads), then the
+   * runtime fbq signal. If the HTML is still parsing (a synchronous install
+   * placed above Shopify's header scripts), wait briefly for it to finish.
+   */
+  private async detectShopifyFacebookApp(pixelId: string): Promise<boolean> {
+    const detect = () => shopifyPageConfiguresFacebookAppPixel(pixelId)
+      || shopifyFacebookAppPixelRunning((window as any).fbq, pixelId);
+    if (detect()) return true;
+    if (typeof document === 'undefined' || document.readyState !== 'loading') return false;
+    await waitForDomContentLoaded(COMPANION_DOM_WAIT_MS);
+    return detect();
+  }
+
+  /** True when the Meta pixel is owned by Shopify's Facebook & Instagram app on this page. */
+  isMetaCompanionMode(): boolean {
+    return this.metaCompanion;
+  }
+
+  /**
+   * Resolve the page's fbq once the app has our pixel initialized on it, or
+   * null after COMPANION_FBQ_WAIT_MS. All waiting events share one poller.
+   */
+  private awaitCompanionFbq(pixelId: string): Promise<any> {
+    const readyFbq = () => {
+      const fbq = (window as any).fbq;
+      return companionFbqReady(fbq, pixelId) ? fbq : null;
+    };
+    const now = readyFbq();
+    if (now) return Promise.resolve(now);
+    if (this.companionWait) return this.companionWait;
+    let ticks = 0;
+    const maxTicks = Math.ceil(COMPANION_FBQ_WAIT_MS / COMPANION_FBQ_POLL_MS);
+    this.companionWait = new Promise((resolve) => {
+      this.companionResolve = resolve;
+      this.companionTimer = setInterval(() => {
+        ticks++;
+        const fbq = this.disposed ? null : readyFbq();
+        if (fbq || this.disposed || ticks >= maxTicks) this.finishCompanionWait(fbq);
+      }, COMPANION_FBQ_POLL_MS);
+    });
+    return this.companionWait;
+  }
+
+  private finishCompanionWait(fbq: any): void {
+    if (this.companionTimer !== null) clearInterval(this.companionTimer);
+    this.companionTimer = null;
+    const resolve = this.companionResolve;
+    this.companionResolve = null;
+    this.companionWait = null;
+    resolve?.(fbq);
+  }
+
+  /**
+   * Companion mode: send one mapped event to our pixel through the app's fbq.
+   *
+   * - PageView is never sent: the app already sends it for this pixel.
+   * - trackSingle/trackSingleCustom address only our pixel id. The fbq here is
+   *   the app's instance and may carry other pixels; plain `track` would also
+   *   send our event to every one of them, none of which gets our CAPI copy.
+   * - The workspace policy was re-read before the wait; consent is re-checked
+   *   after it.
+   * - When fbq (or the app's init of our pixel) is not there yet, wait a
+   *   bounded time rather than drop: the app's pixel loads after page load, so
+   *   an event tracked early would otherwise never get a browser copy. After
+   *   the wait the browser copy is skipped; the server (CAPI) event is
+   *   unaffected. A late browser copy is harmless: it carries our eventID.
+   */
+  private async mirrorToCompanionPixel(
+    pixelId: string,
+    metaEvent: string,
+    method: 'track' | 'trackCustom',
+    properties: any,
+    eventId?: string,
+  ): Promise<boolean> {
+    if (metaEvent === 'PageView') {
+      this.log('Meta companion mode: PageView left to the Shopify Facebook & Instagram app');
+      return false;
+    }
+    if (this.companionPending >= COMPANION_MAX_PENDING) return false;
+    this.companionPending++;
+    let fbq: any;
+    try {
+      fbq = await this.awaitCompanionFbq(pixelId);
+    } finally {
+      this.companionPending--;
+    }
+    if (!fbq || !this.forwardingAllowed()) {
+      if (!fbq) this.log('Meta companion mode: app pixel not ready; browser copy skipped for', metaEvent);
+      return false;
+    }
+    try {
+      const single = method === 'track' ? 'trackSingle' : 'trackSingleCustom';
+      if (eventId) {
+        fbq(single, pixelId, metaEvent, properties, { eventID: eventId });
+      } else {
+        fbq(single, pixelId, metaEvent, properties);
+      }
+      return true;
+    } catch (error) {
+      this.log('Error mirroring Meta event to the Shopify app pixel:', error);
+      return false;
     }
   }
 
@@ -751,11 +1042,18 @@ export class ContainerManager {
    */
   async trackToPixels(eventName: string, properties: any = {}, eventId?: string): Promise<string[]> {
     if (!this.forwardingAllowed() || eventName.startsWith('$')) return [];
-    const initialized = this.pixels;
-    if (!initialized) return [];
     // Snapshot before awaiting: caller mutations must not change the queued event.
     const sanitizedEventName = this.sanitizeEventName(eventName);
     const sanitizedProperties = this.sanitizeProperties(properties);
+    // An event tracked while init() is still running (e.g. the pageview released
+    // when Shopify consent resolves right after the container was created) is
+    // forwarded once the pixels are initialized instead of being dropped.
+    if (this.initPromise && !this.initialized) {
+      await this.initPromise;
+      if (!this.forwardingAllowed()) return [];
+    }
+    const initialized = this.pixels;
+    if (!initialized) return [];
     // Authorization is request-scoped, never a positive cached decision. Do not
     // execute newly returned scripts or initialize a new destination here.
     const pixels: PixelConfig = { whop: initialized.whop };
@@ -783,37 +1081,22 @@ export class ContainerManager {
     const sent: string[] = [];
 
     // Track to Meta Pixel
-    if (pixels?.meta?.enabled && (window as any).fbq) {
+    let companionDelivery: Promise<boolean> | null = null;
+    if (pixels?.meta?.enabled && this.metaCompanion) {
+      // Shopify's app owns the pixel on this page. Resolved without blocking
+      // the other destinations below; awaited before returning.
       try {
-        // Map our event name to Meta's standard event vocabulary so the browser
-        // Pixel fires e.g. "Purchase", not "purchase". This MUST match the
-        // platform_standard_event the postback worker sends server-side, or Meta
-        // won't dedupe (dedup = event_name + event_id). These defaults mirror the
-        // server-side auto-detect map; custom rule choices may not line up.
-        const metaEventMap: Record<string, string> = {
-          page_view: 'PageView', pageview: 'PageView',
-          view_content: 'ViewContent', product_viewed: 'ViewContent', view_item: 'ViewContent',
-          add_to_cart: 'AddToCart', product_added: 'AddToCart',
-          add_to_wishlist: 'AddToWishlist',
-          initiate_checkout: 'InitiateCheckout', begin_checkout: 'InitiateCheckout', checkout_started: 'InitiateCheckout',
-          add_payment_info: 'AddPaymentInfo',
-          purchase: 'Purchase', order_completed: 'Purchase', order_paid: 'Purchase',
-          lead: 'Lead',
-          complete_registration: 'CompleteRegistration', sign_up: 'CompleteRegistration', signup: 'CompleteRegistration',
-          search: 'Search',
-          subscribe: 'Subscribe', subscription_created: 'Subscribe',
-          start_trial: 'StartTrial', trial_started: 'StartTrial',
-          contact: 'Contact',
-          schedule: 'Schedule',
-        };
-        // Source of truth: the workspace's Meta conversion-rule map (from
-        // /container-scripts, keyed by the exact trigger event name) — this is what
-        // the server-side CAPI sends, so it guarantees event_name dedup alignment.
-        // Fall back to the static default map, then the sanitized raw name.
-        const ruleEventMap = (pixels?.meta as any)?.event_mappings as Record<string, string> | undefined;
-        const metaEvent = ruleEventMap?.[eventName]
-          || metaEventMap[String(eventName).toLowerCase()]
-          || sanitizedEventName;
+        const metaEvent = this.resolveMetaEventName(pixels.meta, eventName, sanitizedEventName);
+        const method = META_STANDARD_EVENTS.has(metaEvent) ? 'track' : 'trackCustom';
+        companionDelivery = this.mirrorToCompanionPixel(
+          String(pixels.meta.pixel_id), metaEvent, method, sanitizedProperties, eventId,
+        ).catch(() => false);
+      } catch (error) {
+        this.log('Error tracking Meta Pixel event:', error);
+      }
+    } else if (pixels?.meta?.enabled && (window as any).fbq) {
+      try {
+        const metaEvent = this.resolveMetaEventName(pixels.meta, eventName, sanitizedEventName);
 
         // Custom names use Meta's custom-event API. This selects the correct
         // transport call; it does not establish eligibility or rename the event.
@@ -889,7 +1172,46 @@ export class ContainerManager {
         this.log('Error tracking Whop Pixel page:', error);
       }
     }
+    if (companionDelivery && await companionDelivery) sent.unshift('meta');
     return sent;
+  }
+
+  /**
+   * Meta event name for one of our events. Source of truth is the workspace's
+   * Meta conversion-rule map, then the static default map, then the sanitized
+   * raw name. Shared by the normal and companion paths so both send the name
+   * the server-side CAPI sends.
+   */
+  private resolveMetaEventName(metaConfig: any, eventName: string, sanitizedEventName: string): string {
+    // Map our event name to Meta's standard event vocabulary so the browser
+    // Pixel fires e.g. "Purchase", not "purchase". This MUST match the
+    // platform_standard_event the postback worker sends server-side, or Meta
+    // won't dedupe (dedup = event_name + event_id). These defaults mirror the
+    // server-side auto-detect map; custom rule choices may not line up.
+    const metaEventMap: Record<string, string> = {
+      page_view: 'PageView', pageview: 'PageView',
+      view_content: 'ViewContent', product_viewed: 'ViewContent', view_item: 'ViewContent',
+      add_to_cart: 'AddToCart', product_added: 'AddToCart',
+      add_to_wishlist: 'AddToWishlist',
+      initiate_checkout: 'InitiateCheckout', begin_checkout: 'InitiateCheckout', checkout_started: 'InitiateCheckout',
+      add_payment_info: 'AddPaymentInfo',
+      purchase: 'Purchase', order_completed: 'Purchase', order_paid: 'Purchase',
+      lead: 'Lead',
+      complete_registration: 'CompleteRegistration', sign_up: 'CompleteRegistration', signup: 'CompleteRegistration',
+      search: 'Search',
+      subscribe: 'Subscribe', subscription_created: 'Subscribe',
+      start_trial: 'StartTrial', trial_started: 'StartTrial',
+      contact: 'Contact',
+      schedule: 'Schedule',
+    };
+    // Source of truth: the workspace's Meta conversion-rule map (from
+    // /container-scripts, keyed by the exact trigger event name) — this is what
+    // the server-side CAPI sends, so it guarantees event_name dedup alignment.
+    // Fall back to the static default map, then the sanitized raw name.
+    const ruleEventMap = metaConfig?.event_mappings as Record<string, string> | undefined;
+    return ruleEventMap?.[eventName]
+      || metaEventMap[String(eventName).toLowerCase()]
+      || sanitizedEventName;
   }
 
   /**
