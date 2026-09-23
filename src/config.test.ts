@@ -79,6 +79,16 @@ describe('applyRemoteConfig — merge precedence', () => {
     expect(config.privacyMode).toBe('strict');
   });
 
+  it('carries the merchant\'s waitForShopifyConsent choice, unless the snippet set it', () => {
+    const fromDashboard = makeConfig();
+    applyRemoteConfig(fromDashboard, { waitForShopifyConsent: false }, new Set());
+    expect(fromDashboard.waitForShopifyConsent).toBe(false);
+
+    const snippetSet = makeConfig({ waitForShopifyConsent: true });
+    applyRemoteConfig(snippetSet, { waitForShopifyConsent: false }, new Set(['waitForShopifyConsent']));
+    expect(snippetSet.waitForShopifyConsent).toBe(true);
+  });
+
   it('respects explicit for one key while still applying remote to another', () => {
     const config = makeConfig({ autoIdentify: false, respectDoNotTrack: false });
     const remote: SdkRemoteConfig = { autoIdentify: true, respectDoNotTrack: true };

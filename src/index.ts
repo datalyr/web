@@ -14,6 +14,7 @@ import { dataEncryption } from './encryption'; // SEC-03 Fix
 import { AutoIdentifyManager } from './auto-identify';
 import { StripeSessionWatcher } from './stripe-session';
 import { applyRemoteConfig } from './config';
+import { shopifyCartId } from './shopify-cart';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
 import {
   generateUUID,
@@ -53,6 +54,11 @@ export * from './types';
  */
 const IDENTIFY_FINGERPRINT_KEY = 'dl_identify_fingerprint';
 
+// Signals the ingest worker consumes and then drops (never stored as an event).
+// They must not take once-per-page payload extras (the Klaviyo profile binding)
+// or count as session activity: whatever rides on them is lost.
+const INTERNAL_SIGNAL_EVENTS = new Set(['$shopify_cart']);
+
 class Datalyr {
   private config!: DatalyrConfig;
   private identity!: IdentityManager;
@@ -91,6 +97,9 @@ class Datalyr {
   private inAppHandoffTimer: ReturnType<typeof setInterval> | null = null;
   private inAppHandoffWrite: (() => void) | null = null;
   private inAppHandoffReported = false;
+  private reportedShopifyCartId: string | null = null; // reportShopifyCart: once per cart id per page
+  private shopifyConsentWaitElapsed = false; // waitForShopifyConsent:false — stop holding for the Customer Privacy API
+  private shopifyConsentOverrideWaitMs = 3000;
   private lastSpaPath: string | null = null;    // dedups SPA pageviews (replaceState-on-mount double-fire)
   // Shopify loads Customer Privacy asynchronously. Keep the initial pageview
   // pending until initialization is complete and analytics consent is known,
@@ -257,6 +266,9 @@ class Datalyr {
     // Shopify Customer Privacy (9.A.1): react to the native consent banner's
     // decision mid-session (grant AND revoke), not just at the next page load.
     this.setupShopifyConsentListener();
+    // The merchant may have chosen not to wait for Shopify consent; that choice
+    // has to be fetched before consent (see loadShopifyConsentPolicy).
+    this.loadShopifyConsentPolicy();
 
     // Initialize plugins
     if (this.config.plugins) {
@@ -564,8 +576,8 @@ class Datalyr {
     try {
       // PRIVACY: Heavy fingerprinting removed - using minimal fingerprinting only
 
-      // Update session activity
-      this.session.updateActivity(eventName);
+      // Update session activity (not for internal signals the server drops)
+      if (!INTERNAL_SIGNAL_EVENTS.has(eventName)) this.session.updateActivity(eventName);
 
       // Generate the event_id ONCE here so the same value is used for both the
       // ingested event (→ CAPI dedup key in the postback worker) and the browser
@@ -1355,18 +1367,47 @@ class Datalyr {
 
     if (Object.keys(attributes).length === 0) return;
 
+    let cart: any = null;
     try {
-      await fetch("/cart/update.js", {
+      const response = await fetch("/cart/update.js", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
         body: JSON.stringify({ attributes }),
       });
       this.log("Shopify cart attributes stamped:", Object.keys(attributes));
+      cart = response && typeof response.json === "function"
+        ? await response.json().catch(() => null)
+        : null;
     } catch (error) {
       // Never let cart sync affect tracking — swallow (e.g. no cart yet / CSP).
       this.log("Shopify /cart/update.js failed:", error);
     }
+    this.reportShopifyCart(cart?.token ?? this.cookies.get("cart"));
+  }
+
+  /**
+   * Report which Shopify cart belongs to this visitor, so the order webhook can
+   * find the visitor by `order.cart_token` (the ingest worker stores the pairing
+   * and drops the event; it is never stored as an event or counted as usage).
+   *
+   * Why this and not only the cart attributes above: a theme that sets cart
+   * attributes itself (Storefront `updateCart({ attributes })`, as custom product
+   * builders do) REPLACES ours, and inside Instagram / Facebook the checkout Web
+   * Pixel often reports nothing, so neither existing path survives there. The
+   * cart id is on every order.
+   *
+   * Shopify's cart token is "<id>?key=<secret>". The key grants access to the cart;
+   * it is never sent. Only the id, which the order webhook carries as cart_token,
+   * leaves the browser, as `shopify_cart_id` (a key containing "token" would be
+   * stripped by sanitizeProperties). Same gates as the cart stamping: it runs only
+   * from there. Once per cart id per page.
+   */
+  private reportShopifyCart(rawToken: unknown): void {
+    const cartId = shopifyCartId(rawToken);
+    if (!cartId || cartId === this.reportedShopifyCartId) return;
+    this.reportedShopifyCartId = cartId;
+    this.track("$shopify_cart", { shopify_cart_id: cartId });
   }
 
   /** Strip the retired unsigned Checkout Champ bridge parameters. */
@@ -1762,7 +1803,9 @@ class Datalyr {
     // A Klaviyo landing URL may carry the profile ID as a dedicated custom
     // parameter. Emit it once through the deterministic external-id envelope;
     // never copy it into generic attribution or user-visible URL fields.
-    const klaviyoProfileId = this.attribution.consumeKlaviyoProfileBinding();
+    const klaviyoProfileId = INTERNAL_SIGNAL_EVENTS.has(eventName)
+      ? null
+      : this.attribution.consumeKlaviyoProfileBinding();
     if (klaviyoProfileId) {
       const existingExternalIds = eventData.external_ids;
       eventData.external_ids = {
@@ -1968,6 +2011,7 @@ class Datalyr {
    * — null means "no restriction from Shopify", i.e. today's behavior.
    */
   private shopifyAnalyticsConsent(): boolean | null {
+    if (this.config.waitForShopifyConsent === false) return this.shopifyConsentWithoutWaiting('analytics');
     try {
       const cp = this.getShopifyCustomerPrivacy();
       if (!cp) return this.shopifyConsentPendingBlock();
@@ -1992,6 +2036,7 @@ class Datalyr {
    * shopifyAnalyticsConsent().
    */
   private shopifyMarketingConsent(): boolean | null {
+    if (this.config.waitForShopifyConsent === false) return this.shopifyConsentWithoutWaiting('marketing');
     try {
       const cp = this.getShopifyCustomerPrivacy();
       if (!cp || typeof cp.marketingAllowed !== 'function') {
@@ -2003,6 +2048,109 @@ class Datalyr {
         : (this.shopifyConsentPendingBlock());
     } catch {
       return this.shopifyConsentPendingBlock();
+    }
+  }
+
+  /**
+   * Consent when the merchant chose not to wait for Shopify consent
+   * (waitForShopifyConsent: false): "no answer yet" and "no banner" do not hold
+   * tracking, but a visitor who ACTIVELY declined `purpose` is never tracked.
+   *
+   * The documented answer is the Customer Privacy API's currentVisitorConsent()
+   * ('yes' / 'no' / '' per purpose), so until it loads this still holds (the
+   * usual pre-load window, fail closed) for at most shopifyConsentOverrideWaitMs.
+   * After that, with no API answer possible, the only remaining signal is the
+   * `_cmp` Server-Timing value Shopify sends with the page (see
+   * shopifyServerTimingDecline); anything but a decline there releases.
+   */
+  private shopifyConsentWithoutWaiting(purpose: 'analytics' | 'marketing'): boolean | null {
+    try {
+      const cp = this.getShopifyCustomerPrivacy();
+      if (cp && typeof cp.currentVisitorConsent === 'function') {
+        const consent = cp.currentVisitorConsent();
+        if (consent && typeof consent === 'object') return consent[purpose] === 'no' ? false : null;
+      }
+      if (cp && typeof cp.getTrackingConsent === 'function') {
+        return cp.getTrackingConsent() === 'no' ? false : null;
+      }
+      if (cp) return null; // loaded, but with no per-visitor answer to read
+    } catch {
+      // treat as not loaded
+    }
+    if (this.shopifyServerTimingDecline(purpose)) return false;
+    if (this.shopifyConsentWaitElapsed) return null;
+    return this.shopifyConsentPendingBlock();
+  }
+
+  /**
+   * Best effort, for the window before the Customer Privacy API loads: did the
+   * visitor decline `purpose` on an earlier page? Shopify no longer exposes its
+   * consent cookie to scripts; it sends the state as the `_cmp` Server-Timing
+   * entry of the page. Observed on dainti.shop (2026-09-23): "3.AMPS_USCA_…"
+   * with no answer, "3amps._USCA_…" after declining everything. Explicit
+   * answers precede the '.', a lowercase letter is a decline. Undocumented, so
+   * only a clear decline counts; anything unreadable is "no signal".
+   */
+  private shopifyServerTimingDecline(purpose: 'analytics' | 'marketing'): boolean {
+    try {
+      if (typeof performance === 'undefined' || typeof performance.getEntriesByType !== 'function') return false;
+      const nav = performance.getEntriesByType('navigation')[0] as any;
+      const entry = Array.isArray(nav?.serverTiming)
+        ? nav.serverTiming.find((timing: any) => timing && timing.name === '_cmp')
+        : null;
+      const value = typeof entry?.description === 'string' ? entry.description : '';
+      const head = value.split('_')[0];
+      const dot = head.indexOf('.');
+      if (dot < 0) return false;
+      const explicit = head.slice(0, dot).replace(/^\d+/, '');
+      return explicit.includes(purpose === 'analytics' ? 'a' : 'm');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Fetch the merchant's Shopify consent choice before consent.
+   *
+   * The dashboard setting normally rides the /container-scripts config, but on a
+   * Shopify store that is waiting for consent the container only starts AFTER
+   * consent — so a merchant who chose not to wait could never be heard. This GET
+   * carries nothing about the visitor (no body, no cookies, no visitor id): the
+   * same exposure as loading dl.js itself. Only a `false` answer changes anything;
+   * any error keeps the default (wait).
+   */
+  private loadShopifyConsentPolicy(): void {
+    if (typeof window === 'undefined' || typeof fetch !== 'function') return;
+    if (this.explicitConfigKeys.has('waitForShopifyConsent')) return; // the snippet decides
+    if (!this.isShopifyStorefront()) return;
+    // Nothing to fetch for a visitor who already declined: the answer is the same.
+    if (this.shopifyServerTimingDecline('analytics')) return;
+    const workspaceId = this.config.workspaceId;
+    const endpoint = this.config.endpoint;
+    if (!workspaceId || !endpoint) return;
+    try {
+      fetch(`${endpoint}/sdk-consent-policy?ws=${encodeURIComponent(workspaceId)}`, {
+        method: 'GET',
+        credentials: 'omit',
+      })
+        .then((response) => (response && response.ok ? response.json() : null))
+        .then((policy) => {
+          if (!policy || policy.waitForShopifyConsent !== false) return;
+          if (this.config.waitForShopifyConsent === false) return;
+          this.config.waitForShopifyConsent = false;
+          this.log('Merchant chose not to wait for Shopify consent; re-evaluating');
+          try { this.onShopifyConsentChanged(); } catch (error) { this.log('Consent re-evaluation failed:', error); }
+          // If the Customer Privacy API has not answered by then, stop holding for it.
+          setTimeout(() => {
+            this.shopifyConsentWaitElapsed = true;
+            try { this.onShopifyConsentChanged(); } catch (error) { this.log('Consent re-evaluation failed:', error); }
+          }, this.shopifyConsentOverrideWaitMs);
+        })
+        .catch(() => {
+          // best-effort — the default (wait) stands
+        });
+    } catch {
+      // best-effort
     }
   }
 
