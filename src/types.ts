@@ -31,7 +31,14 @@ export interface DatalyrConfig {
   respectDoNotTrack?: boolean;          // Default: false
   respectGlobalPrivacyControl?: boolean; // Default: true
   privacyMode?: 'standard' | 'strict';  // Default: 'standard'
-  
+  // Shopify cookie consent. Default: true. On a Shopify storefront the SDK waits for the
+  // store's Customer Privacy API to allow analytics (and marketing, for pixels and cart
+  // stamping) before it tracks. false is the MERCHANT's decision, made in the dashboard
+  // (Settings → Identity & Attribution), to stop waiting when the visitor has not
+  // answered or the store shows no banner. A visitor who actively declines is still
+  // never tracked.
+  waitForShopifyConsent?: boolean;
+
   // Storage
   cookieDomain?: string | 'auto';       // Default: 'auto'
   cookieExpires?: number;               // Default: 365 days

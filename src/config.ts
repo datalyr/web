@@ -29,6 +29,10 @@ export interface SdkRemoteConfig {
   respectGlobalPrivacyControl?: boolean;
   respectDoNotTrack?: boolean;
   privacyMode?: 'standard' | 'strict';
+  // Merchant-owned (dashboard). Also fetched before consent from
+  // /sdk-consent-policy, because on a Shopify store waiting for consent this
+  // envelope only arrives after consent — see loadShopifyConsentPolicy().
+  waitForShopifyConsent?: boolean;
 }
 
 /** Keys the remote config is allowed to fill on DatalyrConfig. */
@@ -44,6 +48,7 @@ const REMOTE_KEYS: ReadonlyArray<keyof SdkRemoteConfig> = [
   'respectGlobalPrivacyControl',
   'respectDoNotTrack',
   'privacyMode',
+  'waitForShopifyConsent',
 ];
 
 /**

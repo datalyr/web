@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.19
+
+- Shopify: new `waitForShopifyConsent` setting (default `true`, unchanged behaviour). A merchant can turn it off in the dashboard (Settings → Identity & Attribution) when their store handles cookie consent another way. With it off, the SDK stops waiting when Shopify reports no answer yet or the store shows no banner, and releases the held landing pageview, pixels and cart stamping as if consent had resolved. A visitor who actively declines is still never tracked: the SDK still waits (up to 3 seconds) for Shopify's Customer Privacy API to say whether this visitor answered "no", and without it reads the decline from the consent state Shopify sends with the page (`_cmp` Server-Timing). Because a store waiting for consent only loads the container after consent, the setting is fetched before consent from `/sdk-consent-policy`: a GET with no body, no cookies and no visitor id. An explicit `waitForShopifyConsent` in `init()` wins and skips the request.
+- Shopify: after stamping the cart, the SDK reports the cart's id as an internal `$shopify_cart` signal, so the order webhook can find the visitor by `order.cart_token` even when a theme replaces the cart attributes or the checkout pixel does not run (common inside Instagram / Facebook). Only the id before `?key=` is ever sent; the key grants access to the cart and never leaves the browser. Same consent gates as the cart stamping; once per cart per page. The signal takes no once-per-page extras (Klaviyo profile binding) and does not count as session activity.
+
 ## 1.7.18
 
 - TikTok: browser events now carry the same `event_id` as the server-side Events API copy, so TikTok stops counting the two copies of every conversion separately. TikTok deduplicates only when the event name AND `event_id` both match, and the event name already came from the workspace's conversion rules, so this completes the pair.

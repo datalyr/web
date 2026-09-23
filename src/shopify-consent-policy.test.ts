@@ -1,0 +1,307 @@
+/**
+ * The merchant's choice not to wait for Shopify cookie consent
+ * (waitForShopifyConsent: false, set in the dashboard) and the Shopify cart
+ * pairing report.
+ *
+ * On a Shopify store that requires consent, the SDK holds everything until the
+ * Customer Privacy API allows it. When the store has no banner, that is never.
+ * The merchant's setting has to reach the SDK BEFORE consent (the container
+ * envelope only arrives after it), so it is fetched from /sdk-consent-policy.
+ * A visitor who actively declined is never tracked either way.
+ */
+export {}; // module scope: index.test.ts declares the same helper names globally
+
+import { shopifyCartId } from './shopify-cart';
+
+type SdkModule = typeof import('./index');
+
+function loadSdk(): SdkModule {
+  let sdk!: SdkModule;
+  jest.isolateModules(() => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    sdk = require('./index') as SdkModule;
+  });
+  return sdk;
+}
+
+const CART_ID = 'hWNH9Y6FdVrLgn7ZJ5mpqZ0i';
+const CART_KEY = '1c8f35be87e0ebf01a3595872887b0f5';
+
+function mockNetwork(policy: Record<string, unknown> | null | 'error'): jest.Mock {
+  const fetchMock = jest.fn(async (url: string) => {
+    const target = String(url);
+    if (target.includes('/sdk-consent-policy')) {
+      if (policy === 'error') throw new Error('network down');
+      if (policy === null) return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => policy };
+    }
+    if (target.includes('/cart/update.js')) {
+      return { ok: true, status: 200, json: async () => ({ token: `${CART_ID}?key=${CART_KEY}`, attributes: {} }) };
+    }
+    if (target.includes('/container-scripts')) {
+      return { ok: true, status: 200, json: async () => ({ scripts: [], pixels: {} }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+  });
+  global.fetch = fetchMock as unknown as typeof fetch;
+  return fetchMock;
+}
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 25; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** A Shopify store whose Customer Privacy API never answers (consent required, no banner). */
+function stubShopifyNeverAnswers(): void {
+  (window as any).Shopify = { loadFeatures: () => undefined };
+}
+
+/** A Shopify store whose Customer Privacy API is loaded with the given answers. */
+function stubShopifyAnswers(opts: {
+  analyticsAllowed: boolean;
+  marketingAllowed: boolean;
+  visitor: { analytics: string; marketing: string };
+}): void {
+  (window as any).Shopify = {
+    loadFeatures: (_features: unknown, callback: (error?: unknown) => void) => callback(),
+    customerPrivacy: {
+      analyticsProcessingAllowed: () => opts.analyticsAllowed,
+      marketingAllowed: () => opts.marketingAllowed,
+      currentVisitorConsent: () => ({ ...opts.visitor, preferences: '', sale_of_data: '' }),
+    },
+  };
+}
+
+/** The `_cmp` Server-Timing value Shopify sends with the page (observed on dainti.shop). */
+// jsdom has no getEntriesByType; defined per test and removed in afterEach.
+function stubServerTimingConsent(description: string): void {
+  Object.defineProperty(performance, 'getEntriesByType', {
+    configurable: true,
+    value: (type: string) => (type === 'navigation' ? [{ serverTiming: [{ name: '_cmp', description, duration: 0 }] }] : []),
+  });
+}
+
+const baseConfig = {
+  workspaceId: 'ws-consent-policy',
+  platform: 'shopify' as const,
+  enableFingerprinting: false,
+  enablePerformanceTracking: false,
+  enableContainer: false,
+  trackPageViews: true,
+  trackSPA: false,
+  shopifyCartAttributes: false,
+  stripePaymentLinks: false,
+  stripeCheckoutSessions: false,
+  inAppHandoff: false,
+};
+
+function tracked(enqueue: jest.SpyInstance): string[] {
+  return enqueue.mock.calls.map((call: any[]) => call[0].event_name);
+}
+
+describe('waitForShopifyConsent: false (merchant does not wait for Shopify consent)', () => {
+  const originalFetch = global.fetch;
+  let instance: any;
+
+  beforeEach(() => {
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    instance?.destroy();
+    instance = undefined;
+    global.fetch = originalFetch;
+    delete (window as any).Shopify;
+    delete (window as any).datalyr;
+    delete (performance as any).getEntriesByType;
+    document.cookie = 'cart=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+    localStorage.clear();
+    jest.restoreAllMocks();
+  });
+
+  // Spy right after init(): anything the policy releases is enqueued later,
+  // once the /sdk-consent-policy response resolves.
+  async function boot(config: Record<string, unknown> = baseConfig, waitMs = 20): Promise<jest.SpyInstance> {
+    const sdk = loadSdk();
+    instance = sdk.createDatalyrInstance();
+    instance.shopifyConsentOverrideWaitMs = waitMs;
+    instance.init(config);
+    const enqueue = jest.spyOn(instance.queue, 'enqueue');
+    await instance.ready();
+    await settle();
+    return enqueue;
+  }
+
+  test('default: a store that never answers holds the landing pageview (unchanged behaviour)', async () => {
+    mockNetwork({ waitForShopifyConsent: true });
+    stubShopifyNeverAnswers();
+    const enqueue = await boot();
+    expect(tracked(enqueue)).not.toContain('pageview');
+  });
+
+  test('merchant chose not to wait, store never answers: held for the API, then released once', async () => {
+    const fetchMock = mockNetwork({ waitForShopifyConsent: false });
+    stubShopifyNeverAnswers();
+    const enqueue = await boot(baseConfig, 60);
+    expect(tracked(enqueue)).not.toContain('pageview'); // still inside the wait for the API
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+    expect(tracked(enqueue).filter((name) => name === 'pageview')).toHaveLength(1);
+
+    // The policy request carries nothing about the visitor.
+    const [url, init] = fetchMock.mock.calls.find(([u]) => String(u).includes('/sdk-consent-policy'))!;
+    expect(String(url)).toBe('https://ingest.datalyr.com/sdk-consent-policy?ws=ws-consent-policy');
+    expect(init).toEqual({ method: 'GET', credentials: 'omit' });
+  });
+
+  test.each([
+    ['policy missing (404)', null],
+    ['policy request fails', 'error' as const],
+  ])('%s: keeps waiting', async (_name, policy) => {
+    mockNetwork(policy);
+    stubShopifyNeverAnswers();
+    const enqueue = await boot();
+    expect(tracked(enqueue)).not.toContain('pageview');
+  });
+
+  test('a visitor who DECLINED on an earlier page (Server-Timing _cmp) is never tracked, even after the wait', async () => {
+    const fetchMock = mockNetwork({ waitForShopifyConsent: false });
+    stubShopifyNeverAnswers();
+    stubServerTimingConsent('3amps._GB_yBwjGjLGQe2j2oBUU9SleA_%7B%7D');
+    const enqueue = await boot();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await settle();
+    expect(tracked(enqueue)).toHaveLength(0);
+    // The answer is already known, so the policy is not even asked for.
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/sdk-consent-policy'))).toBe(false);
+  });
+
+  test('no answer yet in the Server-Timing value (3.AMPS): released after the wait', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopifyNeverAnswers();
+    stubServerTimingConsent('3.AMPS_GB_yBwjGjLGQe2j2oBUU9SleA_%7B%7D');
+    const enqueue = await boot();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await settle();
+    expect(tracked(enqueue)).toContain('pageview');
+  });
+
+  test('a visitor who DECLINED in the loaded banner is never tracked', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopifyAnswers({ analyticsAllowed: false, marketingAllowed: false, visitor: { analytics: 'no', marketing: 'no' } });
+    const enqueue = await boot();
+    expect(tracked(enqueue)).toHaveLength(0);
+  });
+
+  test('no answer yet in a consent region (Shopify says "not allowed", visitor gave none): tracked', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopifyAnswers({ analyticsAllowed: false, marketingAllowed: false, visitor: { analytics: '', marketing: '' } });
+    const enqueue = await boot();
+    expect(tracked(enqueue)).toContain('pageview');
+  });
+
+  test('an explicit init() waitForShopifyConsent: true wins; the policy is not even fetched', async () => {
+    const fetchMock = mockNetwork({ waitForShopifyConsent: false });
+    stubShopifyNeverAnswers();
+    const enqueue = await boot({ ...baseConfig, waitForShopifyConsent: true });
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/sdk-consent-policy'))).toBe(false);
+    expect(tracked(enqueue)).not.toContain('pageview');
+  });
+
+  test('not a Shopify storefront: no policy request', async () => {
+    const fetchMock = mockNetwork({ waitForShopifyConsent: false });
+    const sdk = loadSdk();
+    instance = sdk.createDatalyrInstance();
+    instance.init({ ...baseConfig, platform: 'generic' });
+    await instance.ready();
+    await settle();
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/sdk-consent-policy'))).toBe(false);
+  });
+});
+
+describe('Shopify cart pairing report', () => {
+  const originalFetch = global.fetch;
+  let instance: any;
+
+  beforeEach(() => {
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    instance?.destroy();
+    instance = undefined;
+    global.fetch = originalFetch;
+    delete (window as any).Shopify;
+    delete (window as any).datalyr;
+    document.cookie = 'cart=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+    localStorage.clear();
+    jest.restoreAllMocks();
+  });
+
+  async function bootStamping(): Promise<{ enqueue: jest.SpyInstance; fetchMock: jest.Mock }> {
+    const fetchMock = mockNetwork({ waitForShopifyConsent: true });
+    stubShopifyAnswers({ analyticsAllowed: true, marketingAllowed: true, visitor: { analytics: 'yes', marketing: 'yes' } });
+    const sdk = loadSdk();
+    instance = sdk.createDatalyrInstance();
+    instance.init({ ...baseConfig, shopifyCartAttributes: true });
+    const enqueue = jest.spyOn(instance.queue, 'enqueue');
+    await instance.ready();
+    await settle();
+    return { enqueue, fetchMock };
+  }
+
+  test('reports the cart id, never the key, once per page', async () => {
+    const { enqueue, fetchMock } = await bootStamping();
+    const reports = enqueue.mock.calls.map((call: any[]) => call[0]).filter((p: any) => p.event_name === '$shopify_cart');
+    expect(reports).toHaveLength(1);
+    expect(JSON.stringify(reports[0])).toContain(CART_ID);
+    expect(JSON.stringify(reports[0])).not.toContain(CART_KEY);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(String(init?.body ?? '')).not.toContain(CART_KEY);
+    }
+
+    // A second stamp (e.g. consent re-evaluation) with the same cart does not re-report.
+    await instance.syncShopifyCartAttributes();
+    const again = enqueue.mock.calls.filter((call: any[]) => call[0].event_name === '$shopify_cart');
+    expect(again).toHaveLength(1);
+
+    // An internal signal never takes the once-per-page Klaviyo binding.
+    const consume = jest.spyOn(instance.attribution, 'consumeKlaviyoProfileBinding');
+    instance.reportShopifyCart('aDifferentCartId0123456789');
+    expect(consume).not.toHaveBeenCalled();
+    instance.track('page_viewed_again');
+    expect(consume).toHaveBeenCalledTimes(1);
+  });
+
+  test('no report when marketing consent is declined (stamping is gated the same way)', async () => {
+    mockNetwork({ waitForShopifyConsent: true });
+    stubShopifyAnswers({ analyticsAllowed: true, marketingAllowed: false, visitor: { analytics: 'yes', marketing: 'no' } });
+    const sdk = loadSdk();
+    instance = sdk.createDatalyrInstance();
+    instance.init({ ...baseConfig, shopifyCartAttributes: true });
+    const enqueue = jest.spyOn(instance.queue, 'enqueue');
+    await instance.ready();
+    await settle();
+    expect(enqueue.mock.calls.some((call: any[]) => call[0].event_name === '$shopify_cart')).toBe(false);
+  });
+});
+
+describe('shopifyCartId', () => {
+  test.each([
+    [`${CART_ID}?key=${CART_KEY}`, CART_ID],
+    [encodeURIComponent(`${CART_ID}?key=${CART_KEY}`), CART_ID],
+    [CART_ID, CART_ID],
+    ['  ' + CART_ID + '  ', CART_ID],
+  ])('%s -> %s', (raw, expected) => {
+    expect(shopifyCartId(raw)).toBe(expected);
+  });
+
+  test.each([[null], [undefined], [42], [''], ['short'], ['has space in it abcdefgh'], ['<script>alert(1)</script>xxxxxxxx']])(
+    'rejects %p',
+    (raw) => {
+      expect(shopifyCartId(raw)).toBeNull();
+    },
+  );
+});
