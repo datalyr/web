@@ -613,6 +613,10 @@ class Datalyr {
       }
 
       this.log('Event tracked:', eventName);
+
+      // The cart may have changed since the last check (an add to cart through a
+      // cart drawer or widget fires no page load); see reportShopifyCartFromCookie.
+      if (eventName !== "$shopify_cart") this.reportShopifyCartFromCookie();
     } catch (error) {
       this.trackError(error as Error, { event: eventName });
     }
@@ -1403,6 +1407,29 @@ class Datalyr {
    * stripped by sanitizeProperties). Same gates as the cart stamping: it runs only
    * from there. Once per cart id per page.
    */
+  /**
+   * Report the cart the shopper has now, not only the one at page load.
+   *
+   * syncShopifyCartAttributes reports once, at page load. A cart created or
+   * replaced later on the same page was never reported: an add to cart through
+   * a cart drawer or widget, then straight to checkout with no further page load
+   * (dainti order 7308784500784, 2026-09-24: one page view, add to cart 8s
+   * later, checkout, order unlinked). Shopify keeps the current cart in the
+   * `cart` cookie whoever changes it, so this reads the cookie, locally, on every
+   * tracked event and once more before the queue flushes when the page is left
+   * (the checkout navigation). reportShopifyCart sends only a cart id it has not
+   * sent from this page. Same gates as the cart stamping; never throws.
+   */
+  private reportShopifyCartFromCookie(): void {
+    try {
+      if (this.config.shopifyCartAttributes !== true || !this.isShopifyStorefront()) return;
+      if (!this.shouldTrack() || this.shopifyMarketingConsent() === false) return;
+      this.reportShopifyCart(this.cookies.get("cart"));
+    } catch (error) {
+      this.log("Shopify cart report failed:", error);
+    }
+  }
+
   private reportShopifyCart(rawToken: unknown): void {
     const cartId = shopifyCartId(rawToken);
     if (!cartId || cartId === this.reportedShopifyCartId) return;
@@ -2341,9 +2368,14 @@ class Datalyr {
     // FSR-15: pagehide/beforeunload are TERMINAL (beacon both queues, keep the persisted
     // copy); a visibilitychange:hidden is just a tab switch / background, so use the
     // non-terminal path (response-checked fetch drain that never erases the backlog).
-    this.unloadHandler = () => { this.queue.forceFlush(true); };
+    // The Shopify cart report goes first so the flush carries it (leaving for
+    // checkout is when a widget-created cart is last seen).
+    this.unloadHandler = () => { this.reportShopifyCartFromCookie(); this.queue.forceFlush(true); };
     this.visibilityHandler = () => {
-      if (document.visibilityState === 'hidden') this.queue.forceFlush(false);
+      if (document.visibilityState === 'hidden') {
+        this.reportShopifyCartFromCookie();
+        this.queue.forceFlush(false);
+      }
     };
 
     // Use multiple events for maximum compatibility.
