@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.7.20
+
+- Shopify: the cart report (`$shopify_cart`) now follows the cart, not only the page load. A shopper who adds to cart through a cart drawer or widget and goes straight to checkout, with no further page load, used to leave only the page-load cart reported, so the order could not be linked to the visit. The SDK now reads Shopify's `cart` cookie on every tracked event and once more when the page is left (before the queue flushes), and reports a cart id it has not reported from this page. Local cookie read, no extra requests; same consent gates and `?key=` stripping as before.
+
 ## 1.7.19
 
 - Shopify: new `waitForShopifyConsent` setting (default `true`, unchanged behaviour). A merchant can turn it off in the dashboard (Settings → Identity & Attribution) when their store handles cookie consent another way. With it off, the SDK stops waiting when Shopify reports no answer yet or the store shows no banner, and releases the held landing pageview, pixels and cart stamping as if consent had resolved. A visitor who actively declines is still never tracked: the SDK still waits (up to 3 seconds) for Shopify's Customer Privacy API to say whether this visitor answered "no", and without it reads the decline from the consent state Shopify sends with the page (`_cmp` Server-Timing). Because a store waiting for consent only loads the container after consent, the setting is fetched before consent from `/sdk-consent-policy`: a GET with no body, no cookies and no visitor id. An explicit `waitForShopifyConsent` in `init()` wins and skips the request.

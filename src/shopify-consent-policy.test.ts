@@ -286,6 +286,63 @@ describe('Shopify cart pairing report', () => {
     await settle();
     expect(enqueue.mock.calls.some((call: any[]) => call[0].event_name === '$shopify_cart')).toBe(false);
   });
+
+  // dainti order 7308784500784 (2026-09-24): one page view, an add to cart
+  // through the store's cart widget 8s later, straight to checkout. The cart
+  // reported at page load was not the cart the order came from.
+  const WIDGET_CART = 'Wdgt9Y6FdVrLgn7ZJ5mpqZ0iXy';
+  const cartReports = (enqueue: jest.SpyInstance) => enqueue.mock.calls
+    .map((call: any[]) => call[0]).filter((p: any) => p.event_name === '$shopify_cart');
+
+  test('a cart that changes after page load is reported on the next tracked event, once', async () => {
+    const { enqueue } = await bootStamping();
+    expect(cartReports(enqueue)).toHaveLength(1);
+    document.cookie = `cart=${encodeURIComponent(`${WIDGET_CART}?key=${CART_KEY}`)}; path=/`;
+    instance.track('add_to_cart', { value: 35 });
+    const reports = cartReports(enqueue);
+    expect(reports).toHaveLength(2);
+    expect(JSON.stringify(reports[1])).toContain(WIDGET_CART);
+    expect(JSON.stringify(reports[1])).not.toContain(CART_KEY);
+    instance.track('view_item');
+    expect(cartReports(enqueue)).toHaveLength(2);
+  });
+
+  test('leaving the page reports a changed cart before the queue flushes', async () => {
+    const { enqueue } = await bootStamping();
+    const flush = jest.spyOn(instance.queue, 'forceFlush');
+    document.cookie = `cart=${encodeURIComponent(`${WIDGET_CART}?key=${CART_KEY}`)}; path=/`;
+    window.dispatchEvent(new Event('pagehide'));
+    const reportCall = enqueue.mock.calls.findIndex((call: any[]) => call[0].event_name === '$shopify_cart'
+      && JSON.stringify(call[0]).includes(WIDGET_CART));
+    expect(reportCall).toBeGreaterThanOrEqual(0);
+    expect(enqueue.mock.invocationCallOrder[reportCall]).toBeLessThan(flush.mock.invocationCallOrder[0]);
+  });
+
+  test('cookie reports follow the stamping gates: off when the store turned cart attributes off or marketing is declined', async () => {
+    mockNetwork({ waitForShopifyConsent: true });
+    stubShopifyAnswers({ analyticsAllowed: true, marketingAllowed: true, visitor: { analytics: 'yes', marketing: 'yes' } });
+    let sdk = loadSdk();
+    instance = sdk.createDatalyrInstance();
+    instance.init({ ...baseConfig, shopifyCartAttributes: false });
+    let enqueue = jest.spyOn(instance.queue, 'enqueue');
+    await instance.ready();
+    await settle();
+    document.cookie = `cart=${encodeURIComponent(`${WIDGET_CART}?key=${CART_KEY}`)}; path=/`;
+    instance.track('add_to_cart');
+    expect(cartReports(enqueue)).toHaveLength(0);
+    instance.destroy();
+
+    stubShopifyAnswers({ analyticsAllowed: true, marketingAllowed: false, visitor: { analytics: 'yes', marketing: 'no' } });
+    sdk = loadSdk();
+    instance = sdk.createDatalyrInstance();
+    instance.init({ ...baseConfig, shopifyCartAttributes: true });
+    enqueue = jest.spyOn(instance.queue, 'enqueue');
+    await instance.ready();
+    await settle();
+    instance.track('add_to_cart');
+    window.dispatchEvent(new Event('pagehide'));
+    expect(cartReports(enqueue)).toHaveLength(0);
+  });
 });
 
 describe('shopifyCartId', () => {
