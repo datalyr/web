@@ -345,6 +345,123 @@ describe('Shopify cart pairing report', () => {
   });
 });
 
+describe('Shopify cart watch (1.7.21)', () => {
+  const originalFetch = global.fetch;
+  let instance: any;
+
+  beforeEach(() => {
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    instance?.destroy();
+    instance = undefined;
+    global.fetch = originalFetch;
+    delete (window as any).Shopify;
+    delete (window as any).datalyr;
+    document.cookie = 'cart=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+    localStorage.clear();
+    jest.restoreAllMocks();
+  });
+
+  const WIDGET_CART = 'Wdgt9Y6FdVrLgn7ZJ5mpqZ0iXy';
+  const cartReports = (enqueue: jest.SpyInstance) => enqueue.mock.calls
+    .map((call: any[]) => call[0]).filter((p: any) => p.event_name === '$shopify_cart');
+  const updates = (fetchMock: jest.Mock) => fetchMock.mock.calls.filter(([url]) => String(url).includes('/cart/update.js'));
+
+  async function boot(opts: { marketing?: boolean } = {}): Promise<{ enqueue: jest.SpyInstance; fetchMock: jest.Mock }> {
+    const fetchMock = mockNetwork({ waitForShopifyConsent: true });
+    const marketing = opts.marketing !== false;
+    stubShopifyAnswers({ analyticsAllowed: true, marketingAllowed: marketing, visitor: { analytics: 'yes', marketing: marketing ? 'yes' : 'no' } });
+    const sdk = loadSdk();
+    instance = sdk.createDatalyrInstance();
+    instance.init({ ...baseConfig, shopifyCartAttributes: true });
+    const enqueue = jest.spyOn(instance.queue, 'enqueue');
+    await instance.ready();
+    await settle();
+    return { enqueue, fetchMock };
+  }
+
+  test('a cart created by a widget after page load is stamped and reported by the watch, once', async () => {
+    const { enqueue, fetchMock } = await boot();
+    expect(instance.shopifyCartWatchTimer).not.toBeNull();
+    expect(updates(fetchMock)).toHaveLength(1);
+    // The widget replaces the cart; no page load, no tracked event.
+    document.cookie = `cart=${encodeURIComponent(`${WIDGET_CART}?key=${CART_KEY}`)}; path=/`;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (String(url).includes('/cart/update.js')) return { ok: true, status: 200, json: async () => ({ token: `${WIDGET_CART}?key=${CART_KEY}`, attributes: {} }) };
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+    instance.checkShopifyCart();
+    await settle();
+    expect(updates(fetchMock)).toHaveLength(2);
+    const reports = cartReports(enqueue);
+    expect(reports).toHaveLength(2);
+    expect(JSON.stringify(reports[1])).toContain(WIDGET_CART);
+    expect(JSON.stringify(reports[1])).not.toContain(CART_KEY);
+    // The same cart on the next tick: nothing more.
+    instance.checkShopifyCart();
+    await settle();
+    expect(updates(fetchMock)).toHaveLength(2);
+    expect(cartReports(enqueue)).toHaveLength(2);
+  });
+
+  test('a cart the store will not let us stamp is not retried every tick', async () => {
+    const { fetchMock } = await boot();
+    document.cookie = `cart=${encodeURIComponent(`${WIDGET_CART}?key=${CART_KEY}`)}; path=/`;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (String(url).includes('/cart/update.js')) throw new Error('blocked by CSP');
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+    instance.checkShopifyCart();
+    await settle();
+    const after = updates(fetchMock).length;
+    instance.checkShopifyCart();
+    instance.checkShopifyCart();
+    await settle();
+    expect(updates(fetchMock)).toHaveLength(after);
+  });
+
+  test('the watch respects the consent gate and stops on destroy', async () => {
+    const { enqueue, fetchMock } = await boot({ marketing: false });
+    expect(instance.shopifyCartWatchTimer).toBeNull();
+    document.cookie = `cart=${encodeURIComponent(`${WIDGET_CART}?key=${CART_KEY}`)}; path=/`;
+    instance.checkShopifyCart();
+    await settle();
+    expect(updates(fetchMock)).toHaveLength(0);
+    expect(cartReports(enqueue)).toHaveLength(0);
+
+    instance.destroy();
+    expect(instance.shopifyCartWatchTimer).toBeNull();
+    instance = undefined;
+  });
+
+  test('after a cart event the tag is re-read and restamped when a widget rewrote the attributes', async () => {
+    const { fetchMock } = await boot();
+    let cartAttributes: Record<string, string> = {};
+    fetchMock.mockImplementation(async (url: string) => {
+      const target = String(url);
+      if (target.includes('/cart/update.js')) return { ok: true, status: 200, json: async () => ({ token: `${CART_ID}?key=${CART_KEY}`, attributes: {} }) };
+      if (target.endsWith('/cart.js')) return { ok: true, status: 200, json: async () => ({ token: `${CART_ID}?key=${CART_KEY}`, attributes: cartAttributes }) };
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    });
+    const before = updates(fetchMock).length;
+    // The widget wiped our attributes (dainti: Shopify.actions.updateCart replaces them all).
+    cartAttributes = { _dainti_upload_id: 'x' };
+    instance.track('add_to_cart', { value: 25 });
+    expect(instance.shopifyCartTagCheckTimer).not.toBeNull();
+    await instance.verifyShopifyCartTag();
+    await settle();
+    expect(updates(fetchMock)).toHaveLength(before + 1);
+    // Our tag intact: no write.
+    cartAttributes = { _datalyr_visitor_id: instance.identity.getAnonymousId() };
+    await instance.verifyShopifyCartTag();
+    await settle();
+    expect(updates(fetchMock)).toHaveLength(before + 1);
+  });
+});
+
 describe('shopifyCartId', () => {
   test.each([
     [`${CART_ID}?key=${CART_KEY}`, CART_ID],
