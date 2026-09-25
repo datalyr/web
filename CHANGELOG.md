@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.7.21
+
+- Shopify: the cart is watched while the page is open, not only read at page load and on tracked events. Every 2 seconds the SDK reads Shopify's `cart` cookie (a local read, no request); a cart it has not stamped yet — one a cart drawer or widget created or replaced without a page load — is stamped with the visitor id and reported at once, before the shopper can reach checkout. After a cart event (`add_to_cart` and friends) the cart's attributes are re-read once, 1.5 seconds later, and re-stamped if a widget rewrote them. Same consent gates as the stamping (re-checked on every tick); a cart the store will not let us stamp is remembered so it is not retried; stopped by `destroy()`.
+
 ## 1.7.20
 
 - Shopify: the cart report (`$shopify_cart`) now follows the cart, not only the page load. A shopper who adds to cart through a cart drawer or widget and goes straight to checkout, with no further page load, used to leave only the page-load cart reported, so the order could not be linked to the visit. The SDK now reads Shopify's `cart` cookie on every tracked event and once more when the page is left (before the queue flushes), and reports a cart id it has not reported from this page. Local cookie read, no extra requests; same consent gates and `?key=` stripping as before.

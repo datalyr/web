@@ -1406,6 +1406,10 @@ class Datalyr {
     } finally {
       this.shopifyCartSyncing = false;
     }
+    // A cart the store would not let us stamp (blocked /cart/update.js) is
+    // still remembered as handled: the watch must not retry it every 2 s.
+    const attemptedCartId = shopifyCartId(cart?.token ?? this.cookies.get("cart"));
+    if (attemptedCartId) this.stampedShopifyCartId = attemptedCartId;
     this.reportShopifyCart(cart?.token ?? this.cookies.get("cart"));
     this.startShopifyCartWatch();
   }
