@@ -58,6 +58,12 @@ const IDENTIFY_FINGERPRINT_KEY = 'dl_identify_fingerprint';
 // They must not take once-per-page payload extras (the Klaviyo profile binding)
 // or count as session activity: whatever rides on them is lost.
 const INTERNAL_SIGNAL_EVENTS = new Set(['$shopify_cart']);
+// Shopify cart watch (startShopifyCartWatch): how often the `cart` cookie is
+// read while the page is visible, and how long after a cart event the cart's
+// attributes are re-read (a widget that rewrites them does so right after).
+const SHOPIFY_CART_WATCH_MS = 2000;
+const SHOPIFY_CART_TAG_CHECK_MS = 1500;
+const SHOPIFY_CART_EVENTS = new Set(['add_to_cart', 'product_added', 'cart_updated', 'remove_from_cart', 'product_removed']);
 
 class Datalyr {
   private config!: DatalyrConfig;
@@ -98,6 +104,10 @@ class Datalyr {
   private inAppHandoffWrite: (() => void) | null = null;
   private inAppHandoffReported = false;
   private reportedShopifyCartId: string | null = null; // reportShopifyCart: once per cart id per page
+  private stampedShopifyCartId: string | null = null;  // the cart our attributes were last written to
+  private shopifyCartSyncing = false;                    // one /cart/update.js at a time
+  private shopifyCartWatchTimer: ReturnType<typeof setInterval> | null = null;
+  private shopifyCartTagCheckTimer: ReturnType<typeof setTimeout> | null = null;
   private shopifyConsentWaitElapsed = false; // waitForShopifyConsent:false — stop holding for the Customer Privacy API
   private shopifyConsentOverrideWaitMs = 3000;
   private lastSpaPath: string | null = null;    // dedups SPA pageviews (replaceState-on-mount double-fire)
@@ -617,6 +627,8 @@ class Datalyr {
       // The cart may have changed since the last check (an add to cart through a
       // cart drawer or widget fires no page load); see reportShopifyCartFromCookie.
       if (eventName !== "$shopify_cart") this.reportShopifyCartFromCookie();
+      // A cart event is when a widget rewrites the cart: re-read our tag shortly after.
+      if (SHOPIFY_CART_EVENTS.has(eventName)) this.scheduleShopifyCartTagCheck();
     } catch (error) {
       this.trackError(error as Error, { event: eventName });
     }
@@ -1370,6 +1382,8 @@ class Datalyr {
     if (fbclidAt) attributes._datalyr_fbclid_at = String(fbclidAt);
 
     if (Object.keys(attributes).length === 0) return;
+    if (this.shopifyCartSyncing) return;
+    this.shopifyCartSyncing = true;
 
     let cart: any = null;
     try {
@@ -1383,11 +1397,87 @@ class Datalyr {
       cart = response && typeof response.json === "function"
         ? await response.json().catch(() => null)
         : null;
+      if (response && response.ok !== false && cart) {
+        this.stampedShopifyCartId = shopifyCartId(cart.token ?? this.cookies.get("cart"));
+      }
     } catch (error) {
       // Never let cart sync affect tracking — swallow (e.g. no cart yet / CSP).
       this.log("Shopify /cart/update.js failed:", error);
+    } finally {
+      this.shopifyCartSyncing = false;
     }
     this.reportShopifyCart(cart?.token ?? this.cookies.get("cart"));
+    this.startShopifyCartWatch();
+  }
+
+  /** The gates every Shopify cart write and report shares. */
+  private shopifyCartGatesOpen(): boolean {
+    return this.config.shopifyCartAttributes === true && this.isShopifyStorefront()
+      && this.shouldTrack() && this.shopifyMarketingConsent() !== false;
+  }
+
+  /**
+   * Keep the cart tagged for as long as the shopper is on the page.
+   *
+   * The cart is how an order is tied back to the visit, through two channels:
+   * the attributes we stamp (they become the order's note_attributes) and the
+   * cart id we report ($shopify_cart). Both used to happen once, at page load.
+   * A cart drawer or widget creates or replaces the cart with no page load, and
+   * some rewrite the cart's attributes, so the checkout arrived with neither
+   * (dainti, 2026-09-24: two shoppers, add to cart seconds after landing, then
+   * straight to checkout, both unlinked).
+   *
+   * So, while the page is visible, the `cart` cookie is read every 2 s; a cart
+   * we have not stamped is stamped and reported (syncShopifyCartAttributes does
+   * both). After a cart event the cart's attributes are re-read once, 1.5 s
+   * later, and restamped if our visitor id is gone. The cookie read is local;
+   * network only when the cart changed or after a cart event. Started by the
+   * first sync, so it only runs where the stamping gates passed; every tick
+   * re-checks them (consent can be withdrawn). Stopped by destroy().
+   */
+  private startShopifyCartWatch(): void {
+    if (this.shopifyCartWatchTimer || typeof window === "undefined") return;
+    this.shopifyCartWatchTimer = setInterval(() => this.checkShopifyCart(), SHOPIFY_CART_WATCH_MS);
+  }
+
+  private checkShopifyCart(): void {
+    try {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (this.shopifyCartSyncing || !this.shopifyCartGatesOpen()) return;
+      const cartId = shopifyCartId(this.cookies.get("cart"));
+      if (!cartId || cartId === this.stampedShopifyCartId) return;
+      this.syncShopifyCartAttributes().catch((error) => {
+        this.log("Shopify cart attribute sync failed:", error);
+      });
+    } catch (error) {
+      this.log("Shopify cart check failed:", error);
+    }
+  }
+
+  private scheduleShopifyCartTagCheck(): void {
+    if (!this.shopifyCartGatesOpen()) return;
+    if (this.shopifyCartTagCheckTimer) clearTimeout(this.shopifyCartTagCheckTimer);
+    this.shopifyCartTagCheckTimer = setTimeout(() => {
+      this.shopifyCartTagCheckTimer = null;
+      void this.verifyShopifyCartTag();
+    }, SHOPIFY_CART_TAG_CHECK_MS);
+  }
+
+  private async verifyShopifyCartTag(): Promise<void> {
+    try {
+      if (this.shopifyCartSyncing || !this.shopifyCartGatesOpen()) return;
+      const response = await fetch("/cart.js", { credentials: "same-origin" });
+      const cart: any = response && typeof response.json === "function"
+        ? await response.json().catch(() => null)
+        : null;
+      const visitorId = this.identity.getAnonymousId();
+      if (!cart || !visitorId) return;
+      if (cart.attributes?._datalyr_visitor_id === visitorId
+        && shopifyCartId(cart.token) === this.stampedShopifyCartId) return;
+      await this.syncShopifyCartAttributes();
+    } catch (error) {
+      this.log("Shopify cart tag check failed:", error);
+    }
   }
 
   /**
@@ -2488,6 +2578,14 @@ class Datalyr {
    * Destroy the SDK instance and cleanup resources
    */
   destroy(): void {
+    if (this.shopifyCartWatchTimer) {
+      clearInterval(this.shopifyCartWatchTimer);
+      this.shopifyCartWatchTimer = null;
+    }
+    if (this.shopifyCartTagCheckTimer) {
+      clearTimeout(this.shopifyCartTagCheckTimer);
+      this.shopifyCartTagCheckTimer = null;
+    }
     // Restore original history methods (Issue #15)
     if (this.originalPushState) {
       history.pushState = this.originalPushState;
