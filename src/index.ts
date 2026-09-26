@@ -15,7 +15,7 @@ import { AutoIdentifyManager } from './auto-identify';
 import { StripeSessionWatcher } from './stripe-session';
 import { applyRemoteConfig, type SdkRemoteConfig } from './config';
 import { shopifyCartId } from './shopify-cart';
-import { ReplayLoader, REPLAY_ENDPOINT, replayAllowed, replayTrackPayload } from './replay-loader';
+import { ReplayLoader, REPLAY_ENDPOINT, replayAllowed, replayAttribution, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
 import {
   generateUUID,
@@ -1782,6 +1782,7 @@ class Datalyr {
         endpoint: REPLAY_ENDPOINT,
         getSessionId: () => this.session.getSessionId(),
         getVisitorId: () => this.identity.getAnonymousId(),
+        getAttribution: () => this.replayAttributionNow(),
       });
     }
     this.replay.sync(allowed, remote?.v);
@@ -2521,6 +2522,15 @@ class Datalyr {
     // A router navigation replaces the URL and drops the in-app handoff token.
     this.inAppHandoffWrite?.();
     this.replay?.event('url', { href: window.location.href });
+    // page() above may have stored a new last touch (UTMs on the new route).
+    this.replay?.event('attr', { ...this.replayAttributionNow() });
+  }
+
+  /** Last touch shaped for the replay attr marker: kinds and labels only, no click id value. */
+  private replayAttributionNow() {
+    let last: Record<string, unknown> | null = null;
+    try { last = this.attribution.getLastTouch(); } catch { last = null; }
+    return replayAttribution(last);
   }
 
   /**

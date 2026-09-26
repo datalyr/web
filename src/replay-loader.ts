@@ -21,7 +21,57 @@ export const REPLAY_ENDPOINT = 'https://replay.datalyr.com/replay';
 export const REPLAY_GLOBAL = 'DatalyrReplay';
 export const REPLAY_PARK_KEY = 'dl_replay_park'; // sessionStorage; written by the recorder
 
-export type ReplayEventKind = 'track' | 'url' | 'vis' | 'ph' | 'err';
+export type ReplayEventKind = 'track' | 'url' | 'vis' | 'ph' | 'err' | 'attr';
+
+/** Click-id kinds the attr marker may name. The click id VALUE is never recorded. */
+export const REPLAY_CLICK_KINDS = ['fbclid', 'gclid', 'gbraid', 'wbraid', 'ttclid', 'sclid'] as const;
+export type ReplayClickKind = typeof REPLAY_CLICK_KINDS[number];
+export const REPLAY_ATTR_MAX_CHARS = 100;
+
+/**
+ * Landing attribution for the recording (the recorder strips query strings from URLs, so
+ * distill cannot read UTMs from the href). Every field is present; null when unknown.
+ */
+export interface ReplayAttribution {
+  source: string | null;
+  medium: string | null;
+  campaign: string | null;
+  content: string | null;
+  term: string | null;
+  click: ReplayClickKind | null;
+  landing_path: string | null;
+}
+
+function attrStr(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  return t ? t.slice(0, REPLAY_ATTR_MAX_CHARS) : null;
+}
+
+/**
+ * Shape any attribution-like record into the attr marker payload. Allowlist only: no
+ * click id value, no full URL, strings capped. Used by the SDK getter and again by the
+ * recorder, so an older or newer counterpart cannot leak extra fields.
+ */
+export function replayAttribution(a: Record<string, unknown> | null | undefined): ReplayAttribution {
+  const src = a && typeof a === 'object' ? a : {};
+  const click = typeof src.clickIdType === 'string' && (REPLAY_CLICK_KINDS as readonly string[]).includes(src.clickIdType)
+    ? src.clickIdType as ReplayClickKind
+    : typeof src.click === 'string' && (REPLAY_CLICK_KINDS as readonly string[]).includes(src.click)
+      ? src.click as ReplayClickKind
+      : null;
+  let path = attrStr(src.landing_path ?? src.landingPath);
+  if (path) path = path.split(/[?#]/)[0] || null;
+  return {
+    source: attrStr(src.source),
+    medium: attrStr(src.medium),
+    campaign: attrStr(src.campaign),
+    content: attrStr(src.content),
+    term: attrStr(src.term),
+    click,
+    landing_path: path,
+  };
+}
 
 /** What the recorder needs from the SDK. Getters so it always reads the live value. */
 export interface ReplayContext {
@@ -30,6 +80,8 @@ export interface ReplayContext {
   endpoint: string;
   getSessionId(): string;
   getVisitorId(): string;
+  /** Last-touch attribution for the attr marker. Optional: an older dl.js has none. */
+  getAttribution?(): ReplayAttribution;
 }
 
 /** The surface dl.replay.<v>.js registers on window.DatalyrReplay. */

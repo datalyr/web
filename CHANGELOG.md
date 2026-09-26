@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.8.2
+
+- Session replay: each recording now carries a landing-attribution marker, because 1.8.1 cut query strings from recorded URLs and the UTMs and click ids went with them. Right after the page snapshot (and again after a new session's snapshot and on SPA navigation) the recorder writes one custom event `{ tag: 'dl', payload: { k: 'attr', source, medium, campaign, content, term, click, landing_path } }` from the SDK's last-touch attribution. `click` names which click id was present (`fbclid`, `gclid`, `gbraid`, `wbraid`, `ttclid`, `sclid`), never its value; `landing_path` is the path only; strings are capped at 100 characters; every field is present and `null` when unknown. Recorded URLs still carry no query string.
+
 ## 1.8.1
 
 Security and privacy fixes to session replay (1.8.0 was never published to the CDN with replay enabled).

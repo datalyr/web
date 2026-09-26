@@ -219,4 +219,20 @@ describe('session replay in the SDK', () => {
     expect(recorder.event).toHaveBeenCalledWith('url', { href: expect.stringContaining('/products/ring') });
     sdk.destroy();
   });
+
+  test('attr getter: last-touch labels and click kind only; SPA navigation re-sends it', async () => {
+    window.history.replaceState({}, '', '/landing?utm_source=facebook&utm_medium=paid&utm_campaign=retarget&fbclid=RAWCLICKVALUE');
+    const recorder = fakeRecorder();
+    const sdk = await boot(ENABLED);
+    const ctx = recorder.start.mock.calls[0][0];
+    const attr = ctx.getAttribution();
+    expect(attr).toEqual(expect.objectContaining({ source: 'facebook', medium: 'paid', campaign: 'retarget', click: 'fbclid', landing_path: '/landing' }));
+    expect(Object.keys(attr).sort()).toEqual(['campaign', 'click', 'content', 'landing_path', 'medium', 'source', 'term']);
+    expect(JSON.stringify(attr)).not.toContain('RAWCLICKVALUE');
+    window.history.pushState({}, '', '/products/ring');
+    await settle();
+    expect(recorder.event).toHaveBeenCalledWith('attr', expect.objectContaining({ source: 'facebook', click: 'fbclid' }));
+    expect(JSON.stringify(recorder.event.mock.calls)).not.toContain('RAWCLICKVALUE');
+    sdk.destroy();
+  });
 });
