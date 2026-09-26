@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.9.2
+
+- Heatmaps click fidelity. Heat click items gain `pos`, `bx`, `by`, `bw`, `bh`, `ox`, `oy`: `{ t: 'click', ts, path, x_pct, y_pct, y_px, vw, vh, ph, text, sel, kind, pos, bx, by, bw, bh, ox, oy }`. `pos` is `fixed` when the target or an ancestor is `position: fixed`, or `sticky` and currently at its sticky offset; otherwise `page`. For `fixed` clicks `y_pct` is `clientY / innerHeight` (was page-relative). `bx/by/bw/bh` is the target's box in page px (viewport px for `fixed`), rounded; `ox/oy` is the click's offset inside that box (0..1, 4 decimals).
+- The click target is now the nearest interactive ancestor (`button`, `a`, `[role=button]`, `input`, `label`, `summary`) within 3 levels, else the clicked element; `sel` and `text` both refer to it.
+- **Behaviour change:** new selector algorithm (`src/replay/selector.ts`, shared with the backend): up to 6 levels up to `body` (exclusive), stopping at a unique id; up to 3 classes per level, generated ones (`css-*`, `sc-*`, `jsx-*`, or a 5+ digit segment) skipped; `:nth-of-type(n)` when same-tag siblings exist; ids and classes `CSS.escape`d (Tailwind `md:flex`, `w-1/2` resolve); over 200 characters whole levels are dropped from the root side. Selectors differ from 1.9.0/1.9.1.
+- Session replay: every click also writes a custom event `{ tag: 'dl', payload: { k: 'clk', ts, pos, bx, by, bw, bh, ox, oy, sel, vw, vh } }` so heatmaps derived from recordings get the same fidelity (matched to rrweb's click by `ts`). No text.
+- The replay module grows ~1 KB gzip (~38.3 → ~39.3 KB); dl.js unchanged.
+
 ## 1.9.1
 
 - Merchant-chosen privacy for session replay and heatmaps, delivered by the dashboard as `replay.privacy` / `heatmaps.privacy` (one object for both): `{ textMode: 'all' | 'interactive' | 'marked', attributes: boolean, urlQuery: boolean }`. Anything missing or invalid falls back to the safe default (`interactive`, `false`, `false`). Form input values are always masked whatever these say.
