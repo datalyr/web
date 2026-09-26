@@ -140,6 +140,21 @@ describe('session replay in the SDK', () => {
     sdk.destroy();
   });
 
+  test('privacy from the dashboard reaches start(): heatmaps.privacy in heat mode, replay.privacy in replay', async () => {
+    let sdk = await boot({ heatmaps: { enabled: true, sampleRate: 1, privacy: { textMode: 'all' } } });
+    let recorder = fakeRecorder();
+    replayScripts()[0].onload!(new Event('load'));
+    expect(recorder.start.mock.calls[0][2]).toEqual({ textMode: 'all', attributes: false, urlQuery: false });
+    sdk.destroy();
+    replayScripts().forEach(s => s.remove());
+    delete (window as any).DatalyrReplay;
+    sdk = await boot({ ...ENABLED, replay: { ...(ENABLED as any).replay, privacy: { urlQuery: true } } });
+    recorder = fakeRecorder();
+    replayScripts()[0].onload!(new Event('load'));
+    expect(recorder.start.mock.calls[0][2]).toEqual({ textMode: 'interactive', attributes: false, urlQuery: true });
+    sdk.destroy();
+  });
+
   test("replay + heatmaps → 'replay'", async () => {
     const sdk = await boot({ ...ENABLED, ...HEAT_ONLY });
     const recorder = fakeRecorder();

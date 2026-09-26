@@ -264,6 +264,47 @@ describe('heat mode', () => {
     expect(json).not.toMatch(/Jane Doe|jane@example|typed secret|Hi Jane|Nothing here/);
   });
 
+  test('privacy textMode in heat: all → button text dropped (data-dl-unmask kept); marked → only [data-dl-mask] dropped', async () => {
+    document.getElementById('d')!.setAttribute('data-dl-unmask', '');
+    recorder.start(ctx, 'heat', { textMode: 'all', attributes: false, urlQuery: false });
+    click(document.getElementById('b')!, 250, 500);
+    click(document.getElementById('a')!, 250, 900);
+    jest.advanceTimersByTime(DEAD_WAIT_MS);
+    recorder.flush();
+    let clicks = items(await sent(fetchMock)).filter((i: any) => i.t === 'click');
+    expect(clicks.map((c: any) => c.text)).toEqual(['', '']);
+    recorder.stop(true);
+    fetchMock.mockClear();
+    recorder = new Recorder();
+    recorder.start(ctx, 'heat', { textMode: 'marked', attributes: false, urlQuery: false });
+    click(document.getElementById('b')!, 250, 500);
+    jest.advanceTimersByTime(DEAD_WAIT_MS);
+    recorder.flush();
+    clicks = items(await sent(fetchMock)).filter((i: any) => i.t === 'click');
+    expect(clicks[0].text).toBe('Add to bag');
+  });
+
+  test('privacy in the heat snap: marked keeps plain text, attributes/url scrubbed by default, kept when relaxed', async () => {
+    document.getElementById('main')!.insertAdjacentHTML('beforeend',
+      '<img alt="alt-secret" src="https://cdn.test/a.png?sig=src-secret"><a href="/acct?token=href-secret">Acct</a>');
+    mockPageLoadId = SNAP_HIT;
+    recorder.start(ctx, 'heat', { textMode: 'marked', attributes: false, urlQuery: false });
+    recorder.flush();
+    let json = JSON.stringify((await sent(fetchMock))[0].e.find((i: any) => i.t === 'snap'));
+    expect(json).toContain('Jane Doe, 1 High St');
+    expect(json).not.toMatch(/Hi Jane|jane@example|alt-secret|src-secret|href-secret/);
+    recorder.stop(true);
+    fetchMock.mockClear();
+    recorder = new Recorder();
+    recorder.start(ctx, 'heat', { textMode: 'interactive', attributes: true, urlQuery: true });
+    recorder.flush();
+    json = JSON.stringify((await sent(fetchMock))[0].e.find((i: any) => i.t === 'snap'));
+    expect(json).toMatch(/alt-secret/);
+    expect(json).toMatch(/src-secret/);
+    expect(json).toMatch(/href-secret/);
+    expect(json).not.toMatch(/Jane Doe/);
+  });
+
   test('snap: no roll hit → none (roll is a pure function of page_load_id)', async () => {
     recorder.start(ctx, 'heat');
     recorder.flush();

@@ -15,6 +15,7 @@ import {
   replayModuleUrl,
   replaySampleHit,
   replayTrackPayload,
+  resolveReplayPrivacy,
   type ReplayGateInputs,
   type ReplayRecorder,
 } from './replay-loader';
@@ -188,7 +189,7 @@ describe('ReplayLoader', () => {
     const recorder = fakeRecorder();
     (window as any)[REPLAY_GLOBAL] = recorder;
     script.onload!(new Event('load'));
-    expect(recorder.start).toHaveBeenCalledWith(ctx, 'replay');
+    expect(recorder.start).toHaveBeenCalledWith(ctx, 'replay', { textMode: 'interactive', attributes: false, urlQuery: false });
 
     loader.event('track', { name: 'add_to_cart' });
     expect(recorder.event).toHaveBeenCalledWith('track', { name: 'add_to_cart' });
@@ -235,7 +236,7 @@ describe('ReplayLoader', () => {
     const recorder = { ...fakeRecorder(), modes: ['replay', 'heat'] as const };
     (window as any)[REPLAY_GLOBAL] = recorder;
     scripts()[0].onload!(new Event('load'));
-    expect(recorder.start).toHaveBeenCalledWith(ctx, 'heat');
+    expect(recorder.start).toHaveBeenCalledWith(ctx, 'heat', { textMode: 'interactive', attributes: false, urlQuery: false });
     loader.sync(null, '1.9.0');
     expect(recorder.stop).toHaveBeenCalledWith(true);
   });
@@ -258,6 +259,16 @@ describe('ReplayLoader', () => {
     loader.sync('replay', '1.9.0');
     expect(recorder.stop).toHaveBeenCalledWith(true);
     expect(recorder.start.mock.calls.map(c => c[1])).toEqual(['heat', 'heat', 'replay']);
+  });
+
+  test('privacy: resolved and passed to start(); a later sync applies it to the next start', () => {
+    const recorder = { ...fakeRecorder(), modes: ['replay', 'heat'] as const };
+    (window as any)[REPLAY_GLOBAL] = recorder;
+    const loader = new ReplayLoader(ctx);
+    loader.sync('replay', '1.9.1', { textMode: 'marked', attributes: true, urlQuery: 'yes' } as any);
+    expect(recorder.start.mock.calls[0][2]).toEqual({ textMode: 'marked', attributes: true, urlQuery: false });
+    loader.sync('heat', '1.9.1', { textMode: 'all' });
+    expect(recorder.start.mock.calls[1][2]).toEqual({ textMode: 'all', attributes: false, urlQuery: false });
   });
 
   test('a throwing recorder never breaks the SDK', () => {
@@ -302,5 +313,22 @@ describe('bundle guard: dl.js never contains the recorder', () => {
     expect(graph.filter(x => x.startsWith('@rrweb') || x.startsWith('rrweb') || x === 'fflate')).toEqual([]);
     expect(graph.filter(x => x.includes(`${path.sep}replay${path.sep}`))).toEqual([]);
     expect(graph.some(x => x.endsWith('replay-loader.ts'))).toBe(true);
+  });
+});
+
+describe('privacy settings (resolveReplayPrivacy)', () => {
+  test('absent / junk → safe defaults', () => {
+    for (const raw of [undefined, null, 'x', 42, [], {}]) expect(resolveReplayPrivacy(raw)).toEqual({ textMode: 'interactive', attributes: false, urlQuery: false });
+  });
+  test('each textMode accepted; unknown falls back to interactive', () => {
+    expect(resolveReplayPrivacy({ textMode: 'all' }).textMode).toBe('all');
+    expect(resolveReplayPrivacy({ textMode: 'marked' }).textMode).toBe('marked');
+    expect(resolveReplayPrivacy({ textMode: 'interactive' }).textMode).toBe('interactive');
+    expect(resolveReplayPrivacy({ textMode: 'none' }).textMode).toBe('interactive');
+    expect(resolveReplayPrivacy({ textMode: 'ALL' }).textMode).toBe('interactive');
+  });
+  test('only a literal true relaxes attributes / urlQuery', () => {
+    expect(resolveReplayPrivacy({ attributes: true, urlQuery: true })).toEqual({ textMode: 'interactive', attributes: true, urlQuery: true });
+    expect(resolveReplayPrivacy({ attributes: 'true', urlQuery: 1 })).toEqual({ textMode: 'interactive', attributes: false, urlQuery: false });
   });
 });

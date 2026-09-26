@@ -61,7 +61,7 @@ const RRWEB_MARKERS = ['rr_dataURL', 'rr_mediaState', 'takeFullSnapshot', 'addCu
 // Heat mode (1.9.0): its snapshot serializer (rrweb-snapshot) and click capture must also
 // stay out of dl.js; the replay bundle must carry them.
 const HEAT_MARKERS = ['mode=heat', 'y_pct_max'];
-const MAX_REPLAY_GZIP_BYTES = 40 * 1024; // measured 1.8.0: ~28 KB gz; 1.9.0 (+ rrweb-snapshot for heat mode): ~37 KB gz
+const MAX_REPLAY_GZIP_BYTES = 40 * 1024; // measured 1.8.0: ~28 KB gz; 1.9.0 (+ rrweb-snapshot for heat mode): ~37 KB gz; 1.9.1 (privacy scrub): ~38.3 KB gz
 
 const args = process.argv.slice(2);
 const distMode = args.includes('--dist');
