@@ -280,6 +280,24 @@ describe('replay recorder', () => {
     expect(mutations.length).toBeGreaterThanOrEqual(100);
   });
 
+  test('stop(true) cancels pending retries and sends not yet posted (consent withdrawn)', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 503 });
+    recorder.start(ctx);
+    mockRrweb.emit!(inc(2));
+    recorder.flush();
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledTimes(1); // first attempt failed, retry scheduled
+    mockRrweb.emit!(inc(2));
+    recorder.flush(); // gzip in flight, not yet posted
+    recorder.stop(true);
+    fetchMock.mockClear();
+    for (let i = 0; i < 8; i++) {
+      jest.advanceTimersByTime(20_000);
+      await flushPromises();
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   test('5xx is retried with backoff; 4xx is not', async () => {
     fetchMock.mockResolvedValueOnce({ ok: false, status: 503 }).mockResolvedValue({ ok: true, status: 204 });
     recorder.start(ctx);
