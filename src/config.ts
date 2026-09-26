@@ -9,7 +9,7 @@
  *
  * Precedence per key:  explicit init() value  >  remote config  >  built-in default
  */
-import type { DatalyrConfig } from './types';
+import type { DatalyrConfig, ReplayRemoteConfig } from './types';
 
 /** Subset of DatalyrConfig the worker may deliver via the config envelope. */
 export interface SdkRemoteConfig {
@@ -33,6 +33,11 @@ export interface SdkRemoteConfig {
   // /sdk-consent-policy, because on a Shopify store waiting for consent this
   // envelope only arrives after consent — see loadShopifyConsentPolicy().
   waitForShopifyConsent?: boolean;
+  // Session replay (billed, dashboard-only). `{ enabled, sampleRate, v }` where v is the
+  // replay module version to load. Folded in like the other keys, but the replay loader
+  // reads the REMOTE value only: an init() value can disable replay (`replay: false`),
+  // never enable it. See replay-loader.ts.
+  replay?: ReplayRemoteConfig;
 }
 
 /** Keys the remote config is allowed to fill on DatalyrConfig. */
@@ -49,6 +54,7 @@ const REMOTE_KEYS: ReadonlyArray<keyof SdkRemoteConfig> = [
   'respectDoNotTrack',
   'privacyMode',
   'waitForShopifyConsent',
+  'replay',
 ];
 
 /**
