@@ -35,6 +35,7 @@ import { REPLAY_PARK_KEY, replayAttribution, resolveReplayPrivacy } from '../rep
 import type { ReplayContext, ReplayEventKind, ReplayMode, ReplayPrivacy, ReplayRecorder } from '../replay-loader';
 import { TEXT_FORCE_MASK_SELECTOR, TEXT_UNMASK_SELECTOR, maskTextFor, scrubEvent, scrubNode, needsScrub } from './privacy';
 import { HeatCapture, type HeatItem } from './heat';
+import { clickFacts } from './selector';
 import { generateUUID } from '../utils';
 
 export const FLUSH_INTERVAL_MS = 10_000;
@@ -544,6 +545,25 @@ export class Recorder implements ReplayRecorder {
       this.resizeTimer = setTimeout(() => { this.resizeTimer = null; this.pageHeight(); }, RESIZE_THROTTLE_MS);
     });
     if (document.readyState !== 'complete') on(window, 'load', () => this.pageHeight());
+    // 1.9.2: click companion. distill pairs it with rrweb's MouseInteraction click (±100 ms)
+    // for pos / element box / offsets / selector. No text: distill has the masked node map.
+    const onClick = (e: Event): void => this.clickCompanion(e as MouseEvent);
+    document.addEventListener('click', onClick, { capture: true, passive: true });
+    this.removers.push(() => document.removeEventListener('click', onClick, true));
+  }
+
+  private clickCompanion(e: MouseEvent): void {
+    if (!this.recording || this.mode !== 'replay') return;
+    try {
+      const ts = Date.now();
+      const f = clickFacts(e);
+      record.addCustomEvent('dl', {
+        k: 'clk', ts, pos: f.pos, bx: f.bx, by: f.by, bw: f.bw, bh: f.bh, ox: f.ox, oy: f.oy,
+        sel: f.sel, vw: window.innerWidth || 0, vh: window.innerHeight || 0,
+      });
+    } catch {
+      // best-effort
+    }
   }
 
   private error(message: string): void {

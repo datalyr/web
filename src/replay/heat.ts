@@ -7,7 +7,8 @@
  *
  * Items (the `e` array of a `m:'heat'` envelope; NOT rrweb events):
  *   {t:'attr', source, medium, campaign, content, term, click, landing_path}
- *   {t:'click', ts, path, x_pct, y_pct, y_px, vw, vh, ph, text, sel, kind}
+ *   {t:'click', ts, path, x_pct, y_pct, y_px, vw, vh, ph, text, sel, kind,
+ *    pos, bx, by, bw, bh, ox, oy}   (pos/box/offsets 1.9.2; y_pct = clientY/vh when pos='fixed')
  *   {t:'scroll', ts, path, y_pct_max, ph}
  *   {t:'snap', ts, path, vw, snapshot}
  * `path` is always the origin-less pathname: no query, no fragment.
@@ -17,9 +18,10 @@
  */
 import { snapshot } from 'rrweb-snapshot';
 import { replayHash } from '../replay-loader';
+import { SEL_MAX, clickFacts, dlSelector, type ClickPos } from './selector';
 
 export const HEAT_TEXT_MAX = 80;
-export const HEAT_SEL_MAX = 200;
+export const HEAT_SEL_MAX = SEL_MAX;
 export const RAGE_CLICKS = 3;
 export const RAGE_WINDOW_MS = 1000;
 export const RAGE_RADIUS_PX = 30;
@@ -35,6 +37,8 @@ export interface HeatClick {
   x_pct: number; y_pct: number; y_px: number;
   vw: number; vh: number; ph: number;
   text: string; sel: string; kind: HeatClickKind;
+  /** 1.9.2: 'fixed' = viewport-anchored (fixed / stuck sticky); box in viewport px then. */
+  pos: ClickPos; bx: number; by: number; bw: number; bh: number; ox: number; oy: number;
 }
 export interface HeatScroll { t: 'scroll'; ts: number; path: string; y_pct_max: number; ph: number }
 export interface HeatSnap { t: 'snap'; ts: number; path: string; vw: number; snapshot: unknown }
@@ -76,24 +80,8 @@ function pageWidth(): number {
   }
 }
 
-/** tag#id.class path from the element up, nearest part kept, ≤ HEAT_SEL_MAX chars. */
-export function heatSelector(el: Element | null): string {
-  let out = '';
-  for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
-    let part = node.tagName.toLowerCase();
-    if (node.id) part += `#${node.id}`;
-    const cls = typeof node.className === 'string' ? node.className.trim().split(/\s+/).filter(Boolean) : [];
-    if (cls.length) part += `.${cls.join('.')}`;
-    const next = out ? `${part} > ${out}` : part;
-    if (next.length > HEAT_SEL_MAX) {
-      if (!out) out = part.slice(0, HEAT_SEL_MAX);
-      break;
-    }
-    out = next;
-    if (part.startsWith('html') || part.startsWith('body')) break;
-  }
-  return out;
-}
+/** Kept for callers of 1.9.0/1.9.1: now the shared dlSelector (selector.ts). */
+export const heatSelector = dlSelector;
 
 /**
  * Text of the clicked control under the recorder's text rules: kept only inside an
@@ -298,20 +286,25 @@ export class HeatCapture {
       const now = Date.now();
       this.lastActive = now;
       this.pathChanged(); // SPA route changed without a `url` event reaching us
-      const raw = e.target as Node | null;
-      const target = raw && raw.nodeType === 1 ? raw as Element : raw?.parentElement || null;
+      const f = clickFacts(e);
+      const target = f.target;
       const ph = pageHeight();
+      const vh = window.innerHeight || 0;
       const pageX = typeof e.pageX === 'number' ? e.pageX : 0;
       const pageY = typeof e.pageY === 'number' ? e.pageY : 0;
+      const yPct = f.pos === 'fixed'
+        ? (vh > 0 ? f.clientY / vh : 0)
+        : (ph > 0 ? pageY / ph : 0);
       const item: HeatClick = {
         t: 'click', ts: now, path: this.path,
         x_pct: round4(Math.min(1, Math.max(0, pageX / Math.max(pageWidth(), 1)))),
-        y_pct: ph > 0 ? round4(Math.min(1, Math.max(0, pageY / ph))) : 0,
+        y_pct: round4(Math.min(1, Math.max(0, yPct))),
         y_px: Math.round(pageY),
-        vw: window.innerWidth || 0, vh: window.innerHeight || 0, ph,
+        vw: window.innerWidth || 0, vh, ph,
         text: heatText(target, this.masking),
-        sel: heatSelector(target),
+        sel: f.sel,
         kind: 'click',
+        pos: f.pos, bx: f.bx, by: f.by, bw: f.bw, bh: f.bh, ox: f.ox, oy: f.oy,
       };
       // Rage: ≥ RAGE_CLICKS clicks, each < RAGE_WINDOW_MS after the previous, within RAGE_RADIUS_PX.
       const last = this.recent[this.recent.length - 1];

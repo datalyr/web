@@ -129,9 +129,10 @@ describe('heat mode', () => {
     expect(c).toEqual({
       t: 'click', ts: expect.any(Number), path: '/products/shoe',
       x_pct: 0.25, y_pct: 0.25, y_px: 500, vw: 1000, vh: 800, ph: 2000,
-      text: 'Add to bag', sel: 'body > main#main.page.wide > button#b.cta.primary', kind: 'dead',
+      text: 'Add to bag', sel: '#b', kind: 'dead',
+      pos: 'page', bx: 0, by: 0, bw: 0, bh: 0, ox: 0, oy: 0, // jsdom: zero-size rects
     });
-    expect(Object.keys(c)).toEqual(['t', 'ts', 'path', 'x_pct', 'y_pct', 'y_px', 'vw', 'vh', 'ph', 'text', 'sel', 'kind']);
+    expect(Object.keys(c)).toEqual(['t', 'ts', 'path', 'x_pct', 'y_pct', 'y_px', 'vw', 'vh', 'ph', 'text', 'sel', 'kind', 'pos', 'bx', 'by', 'bw', 'bh', 'ox', 'oy']);
   });
 
   test('never records typed values or non-interactive text', async () => {
@@ -146,7 +147,7 @@ describe('heat mode', () => {
     // (a label click also dispatches a click on its control).
     expect(clicks.length).toBeGreaterThanOrEqual(5);
     expect(new Set(clicks.map((c: any) => c.text))).toEqual(new Set(['', 'Email']));
-    expect(clicks.filter((c: any) => c.sel.endsWith('input#i') || c.sel.endsWith('p#p') || c.sel.endsWith('div#d')).map((c: any) => c.text)).toEqual(['', '', '']);
+    expect(clicks.filter((c: any) => ['#i', '#p', '#d'].includes(c.sel)).map((c: any) => c.text)).toEqual(['', '', '']);
     const json = JSON.stringify(envs);
     expect(json).not.toMatch(/jane@example|typed secret|Jane Doe|High St|draft text|Hi Jane|Nothing here/);
     expect(json).not.toMatch(/utm_source|#top/);
