@@ -29,7 +29,7 @@ jest.mock('@rrweb/record', () => {
 });
 
 import {
-  FLUSH_INTERVAL_MS, IDLE_PAUSE_MS, KEEPALIVE_MAX_BYTES, PARK_KEY, Recorder, maskText,
+  FLUSH_INTERVAL_MS, IDLE_PAUSE_MS, KEEPALIVE_MAX_BYTES, PARK_KEY, Recorder, maskText, stripUrl,
 } from './replay/recorder';
 
 const flushPromises = () => new Promise(resolve => jest.requireActual<typeof globalThis>('timers').setImmediate(resolve));
@@ -79,8 +79,8 @@ describe('replay recorder', () => {
   test('record() options: inputs + all text masked, block selector, slim DOM, no canvas/fonts/images/iframes', () => {
     recorder.start(ctx);
     expect(mockRrweb.opts).toEqual(expect.objectContaining({
-      maskAllInputs: true,
-      maskInputOptions: { password: true },
+      maskAllInputs: false,
+      maskInputOptions: { input: true, textarea: true, select: true, password: true },
       maskTextSelector: '*',
       maskTextFn: maskText,
       blockSelector: '[data-dl-block]',
@@ -151,6 +151,24 @@ describe('replay recorder', () => {
     mockRrweb.emit!(inc(2, { pad: 'x'.repeat(260 * 1024) }));
     await flushPromises();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('URLs: Meta href and url Custom event keep origin+pathname only', async () => {
+    recorder.start(ctx);
+    mockRrweb.emit!({ type: 4, data: { href: 'https://shop.test/account/reset/123?token=abc&email=j%40x.test#frag', width: 1, height: 1 }, timestamp: 1 });
+    recorder.event('url', { href: 'https://shop.test/checkouts/c/xyz/thank_you?key=secretkey#x' });
+    mockRrweb.emit!({ type: 4, data: { href: 'not a url::' }, timestamp: 2 });
+    recorder.flush();
+    await flushPromises();
+    const env = decode(fetchMock.mock.calls[0]);
+    const json = JSON.stringify(env);
+    expect(json).not.toMatch(/token=|email=|key=|secretkey|#frag/);
+    const metas = env.e.filter((e: any) => e.type === 4);
+    expect(metas[0].data).toEqual({ href: 'https://shop.test/account/reset/123', width: 1, height: 1 });
+    const url = env.e.find((e: any) => e.type === 5 && e.data.payload.k === 'url');
+    expect(url.data.payload.href).toBe('https://shop.test/checkouts/c/xyz/thank_you');
+    expect(stripUrl('https://a.test/p?q=1')).toBe('https://a.test/p');
+    expect(stripUrl(undefined)).toBe('');
   });
 
   test('custom events: track/url/vis/ph/err as rrweb type 5 with tag dl', async () => {
@@ -278,6 +296,24 @@ describe('replay recorder', () => {
     const mutations = env.e.filter((e: any) => e.type === 3 && e.data.source === 0);
     expect(mutations.length).toBeLessThanOrEqual(101);
     expect(mutations.length).toBeGreaterThanOrEqual(100);
+  });
+
+  test('stop(true) cancels pending retries and sends not yet posted (consent withdrawn)', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 503 });
+    recorder.start(ctx);
+    mockRrweb.emit!(inc(2));
+    recorder.flush();
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledTimes(1); // first attempt failed, retry scheduled
+    mockRrweb.emit!(inc(2));
+    recorder.flush(); // gzip in flight, not yet posted
+    recorder.stop(true);
+    fetchMock.mockClear();
+    for (let i = 0; i < 8; i++) {
+      jest.advanceTimersByTime(20_000);
+      await flushPromises();
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test('5xx is retried with backoff; 4xx is not', async () => {

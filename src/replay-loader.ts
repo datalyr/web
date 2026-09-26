@@ -135,11 +135,14 @@ export class ReplayLoader {
       const script = document.createElement('script');
       script.src = replayModuleUrl(moduleVersion, this.context.sdkVersion);
       script.async = true;
-      script.crossOrigin = 'anonymous';
+      // No crossOrigin: track.datalyr.com sends no Access-Control-Allow-Origin, and a
+      // crossorigin script without it fails to load.
       script.onload = () => {
         this.recorder = this.registered();
         if (this.wanted) this.start();
       };
+      // Blocked (CSP, ad blocker, 404): record nothing, never retry on this page.
+      script.onerror = () => { this.recorder = null; };
       (document.head || document.documentElement).appendChild(script);
     } catch {
       // best-effort: replay must never break the page or tracking

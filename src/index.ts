@@ -1010,10 +1010,10 @@ class Datalyr {
     }
     this.identity.reset();
     this.syncInAppHandoff(); // the URL must not keep the pre-reset visitor id
-    // Replay: drop what was recorded for the previous user; a new recording (new page
-    // load id, new visitor id) starts if the gates still allow it.
+    // Replay: drop what was recorded for the previous user now; the new recording (new
+    // page load id, new visitor id, new session id) starts below, after the session
+    // rotates, so none of the next user's events are sent under the old session.
     this.replay?.stop(true);
-    this.syncReplay();
     this.userProperties = {};
     // Clear super properties too — they'd otherwise keep attaching the previous user's
     // values to the next user's events (cross-user contamination on shared devices).
@@ -1039,6 +1039,7 @@ class Datalyr {
     storage.remove('dl_first_touch');
     storage.remove('dl_last_touch');
     this.session.createNewSession();
+    this.syncReplay();
     this.log('User reset');
   }
 

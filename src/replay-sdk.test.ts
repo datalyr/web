@@ -92,7 +92,7 @@ describe('session replay in the SDK', () => {
     const scripts = replayScripts();
     expect(scripts).toHaveLength(1);
     expect(scripts[0].src).toBe('https://track.datalyr.com/dl.replay.1.8.3.js');
-    expect(scripts[0].crossOrigin).toBe('anonymous');
+    expect(scripts[0].hasAttribute('crossorigin')).toBe(false);
 
     const recorder = fakeRecorder();
     scripts[0].onload!(new Event('load'));
@@ -182,6 +182,24 @@ describe('session replay in the SDK', () => {
     expect(recorder.stop).toHaveBeenCalledWith(true);
     expect(recorder.stop.mock.invocationCallOrder[0]).toBeLessThan(recorder.start.mock.invocationCallOrder[starts]);
     expect(recorder.start.mock.calls.length).toBeGreaterThan(starts);
+    sdk.destroy();
+  });
+
+  test('reset: the new recording starts under the NEW session id, never the old one', async () => {
+    const recorder = fakeRecorder();
+    const sessionAtStart: string[] = [];
+    recorder.start.mockImplementation((ctx: any) => { sessionAtStart.push(ctx.getSessionId()); });
+    const sdk = await boot(ENABLED);
+    const before = sdk.getSessionId();
+    const starts = sessionAtStart.length;
+    recorder.sessionChanged.mockClear();
+    sdk.reset();
+    const after = sdk.getSessionId();
+    expect(after).not.toBe(before);
+    const restarted = sessionAtStart.slice(starts);
+    expect(restarted.length).toBeGreaterThan(0);
+    expect(restarted.every(id => id === after)).toBe(true); // Recorder.start is idempotent
+    expect(recorder.stop).toHaveBeenCalledWith(true);
     sdk.destroy();
   });
 

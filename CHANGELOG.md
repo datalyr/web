@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.8.1
+
+Security and privacy fixes to session replay (1.8.0 was never published to the CDN with replay enabled).
+
+- Every form input value is now masked whatever its type. 1.8.0 used rrweb's `maskAllInputs`, which masks a fixed list of input types and left `type="hidden"` (and any unlisted type) in clear: on Shopify themes that includes customer emails, checkout/cart tokens and CSRF tokens. Buttons (`type="submit"`/`"button"`) keep their labels.
+- The page URL in recordings (rrweb's page metadata and the SPA URL-change marker) is cut to origin and path; query strings and fragments (emails, reset/magic-link tokens, checkout keys) are no longer recorded. Not covered yet: URLs inside page elements (`a[href]`, `img[src]`, `srcset`, form actions, inline style `url()`) are still recorded as they appear in the page.
+- Withdrawing consent, opting out, `reset()` or `destroy()` now also cancels chunks already scheduled for sending and their retries; before, data recorded before the withdrawal could still be sent for up to about 35 seconds.
+- `reset()` starts the next recording only after the new session id is created, so the next user's first page snapshot is no longer sent under the previous user's session.
+- The recorder script is loaded without `crossorigin` (the CDN sends no CORS header, so 1.8.0's module would not have loaded), and a script that fails to load (blocked by CSP or an ad blocker) is not retried on that page.
+
 ## 1.8.0
 
 - Session replay (off unless enabled in the Datalyr dashboard, which is the only way to turn it on; `replay: false` in `init()` keeps it off whatever the dashboard says). When enabled, the SDK loads a separate recorder, `https://track.datalyr.com/dl.replay.<version>.js` (rrweb 2.1.6, ~28 KB gzip), for the share of sessions set by the dashboard sample rate. dl.js itself carries only a small loader. Recording needs tracking to be allowed, marketing consent not declined (setConsent or Shopify Customer Privacy), `privacyMode` not `strict`, and no Do Not Track / Global Privacy Control signal (honored for replay even where the site does not honor them for analytics). Opt-out, consent withdrawal, `reset()` and `destroy()` stop the recording and discard what was not sent yet.

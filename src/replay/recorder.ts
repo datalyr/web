@@ -15,6 +15,12 @@
  * with one keepalive attempt when it gzips to 16 KB or less; the next page of the same
  * session (same tab) sends whatever is still parked. src/queue.ts is untouched: the
  * event queue's unload beacons keep the whole keepalive quota except those 16 KB.
+ *
+ * URLs: the page URL in rrweb Meta events and in our `url` Custom event is cut to
+ * origin + pathname (no query, no fragment: emails, reset/magic-link tokens, checkout
+ * keys). NOT rewritten in v1: URLs inside DOM attributes (a[href], img[src], srcset,
+ * form[action], inline style url()) are recorded as rrweb serialises them, query
+ * included. Listed for the legal review; the distiller/worker must not surface them.
  */
 import { record } from '@rrweb/record';
 import type { eventWithTime } from '@rrweb/types';
@@ -43,12 +49,24 @@ const RESIZE_THROTTLE_MS = 1000;
 const EVENT_FULL_SNAPSHOT = 2;
 const EVENT_INCREMENTAL = 3;
 const EVENT_META = 4;
+const EVENT_CUSTOM = 5;
 const SRC_MUTATION = 0;
 const SRC_MOUSE_MOVE = 1;
 const SRC_MOUSE_INTERACTION = 2;
 const SRC_INPUT = 5;
 const SRC_TOUCH_MOVE = 6;
 const USER_SOURCES = new Set([SRC_MOUSE_MOVE, SRC_MOUSE_INTERACTION, SRC_INPUT, SRC_TOUCH_MOVE]);
+
+/** origin + pathname only; '' when unparseable (never the raw string). */
+export function stripUrl(href: unknown): string {
+  if (typeof href !== 'string' || !href) return '';
+  try {
+    const u = new URL(href, typeof location !== 'undefined' ? location.href : undefined);
+    return u.origin + u.pathname;
+  } catch {
+    return '';
+  }
+}
 
 interface ParkedChunk { s: string; p: string; q: number; body: string }
 
@@ -135,6 +153,12 @@ export class Recorder implements ReplayRecorder {
   private buckets = new Map<number, { tokens: number; at: number }>();
   private removers: Array<() => void> = [];
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Bumped by stop(true) (a gate closed: consent withdrawn, opt-out, reset...). Every
+   * send and retry carries the generation of its chunk and aborts once it changed, so
+   * nothing recorded before the withdrawal leaves after it.
+   */
+  private generation = 0;
 
   isRecording(): boolean {
     return this.recording;
@@ -157,8 +181,12 @@ export class Recorder implements ReplayRecorder {
     try {
       this.stopRecord = record({
         emit: (event, isCheckout) => this.onEmit(event as eventWithTime, !!isCheckout),
-        maskAllInputs: true,
-        maskInputOptions: { password: true },
+        // NOT maskAllInputs: rrweb expands that to a fixed list of input TYPES, which
+        // leaves type=hidden (and any unlisted type) in clear. The tag keys mask every
+        // input/textarea/select value whatever its type (rrweb maskInputValue checks
+        // maskInputOptions[tagName] first). submit/button values stay: rrweb never masks them.
+        maskAllInputs: false,
+        maskInputOptions: { input: true, textarea: true, select: true, password: true } as Record<string, boolean>,
         maskTextSelector: '*',
         maskTextFn: maskText,
         blockSelector: '[data-dl-block]',
@@ -185,7 +213,10 @@ export class Recorder implements ReplayRecorder {
   }
 
   stop(discard: boolean): void {
-    if (discard) writeParked([]);
+    if (discard) {
+      this.generation++;
+      writeParked([]);
+    }
     if (!this.recording) return;
     if (discard) {
       this.buf = [];
@@ -216,7 +247,7 @@ export class Recorder implements ReplayRecorder {
   /** Send the buffer now (normal path: async gzip, fetch with retries). */
   flush(): void {
     const chunk = this.drain();
-    if (chunk) void this.send(chunk.body, 0);
+    if (chunk) void this.send(chunk.body, 0, this.generation);
   }
 
   /**
@@ -238,7 +269,8 @@ export class Recorder implements ReplayRecorder {
     }
     const keepalive = gz.length <= KEEPALIVE_MAX_BYTES;
     if (!keepalive && terminal) return; // stays parked for the next page
-    this.post(gz, keepalive)
+    const gen = this.generation;
+    this.post(gz, keepalive, false, gen)
       .then(ok => { if (ok) this.unpark(chunk.p, chunk.q); })
       .catch(() => undefined);
   }
@@ -250,6 +282,15 @@ export class Recorder implements ReplayRecorder {
       this.capped = true;
       this.stop(false);
       return;
+    }
+    if (event.type === EVENT_META) {
+      const data = event.data as { href?: unknown };
+      if (data && 'href' in data) data.href = stripUrl(data.href);
+    } else if (event.type === EVENT_CUSTOM) {
+      const data = event.data as { tag?: unknown; payload?: { k?: unknown; href?: unknown } };
+      if (data && data.tag === 'dl' && data.payload && data.payload.k === 'url' && 'href' in data.payload) {
+        data.payload.href = stripUrl(data.payload.href);
+      }
     }
     if (event.type === EVENT_INCREMENTAL) {
       const source = (event.data as { source?: number }).source ?? -1;
@@ -327,24 +368,25 @@ export class Recorder implements ReplayRecorder {
     return { s: this.sid, p: this.pageLoadId, q, body };
   }
 
-  private async send(body: string, attempt: number): Promise<void> {
+  private async send(body: string, attempt: number, gen: number): Promise<void> {
+    if (gen !== this.generation) return;
     let gz: Uint8Array;
     try {
       gz = await gzip(body);
     } catch {
       return;
     }
-    const ok = await this.post(gz, false, true);
-    if (ok !== null || attempt >= RETRY_MAX) return;
-    setTimeout(() => { void this.send(body, attempt + 1); }, RETRY_BASE_MS * Math.pow(2, attempt));
+    const ok = await this.post(gz, false, true, gen);
+    if (ok !== null || attempt >= RETRY_MAX || gen !== this.generation) return;
+    setTimeout(() => { void this.send(body, attempt + 1, gen); }, RETRY_BASE_MS * Math.pow(2, attempt));
   }
 
   /**
    * POST one gzipped chunk. Resolves true on 2xx, false on a refusal that must not be
    * retried (4xx), and null on a network error / 5xx when `retryable` is set.
    */
-  private async post(gz: Uint8Array, keepalive: boolean, retryable = false): Promise<boolean | null> {
-    if (!this.ctx || typeof fetch !== 'function') return false;
+  private async post(gz: Uint8Array, keepalive: boolean, retryable: boolean, gen: number): Promise<boolean | null> {
+    if (!this.ctx || typeof fetch !== 'function' || gen !== this.generation) return false;
     try {
       const res = await fetch(`${this.ctx.endpoint}?enc=gzip`, {
         method: 'POST',
@@ -367,7 +409,7 @@ export class Recorder implements ReplayRecorder {
     if (!parked.length) return;
     writeParked([]);
     for (const chunk of parked) {
-      if (chunk && chunk.s === this.sid && typeof chunk.body === 'string') void this.send(chunk.body, 0);
+      if (chunk && chunk.s === this.sid && typeof chunk.body === 'string') void this.send(chunk.body, 0, this.generation);
     }
   }
 
