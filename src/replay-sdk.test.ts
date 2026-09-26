@@ -185,6 +185,24 @@ describe('session replay in the SDK', () => {
     sdk.destroy();
   });
 
+  test('reset: the new recording starts under the NEW session id, never the old one', async () => {
+    const recorder = fakeRecorder();
+    const sessionAtStart: string[] = [];
+    recorder.start.mockImplementation((ctx: any) => { sessionAtStart.push(ctx.getSessionId()); });
+    const sdk = await boot(ENABLED);
+    const before = sdk.getSessionId();
+    const starts = sessionAtStart.length;
+    recorder.sessionChanged.mockClear();
+    sdk.reset();
+    const after = sdk.getSessionId();
+    expect(after).not.toBe(before);
+    const restarted = sessionAtStart.slice(starts);
+    expect(restarted.length).toBeGreaterThan(0);
+    expect(restarted.every(id => id === after)).toBe(true); // Recorder.start is idempotent
+    expect(recorder.stop).toHaveBeenCalledWith(true);
+    sdk.destroy();
+  });
+
   test('a new session is handed to the recorder', async () => {
     const recorder = fakeRecorder();
     const sdk = await boot(ENABLED);
