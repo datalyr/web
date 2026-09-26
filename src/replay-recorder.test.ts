@@ -134,8 +134,8 @@ describe('replay recorder', () => {
     expect(Object.keys(env)).toEqual(['w', 's', 'v', 'p', 'q', 'sv', 'rb', 'e']);
     expect(env).toEqual(expect.objectContaining({ w: 'ws_pub_1', s: 'sess_a', v: 'anon_v1', q: 0, sv: '1.8.0' }));
     expect(env.p).toMatch(/^[0-9a-f-]{36}$/);
-    // ph custom event from start(), then meta + full snapshot.
-    expect(env.e.map((e: any) => e.type)).toEqual([5, 4, 2]);
+    // attr + ph custom events from start(), then meta + full snapshot.
+    expect(env.e.map((e: any) => e.type)).toEqual([5, 5, 4, 2]);
     expect(env.rb).toBe(Buffer.byteLength(JSON.stringify(env.e)));
 
     mockRrweb.emit!(inc(2));
@@ -347,5 +347,69 @@ describe('replay recorder', () => {
     record.mockImplementationOnce(() => { throw new Error('unsupported'); });
     expect(() => recorder.start(ctx)).not.toThrow();
     expect(recorder.isRecording()).toBe(false);
+  });
+
+  describe('attr marker (1.8.2)', () => {
+    const snapshotOnStart = () => {
+      const { record } = jest.requireMock('@rrweb/record');
+      record.mockImplementationOnce((opts: any) => {
+        mockRrweb.opts = opts;
+        mockRrweb.emit = opts.emit;
+        opts.emit({ type: 4, data: { href: 'https://shop.test/p?utm_source=fb&fbclid=SECRET', width: 1, height: 1 }, timestamp: Date.now() });
+        opts.emit({ type: 2, data: { node: {} }, timestamp: Date.now() });
+        return mockRrweb.stop;
+      });
+    };
+
+    test('emitted right after the full snapshot, allowlisted fields, no click id value', async () => {
+      snapshotOnStart();
+      recorder.start({
+        ...ctx,
+        getAttribution: () => ({
+          source: 'facebook', medium: 'paid', campaign: 'c'.repeat(300), content: 'ad1', term: null,
+          clickIdType: 'fbclid', clickId: 'SECRET', landingPath: '/p?x=1', landingPage: 'https://shop.test/p?fbclid=SECRET',
+        } as any),
+      });
+      jest.advanceTimersByTime(FLUSH_INTERVAL_MS);
+      await flushPromises();
+      const events = decode(fetchMock.mock.calls[0]).e;
+      expect(events.slice(0, 3).map((e: any) => e.type)).toEqual([4, 2, 5]);
+      const attr = events[2].data;
+      expect(attr.tag).toBe('dl');
+      expect(attr.payload).toEqual({
+        k: 'attr', source: 'facebook', medium: 'paid', campaign: 'c'.repeat(100), content: 'ad1',
+        term: null, click: 'fbclid', landing_path: '/p',
+      });
+      expect(JSON.stringify(events)).not.toContain('SECRET');
+    });
+
+    test('empty attribution (or an older dl.js without the getter) still emits, all nulls', async () => {
+      snapshotOnStart();
+      recorder.start(ctx);
+      jest.advanceTimersByTime(FLUSH_INTERVAL_MS);
+      await flushPromises();
+      const events = decode(fetchMock.mock.calls[0]).e;
+      expect(events[2].data.payload).toEqual({
+        k: 'attr', source: null, medium: null, campaign: null, content: null, term: null, click: null, landing_path: null,
+      });
+    });
+
+    test('unknown click kinds are dropped; forwarded attr events are re-sanitized', () => {
+      recorder.start({ ...ctx, getAttribution: () => ({ clickIdType: 'msclkid' } as any) });
+      expect(mockRrweb.custom).toHaveBeenCalledWith('dl', expect.objectContaining({ k: 'attr', click: null }));
+      mockRrweb.custom.mockClear();
+      recorder.event('attr', { source: 'google', clickId: 'SECRET', landingPage: 'https://x/?gclid=SECRET', click: 'gclid' });
+      const pushed = (recorder as any).buf.at(-1).data.payload;
+      expect(pushed).toEqual({ k: 'attr', source: 'google', medium: null, campaign: null, content: null, term: null, click: 'gclid', landing_path: null });
+    });
+
+    test('a session change re-emits the marker after the new full snapshot', () => {
+      recorder.start({ ...ctx, getAttribution: () => ({ source: 'tiktok', clickIdType: 'ttclid' } as any) });
+      mockRrweb.custom.mockClear();
+      recorder.sessionChanged('sess_b');
+      jest.advanceTimersByTime(0);
+      expect(mockRrweb.full).toHaveBeenCalled();
+      expect(mockRrweb.custom).toHaveBeenCalledWith('dl', expect.objectContaining({ k: 'attr', source: 'tiktok', click: 'ttclid' }));
+    });
   });
 });

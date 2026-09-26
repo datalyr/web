@@ -25,7 +25,7 @@
 import { record } from '@rrweb/record';
 import type { eventWithTime } from '@rrweb/types';
 import { gzipSync, strToU8 } from 'fflate';
-import { REPLAY_PARK_KEY } from '../replay-loader';
+import { REPLAY_PARK_KEY, replayAttribution } from '../replay-loader';
 import type { ReplayContext, ReplayEventKind, ReplayRecorder } from '../replay-loader';
 import { generateUUID } from '../utils';
 
@@ -207,6 +207,8 @@ export class Recorder implements ReplayRecorder {
       this.recording = false;
       return;
     }
+    // record() emitted Meta + FullSnapshot synchronously; the attr marker follows them.
+    this.attr();
     this.listen();
     this.timer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
     this.pageHeight();
@@ -241,7 +243,7 @@ export class Recorder implements ReplayRecorder {
     this.flush();
     this.sid = sessionId;
     // Every session must start playable on its own.
-    setTimeout(() => this.fullSnapshot(), 0);
+    setTimeout(() => { this.fullSnapshot(); this.attr(); }, 0);
   }
 
   /** Send the buffer now (normal path: async gzip, fetch with retries). */
@@ -290,6 +292,8 @@ export class Recorder implements ReplayRecorder {
       const data = event.data as { tag?: unknown; payload?: { k?: unknown; href?: unknown } };
       if (data && data.tag === 'dl' && data.payload && data.payload.k === 'url' && 'href' in data.payload) {
         data.payload.href = stripUrl(data.payload.href);
+      } else if (data && data.tag === 'dl' && data.payload && data.payload.k === 'attr') {
+        data.payload = { k: 'attr', ...replayAttribution(data.payload as Record<string, unknown>) };
       }
     }
     if (event.type === EVENT_INCREMENTAL) {
@@ -415,6 +419,13 @@ export class Recorder implements ReplayRecorder {
 
   private unpark(p: string, q: number): void {
     writeParked(readParked().filter(c => !(c.p === p && c.q === q)));
+  }
+
+  /** Landing attribution marker (URLs carry no query string, so distill reads this). */
+  private attr(): void {
+    let raw: Record<string, unknown> | null = null;
+    try { raw = this.ctx?.getAttribution ? this.ctx.getAttribution() as unknown as Record<string, unknown> : null; } catch { raw = null; }
+    this.event('attr', { ...replayAttribution(raw) });
   }
 
   private fullSnapshot(): void {
