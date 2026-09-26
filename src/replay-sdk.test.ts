@@ -92,7 +92,7 @@ describe('session replay in the SDK', () => {
     const scripts = replayScripts();
     expect(scripts).toHaveLength(1);
     expect(scripts[0].src).toBe('https://track.datalyr.com/dl.replay.1.8.3.js');
-    expect(scripts[0].crossOrigin).toBe('anonymous');
+    expect(scripts[0].hasAttribute('crossorigin')).toBe(false);
 
     const recorder = fakeRecorder();
     scripts[0].onload!(new Event('load'));

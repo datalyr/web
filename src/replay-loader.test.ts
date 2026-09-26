@@ -137,14 +137,15 @@ describe('ReplayLoader', () => {
     expect(scripts()).toHaveLength(0);
   });
 
-  test('allowed → injects the versioned module once, crossOrigin anonymous, and starts it on load', () => {
+  test('allowed → injects the versioned module once, without crossOrigin, and starts it on load', () => {
     const loader = new ReplayLoader(ctx);
     loader.sync(true, '1.8.2');
     loader.sync(true, '1.8.2');
     expect(scripts()).toHaveLength(1);
     const script = scripts()[0];
     expect(script.src).toBe('https://track.datalyr.com/dl.replay.1.8.2.js');
-    expect(script.crossOrigin).toBe('anonymous');
+    expect(script.crossOrigin).toBeFalsy();
+    expect(script.hasAttribute('crossorigin')).toBe(false);
     expect(script.async).toBe(true);
 
     const recorder = fakeRecorder();
@@ -154,6 +155,15 @@ describe('ReplayLoader', () => {
 
     loader.event('track', { name: 'add_to_cart' });
     expect(recorder.event).toHaveBeenCalledWith('track', { name: 'add_to_cart' });
+  });
+
+  test('module fails to load → nothing recorded, no second injection', () => {
+    const loader = new ReplayLoader(ctx);
+    loader.sync(true, '1.8.1');
+    scripts()[0].onerror!(new Event('error'));
+    loader.sync(true, '1.8.1');
+    expect(scripts()).toHaveLength(1);
+    expect(() => loader.event('track', { name: 'x' })).not.toThrow();
   });
 
   test('a gate closing before the module arrives: it loads but never starts', () => {
