@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.0
+
+- Session replay (off unless enabled in the Datalyr dashboard, which is the only way to turn it on; `replay: false` in `init()` keeps it off whatever the dashboard says). When enabled, the SDK loads a separate recorder, `https://track.datalyr.com/dl.replay.<version>.js` (rrweb 2.1.6, ~28 KB gzip), for the share of sessions set by the dashboard sample rate. dl.js itself carries only a small loader. Recording needs tracking to be allowed, marketing consent not declined (setConsent or Shopify Customer Privacy), `privacyMode` not `strict`, and no Do Not Track / Global Privacy Control signal (honored for replay even where the site does not honor them for analytics). Opt-out, consent withdrawal, `reset()` and `destroy()` stop the recording and discard what was not sent yet.
+- What is recorded: the page with all form inputs masked and all text masked except buttons, links, labels, summaries and `[role=button]`; `data-dl-unmask` shows an element's text, `data-dl-mask` masks it, `data-dl-block` leaves an element out entirely. Canvas, fonts, images and cross-origin iframes are not captured. The recording also marks each `track()` call (event name and value/currency/product ids only), SPA URL changes, tab hide/show, page height and uncaught error messages (first 300 characters).
+- Transport: gzipped chunks every 10 seconds (or 256 KB) to `replay.datalyr.com`. When the tab is hidden or the page closes, unsent data is kept in `sessionStorage` for the next page of the same session in the same tab. The event queue's unload path is unchanged.
+
 ## 1.7.21
 
 - Shopify: the cart is watched while the page is open, not only read at page load and on tracked events. Every 2 seconds the SDK reads Shopify's `cart` cookie (a local read, no request); a cart it has not stamped yet — one a cart drawer or widget created or replaced without a page load — is stamped with the visitor id and reported at once, before the shopper can reach checkout. After a cart event (`add_to_cart` and friends) the cart's attributes are re-read once, 1.5 seconds later, and re-stamped if a widget rewrote them. Same consent gates as the stamping (re-checked on every tick); a cart the store will not let us stamp is remembered so it is not retried; stopped by `destroy()`.
