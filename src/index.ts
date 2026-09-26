@@ -13,8 +13,9 @@ import { ContainerManager } from './container';
 import { dataEncryption } from './encryption'; // SEC-03 Fix
 import { AutoIdentifyManager } from './auto-identify';
 import { StripeSessionWatcher } from './stripe-session';
-import { applyRemoteConfig } from './config';
+import { applyRemoteConfig, type SdkRemoteConfig } from './config';
 import { shopifyCartId } from './shopify-cart';
+import { ReplayLoader, REPLAY_ENDPOINT, replayAllowed, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
 import {
   generateUUID,
@@ -65,6 +66,9 @@ const SHOPIFY_CART_WATCH_MS = 2000;
 const SHOPIFY_CART_TAG_CHECK_MS = 1500;
 const SHOPIFY_CART_EVENTS = new Set(['add_to_cart', 'product_added', 'cart_updated', 'remove_from_cart', 'product_removed']);
 
+// Replaced from package.json at build time (rollup.config.js injectSdkVersion).
+const SDK_VERSION = '__SDK_VERSION__';
+
 class Datalyr {
   private config!: DatalyrConfig;
   private identity!: IdentityManager;
@@ -103,6 +107,9 @@ class Datalyr {
   private inAppHandoffTimer: ReturnType<typeof setInterval> | null = null;
   private inAppHandoffWrite: (() => void) | null = null;
   private inAppHandoffReported = false;
+  // Session replay (replay-loader.ts): created on the first sync that allows it.
+  private replay: ReplayLoader | null = null;
+  private replayDisabledAtInit = false; // init({ replay: false })
   private reportedShopifyCartId: string | null = null; // reportShopifyCart: once per cart id per page
   private stampedShopifyCartId: string | null = null;  // the cart our attributes were last written to
   private shopifyCartSyncing = false;                    // one /cart/update.js at a time
@@ -233,6 +240,13 @@ class Datalyr {
     // anyway). shouldTrack() is computable here (config/opt-out/consent are all set above).
     this.identity = new IdentityManager({ persistNewId: this.shouldTrack() });
     this.session = new SessionManager(this.config.sessionTimeout);
+    this.replayDisabledAtInit = config.replay === false;
+    // Replay: flush the old session's recording under its own id, then re-check the
+    // sample for the new id (it is a hash of the session id).
+    this.session.onSessionChange((sessionId) => {
+      this.replay?.sessionChanged(sessionId);
+      if (this.initialized) this.syncReplay();
+    });
     this.attribution = new AttributionManager({
       attributionWindow: this.config.attributionWindow,
       trackedParams: this.config.trackedParams,
@@ -496,6 +510,8 @@ class Datalyr {
         // In-app browser -> real browser handoff (see in-app-handoff.ts). Same
         // shouldTrack() gate: an opted-out visitor's id never goes into a URL.
         this.syncInAppHandoff();
+        // Session replay: dashboard-enabled only, same gates plus marketing consent.
+        this.syncReplay();
 
         // Track the initial page view after encryption is ready. On Shopify the
         // Customer Privacy API can still be loading, so retain one pending
@@ -545,6 +561,8 @@ class Datalyr {
       onRemoteConfig: (remote) => {
         applyRemoteConfig(this.config, remote, this.explicitConfigKeys);
         if (this.config.privacyMode === 'strict') this.config.autoIdentify = false;
+        // A container started late (Shopify consent) delivers replay only here.
+        if (this.initialized) this.syncReplay(remote?.replay);
       },
       // Lazy: invoked at the moment a third-party pixel inits, AFTER the
       // /container-scripts roundtrip resolves — so a pre-init identify()
@@ -600,6 +618,9 @@ class Datalyr {
 
       // Queue event
       this.queue.enqueue(payload);
+
+      // Session replay: the event name and money/product ids only (no other properties).
+      this.replay?.event('track', replayTrackPayload(eventName, properties));
 
       // Track to third-party pixels if container is initialized.
       // Pass the shared eventId so the Meta Pixel fires with the same { eventID }.
@@ -989,6 +1010,10 @@ class Datalyr {
     }
     this.identity.reset();
     this.syncInAppHandoff(); // the URL must not keep the pre-reset visitor id
+    // Replay: drop what was recorded for the previous user; a new recording (new page
+    // load id, new visitor id) starts if the gates still allow it.
+    this.replay?.stop(true);
+    this.syncReplay();
     this.userProperties = {};
     // Clear super properties too — they'd otherwise keep attaching the previous user's
     // values to the next user's events (cross-user contamination on shared devices).
@@ -1172,6 +1197,7 @@ class Datalyr {
     }
     this.optedOut = true;
     this.syncInAppHandoff(); // remove the visitor id from the address bar now, not in 30s
+    this.syncReplay(); // stop and discard the recording
     this.cookies.set('__dl_opt_out', 'true', this.config.cookieExpires);
     // Stop the queue from sending OR draining anything persisted before opt-out, and
     // purge what's already buffered (the periodic/on-load drain has no other gate).
@@ -1232,6 +1258,7 @@ class Datalyr {
     // TR-15 (P3): opt-in → persist the in-memory anon id now (see onShopifyConsentChanged).
     if (this.shouldTrack()) this.identity.enablePersistence();
     this.syncInAppHandoff();
+    this.syncReplay();
     this.log('User opted in');
   }
 
@@ -1296,6 +1323,7 @@ class Datalyr {
       this.identity.enablePersistence();
     }
     this.syncInAppHandoff(); // grant starts the writer; withdrawal removes the token now
+    this.syncReplay(); // withdrawal (analytics or marketing) stops and discards the recording
 
     // Marketing / "do not sell" withdrawal: stop FEEDING the third-party pixels and
     // prevent them from being initialized on the next page load. NOTE: an
@@ -1717,6 +1745,45 @@ class Datalyr {
       return;
     }
     if (this.config.inAppHandoff !== false && this.shouldTrack()) this.startInAppHandoff();
+  }
+
+  /**
+   * Bring session replay in line with the current state, from the same sites as
+   * syncInAppHandoff (plus the remote-config hook and session changes). Enabled ONLY by
+   * the dashboard value delivered with /container-scripts; `replay: false` at init keeps
+   * it off. Every gate closing stops the recorder and discards its unsent buffer.
+   * DNT and GPC are honored for replay even where the site does not honor them for
+   * analytics.
+   */
+  private syncReplay(remoteOverride?: SdkRemoteConfig['replay']): void {
+    if (!this.config || !this.session) return;
+    const remote = remoteOverride ?? this.container?.getRemoteConfig()?.replay;
+    let allowed = false;
+    try {
+      allowed = replayAllowed({
+        remote,
+        disabledAtInit: this.replayDisabledAtInit,
+        tracking: this.shouldTrack(),
+        marketing: this.consentAllowsMarketing(),
+        strict: this.config.privacyMode === 'strict',
+        doNotTrack: isDoNotTrackEnabled(),
+        globalPrivacyControl: isGlobalPrivacyControlEnabled(),
+        sessionId: this.session.getSessionId(),
+      });
+    } catch {
+      allowed = false;
+    }
+    if (!allowed && !this.replay) return;
+    if (!this.replay) {
+      this.replay = new ReplayLoader({
+        workspaceId: this.config.workspaceId,
+        sdkVersion: SDK_VERSION,
+        endpoint: REPLAY_ENDPOINT,
+        getSessionId: () => this.session.getSessionId(),
+        getVisitorId: () => this.identity.getAnonymousId(),
+      });
+    }
+    this.replay.sync(allowed, remote?.v);
   }
 
   private startInAppHandoff(): void {
@@ -2341,6 +2408,7 @@ class Datalyr {
     // visitor_id that vanishes on the next page load. Idempotent.
     if (allowed) this.identity.enablePersistence();
     this.syncInAppHandoff();
+    this.syncReplay();
     // Late grant: the init-time container gate read false (Customer Privacy API
     // still loading, or no decision yet), so no pixel loaded on this page. Start
     // the container now and release the held pageview once its config is in —
@@ -2451,6 +2519,7 @@ class Datalyr {
     this.page();
     // A router navigation replaces the URL and drops the in-app handoff token.
     this.inAppHandoffWrite?.();
+    this.replay?.event('url', { href: window.location.href });
   }
 
   /**
@@ -2597,6 +2666,11 @@ class Datalyr {
     if (this.originalReplaceState) {
       history.replaceState = this.originalReplaceState;
     }
+    if (this.replay) {
+      this.replay.stop(true);
+      this.replay = null;
+    }
+    this.session?.onSessionChange(null);
     if (this.inAppHandoffTimer) {
       clearInterval(this.inAppHandoffTimer);
       this.inAppHandoffTimer = null;
