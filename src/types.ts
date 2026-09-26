@@ -127,12 +127,29 @@ export interface ReplayRemoteConfig {
   enabled?: boolean;
   sampleRate?: number; // 0.01–1, share of sessions recorded
   v?: string;          // replay module version (dl.replay.<v>.js); falls back to the SDK version
+  privacy?: ReplayPrivacyConfig; // merchant-chosen masking (1.9.1); defaults when absent/invalid
+}
+
+/**
+ * Merchant-chosen replay/heatmaps privacy (dashboard, 1.9.1). One object for both add-ons.
+ * Inputs are ALWAYS masked whatever this says.
+ * - textMode 'interactive' (default): all text masked except buttons/links/labels/summary/[role=button]
+ * - textMode 'all': every text node masked (only [data-dl-unmask] kept)
+ * - textMode 'marked': only text inside [data-dl-mask] masked
+ * - attributes false (default): alt/title/placeholder/aria-label/data-* values blanked
+ * - urlQuery false (default): query + fragment cut from href/src/srcset/action values
+ */
+export interface ReplayPrivacyConfig {
+  textMode?: 'all' | 'interactive' | 'marked';
+  attributes?: boolean;
+  urlQuery?: boolean;
 }
 
 /** Dashboard heatmaps settings as delivered by /container-scripts `config.heatmaps`. */
 export interface HeatmapsRemoteConfig {
   enabled?: boolean;
   sampleRate?: number; // share of sessions captured in heat mode (when replay is not recording them)
+  privacy?: ReplayPrivacyConfig; // same object as replay.privacy
 }
 
 export interface EventProperties {

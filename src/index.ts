@@ -1790,7 +1790,11 @@ class Datalyr {
         getAttribution: () => this.replayAttributionNow(),
       });
     }
-    this.replay.sync(mode, remote?.v);
+    // One privacy object for both add-ons; read it from the key of the mode that runs.
+    const privacy = mode === 'heat'
+      ? remoteConfig?.heatmaps?.privacy ?? remote?.privacy
+      : remote?.privacy ?? remoteConfig?.heatmaps?.privacy;
+    this.replay.sync(mode, remote?.v, privacy);
   }
 
   private startInAppHandoff(): void {

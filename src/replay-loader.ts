@@ -20,7 +20,30 @@
  * rrweb recording, only click/scroll records (see src/replay/heat.ts). Replay wins when
  * both are allowed: heatmap rows are derived server-side from the recording.
  */
-import type { HeatmapsRemoteConfig, ReplayRemoteConfig } from './types';
+import type { HeatmapsRemoteConfig, ReplayPrivacyConfig, ReplayRemoteConfig } from './types';
+
+/** Privacy with every field resolved (see ReplayPrivacyConfig). */
+export interface ReplayPrivacy {
+  textMode: 'all' | 'interactive' | 'marked';
+  attributes: boolean;
+  urlQuery: boolean;
+}
+
+export const REPLAY_PRIVACY_DEFAULTS: Readonly<ReplayPrivacy> = { textMode: 'interactive', attributes: false, urlQuery: false };
+
+/**
+ * Validate the dashboard's privacy object. Anything unknown or mistyped falls back to the
+ * safe default for that field; only a literal `true` relaxes attributes/urlQuery.
+ */
+export function resolveReplayPrivacy(raw: ReplayPrivacyConfig | unknown): ReplayPrivacy {
+  const src = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  const mode = src.textMode;
+  return {
+    textMode: mode === 'all' || mode === 'marked' || mode === 'interactive' ? mode : REPLAY_PRIVACY_DEFAULTS.textMode,
+    attributes: src.attributes === true,
+    urlQuery: src.urlQuery === true,
+  };
+}
 
 export const REPLAY_MODULE_BASE = 'https://track.datalyr.com';
 export const REPLAY_ENDPOINT = 'https://replay.datalyr.com/replay';
@@ -95,8 +118,11 @@ export interface ReplayContext {
 
 /** The surface dl.replay.<v>.js registers on window.DatalyrReplay. */
 export interface ReplayRecorder {
-  /** mode defaults to 'replay' (a 1.8.x module takes one argument). */
-  start(ctx: ReplayContext, mode?: ReplayMode): void;
+  /**
+   * mode defaults to 'replay' (a 1.8.x module takes one argument); privacy defaults to
+   * REPLAY_PRIVACY_DEFAULTS (a 1.9.0 module ignores it and records its fixed rules).
+   */
+  start(ctx: ReplayContext, mode?: ReplayMode, privacy?: ReplayPrivacy): void;
   /** Modes this module supports; a module without it (1.8.x) only records replay. */
   modes?: ReadonlyArray<ReplayMode>;
   /** discard=true drops the unsent buffer and anything parked for the next page. */
@@ -197,6 +223,7 @@ export class ReplayLoader {
   private wanted = false;
   private mode: ReplayMode | null = null;
   private running: ReplayMode | null = null; // mode the recorder was started in
+  private privacy: ReplayPrivacy = { ...REPLAY_PRIVACY_DEFAULTS };
 
   constructor(private readonly context: ReplayContext) {}
 
@@ -204,9 +231,11 @@ export class ReplayLoader {
    * Start (loading the module once) in `mode`; stop and discard when null. A mode change
    * on the same page (dashboard flip) discards the current capture and restarts.
    */
-  sync(mode: ReplayMode | null, moduleVersion: unknown): void {
+  sync(mode: ReplayMode | null, moduleVersion: unknown, privacy?: ReplayPrivacyConfig | null): void {
     if (mode && this.running && mode !== this.running) this.stop(true);
     this.mode = mode;
+    // Takes effect on the next start (a running capture keeps the rules it started with).
+    this.privacy = resolveReplayPrivacy(privacy);
     if (!mode) {
       this.wanted = false;
       this.stop(true);
@@ -263,7 +292,7 @@ export class ReplayLoader {
     // A 1.8.x module (pinned replay.v) would treat any start() as a full recording.
     if (mode !== 'replay' && !(Array.isArray(recorder.modes) && recorder.modes.includes(mode))) return;
     try {
-      recorder.start(this.context, mode);
+      recorder.start(this.context, mode, { ...this.privacy });
       this.running = mode;
     } catch { /* best-effort */ }
   }
