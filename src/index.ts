@@ -15,7 +15,7 @@ import { AutoIdentifyManager } from './auto-identify';
 import { StripeSessionWatcher } from './stripe-session';
 import { applyRemoteConfig, type SdkRemoteConfig } from './config';
 import { shopifyCartId } from './shopify-cart';
-import { ReplayLoader, REPLAY_ENDPOINT, replayAllowed, replayAttribution, replayTrackPayload } from './replay-loader';
+import { ReplayLoader, REPLAY_ENDPOINT, replayMode, replayAttribution, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
 import {
   generateUUID,
@@ -110,6 +110,7 @@ class Datalyr {
   // Session replay (replay-loader.ts): created on the first sync that allows it.
   private replay: ReplayLoader | null = null;
   private replayDisabledAtInit = false; // init({ replay: false })
+  private heatmapsDisabledAtInit = false; // init({ heatmaps: false })
   private reportedShopifyCartId: string | null = null; // reportShopifyCart: once per cart id per page
   private stampedShopifyCartId: string | null = null;  // the cart our attributes were last written to
   private shopifyCartSyncing = false;                    // one /cart/update.js at a time
@@ -241,6 +242,7 @@ class Datalyr {
     this.identity = new IdentityManager({ persistNewId: this.shouldTrack() });
     this.session = new SessionManager(this.config.sessionTimeout);
     this.replayDisabledAtInit = config.replay === false;
+    this.heatmapsDisabledAtInit = config.heatmaps === false;
     // Replay: flush the old session's recording under its own id, then re-check the
     // sample for the new id (it is a hash of the session id).
     this.session.onSessionChange((sessionId) => {
@@ -562,7 +564,7 @@ class Datalyr {
         applyRemoteConfig(this.config, remote, this.explicitConfigKeys);
         if (this.config.privacyMode === 'strict') this.config.autoIdentify = false;
         // A container started late (Shopify consent) delivers replay only here.
-        if (this.initialized) this.syncReplay(remote?.replay);
+        if (this.initialized) this.syncReplay(remote ?? undefined);
       },
       // Lazy: invoked at the moment a third-party pixel inits, AFTER the
       // /container-scripts roundtrip resolves — so a pre-init identify()
@@ -1756,14 +1758,17 @@ class Datalyr {
    * DNT and GPC are honored for replay even where the site does not honor them for
    * analytics.
    */
-  private syncReplay(remoteOverride?: SdkRemoteConfig['replay']): void {
+  private syncReplay(remoteOverride?: SdkRemoteConfig): void {
     if (!this.config || !this.session) return;
-    const remote = remoteOverride ?? this.container?.getRemoteConfig()?.replay;
-    let allowed = false;
+    const remoteConfig = remoteOverride ?? this.container?.getRemoteConfig();
+    const remote = remoteConfig?.replay;
+    let mode: ReturnType<typeof replayMode> = null;
     try {
-      allowed = replayAllowed({
+      mode = replayMode({
         remote,
         disabledAtInit: this.replayDisabledAtInit,
+        heatmaps: remoteConfig?.heatmaps,
+        heatmapsDisabledAtInit: this.heatmapsDisabledAtInit,
         tracking: this.shouldTrack(),
         marketing: this.consentAllowsMarketing(),
         strict: this.config.privacyMode === 'strict',
@@ -1772,9 +1777,9 @@ class Datalyr {
         sessionId: this.session.getSessionId(),
       });
     } catch {
-      allowed = false;
+      mode = null;
     }
-    if (!allowed && !this.replay) return;
+    if (!mode && !this.replay) return;
     if (!this.replay) {
       this.replay = new ReplayLoader({
         workspaceId: this.config.workspaceId,
@@ -1785,7 +1790,7 @@ class Datalyr {
         getAttribution: () => this.replayAttributionNow(),
       });
     }
-    this.replay.sync(allowed, remote?.v);
+    this.replay.sync(mode, remote?.v);
   }
 
   private startInAppHandoff(): void {
