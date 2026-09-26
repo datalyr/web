@@ -106,12 +106,24 @@ export interface DatalyrConfig {
   inAppHandoff?: boolean;
   stripePaymentLinks?: boolean;
   stripeLinkDomains?: string[];
+  // - replay: session replay is enabled from the Datalyr dashboard only (it is billed per
+  //   recorded session). Pass `replay: false` to keep it off on this site no matter what
+  //   the dashboard says. Nothing passed here can turn it on; the object form is what the
+  //   dashboard delivers and is ignored when passed to init().
+  replay?: false | ReplayRemoteConfig;
 
   // Fallback endpoints for resilience
   fallbackEndpoints?: string[];         // Additional endpoints to try
 
   // Plugins
   plugins?: DatalyrPlugin[];
+}
+
+/** Dashboard replay settings as delivered by /container-scripts `config.replay`. */
+export interface ReplayRemoteConfig {
+  enabled?: boolean;
+  sampleRate?: number; // 0.01–1, share of sessions recorded
+  v?: string;          // replay module version (dl.replay.<v>.js); falls back to the SDK version
 }
 
 export interface EventProperties {

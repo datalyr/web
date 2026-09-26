@@ -15,6 +15,9 @@ export class SessionManager {
   private activityCheckInterval: ReturnType<typeof setInterval> | null = null;
   private activityListeners: Array<{ event: string; handler: EventListener }> = [];
   private sessionCreationLock = false; // FIXED (DATA-02): Mutex to prevent race conditions
+  // Fired after the session id changes (new session or rotation). Session replay uses it
+  // to flush the old id's buffer and start the new id with a full snapshot.
+  private sessionChangeListener: ((sessionId: string) => void) | null = null;
 
   constructor(timeout = 60 * 60 * 1000) { // 60 minutes default (matches docs)
     this.sessionTimeout = timeout;
@@ -81,6 +84,7 @@ export class SessionManager {
       this.saveSession();
       // Issue #25: Increment AFTER session created successfully
       this.incrementSessionCount();
+      this.notifySessionChange();
 
       return this.sessionId;
     } finally {
@@ -114,12 +118,25 @@ export class SessionManager {
       }
 
       console.log(`[Datalyr Session] Rotated session ID from ${oldSessionId} to ${this.sessionId}`);
+      this.notifySessionChange();
     } else {
       // No existing session, create new one
       this.createNewSession();
     }
 
     return this.sessionId;
+  }
+
+  /** Register the single session-change listener (null removes it). */
+  onSessionChange(listener: ((sessionId: string) => void) | null): void {
+    this.sessionChangeListener = listener;
+  }
+
+  private notifySessionChange(): void {
+    const listener = this.sessionChangeListener;
+    const id = this.sessionId;
+    if (!listener || !id) return;
+    try { listener(id); } catch { /* a listener must never break session handling */ }
   }
 
   /**
