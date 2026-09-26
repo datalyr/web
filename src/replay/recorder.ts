@@ -157,8 +157,12 @@ export class Recorder implements ReplayRecorder {
     try {
       this.stopRecord = record({
         emit: (event, isCheckout) => this.onEmit(event as eventWithTime, !!isCheckout),
-        maskAllInputs: true,
-        maskInputOptions: { password: true },
+        // NOT maskAllInputs: rrweb expands that to a fixed list of input TYPES, which
+        // leaves type=hidden (and any unlisted type) in clear. The tag keys mask every
+        // input/textarea/select value whatever its type (rrweb maskInputValue checks
+        // maskInputOptions[tagName] first). submit/button values stay: rrweb never masks them.
+        maskAllInputs: false,
+        maskInputOptions: { input: true, textarea: true, select: true, password: true } as Record<string, boolean>,
         maskTextSelector: '*',
         maskTextFn: maskText,
         blockSelector: '[data-dl-block]',

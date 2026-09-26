@@ -79,8 +79,8 @@ describe('replay recorder', () => {
   test('record() options: inputs + all text masked, block selector, slim DOM, no canvas/fonts/images/iframes', () => {
     recorder.start(ctx);
     expect(mockRrweb.opts).toEqual(expect.objectContaining({
-      maskAllInputs: true,
-      maskInputOptions: { password: true },
+      maskAllInputs: false,
+      maskInputOptions: { input: true, textarea: true, select: true, password: true },
       maskTextSelector: '*',
       maskTextFn: maskText,
       blockSelector: '[data-dl-block]',
