@@ -297,9 +297,9 @@ describe('bundle guard: dl.js never contains the recorder', () => {
     return seen;
   }
 
-  test('src/index.ts does not reach @rrweb/*, fflate or src/replay/', () => {
+  test('src/index.ts does not reach @rrweb/*, rrweb-snapshot, fflate or src/replay/', () => {
     const graph = Array.from(importGraph(path.join(__dirname, 'index.ts')));
-    expect(graph.filter(x => x.startsWith('@rrweb') || x === 'rrweb' || x === 'fflate')).toEqual([]);
+    expect(graph.filter(x => x.startsWith('@rrweb') || x.startsWith('rrweb') || x === 'fflate')).toEqual([]);
     expect(graph.filter(x => x.includes(`${path.sep}replay${path.sep}`))).toEqual([]);
     expect(graph.some(x => x.endsWith('replay-loader.ts'))).toBe(true);
   });
