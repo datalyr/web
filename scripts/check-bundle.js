@@ -58,7 +58,10 @@ const DEFAULT_TARGETS = [
 // rrweb fingerprints: rrweb's own serialized attribute names and its public API names.
 // None of them may appear in dl.js; the replay bundle must contain them.
 const RRWEB_MARKERS = ['rr_dataURL', 'rr_mediaState', 'takeFullSnapshot', 'addCustomEvent'];
-const MAX_REPLAY_GZIP_BYTES = 40 * 1024; // measured 1.8.0: ~28 KB gz; alarm well before it doubles
+// Heat mode (1.9.0): its snapshot serializer (rrweb-snapshot) and click capture must also
+// stay out of dl.js; the replay bundle must carry them.
+const HEAT_MARKERS = ['mode=heat', 'y_pct_max'];
+const MAX_REPLAY_GZIP_BYTES = 40 * 1024; // measured 1.8.0: ~28 KB gz; 1.9.0 (+ rrweb-snapshot for heat mode): ~37 KB gz
 
 const args = process.argv.slice(2);
 const distMode = args.includes('--dist');
@@ -99,7 +102,7 @@ for (const file of files) {
     problems.push(`sdk_version "${versionMatch[1]}" !== package.json "${expectedVersion}"`);
   }
 
-  const rrweb = RRWEB_MARKERS.filter(m => content.includes(m));
+  const rrweb = RRWEB_MARKERS.concat(HEAT_MARKERS).filter(m => content.includes(m));
   if (rrweb.length > 0) {
     problems.push(`contains rrweb code (${rrweb.join(', ')}) — the recorder must stay in dl.replay.<v>.js`);
   }
@@ -123,7 +126,7 @@ if (distMode) {
     const versionMatch = content.match(/replay_version\s*[:=]\s*["']([^"']+)["']/);
     if (!versionMatch) problems.push('no replay_version literal found');
     else if (versionMatch[1] !== expectedVersion) problems.push(`replay_version "${versionMatch[1]}" !== package.json "${expectedVersion}"`);
-    const missing = RRWEB_MARKERS.filter(m => !content.includes(m));
+    const missing = RRWEB_MARKERS.concat(HEAT_MARKERS).filter(m => !content.includes(m));
     if (missing.length > 0) problems.push(`rrweb markers missing (${missing.join(', ')})`);
     const raw = Buffer.byteLength(content);
     const gz = require('zlib').gzipSync(content, { level: 9 }).length;

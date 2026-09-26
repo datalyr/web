@@ -8,7 +8,9 @@ import * as path from 'path';
 import {
   REPLAY_GLOBAL,
   ReplayLoader,
+  heatmapsAllowed,
   replayAllowed,
+  replayMode,
   replayHash,
   replayModuleUrl,
   replaySampleHit,
@@ -101,6 +103,41 @@ describe('module URL', () => {
   });
 });
 
+describe('capture mode per page load (replay wins over heat)', () => {
+  const HEAT = { enabled: true, sampleRate: 1 };
+  const NO_REPLAY = { ...OPEN, remote: { enabled: false, sampleRate: 1 } };
+
+  test.each<[string, Partial<ReplayGateInputs>, 'replay' | 'heat' | null]>([
+    ['replay only', {}, 'replay'],
+    ['replay + heatmaps → replay (heat rows derive from the recording)', { heatmaps: HEAT }, 'replay'],
+    ['heatmaps only', { ...NO_REPLAY, heatmaps: HEAT }, 'heat'],
+    ['no replay key, heatmaps on', { remote: undefined, heatmaps: HEAT }, 'heat'],
+    ['replay out of sample, heatmaps in sample → heat', { remote: { enabled: true, sampleRate: 0 }, heatmaps: HEAT }, 'heat'],
+    ['replay:false at init, heatmaps on → heat', { disabledAtInit: true, heatmaps: HEAT }, 'heat'],
+    ['heatmaps not enabled', { ...NO_REPLAY, heatmaps: { enabled: false, sampleRate: 1 } }, null],
+    ['heatmaps enabled not strictly true', { ...NO_REPLAY, heatmaps: { enabled: 'true' as unknown as boolean, sampleRate: 1 } }, null],
+    ['heatmaps key missing', { ...NO_REPLAY }, null],
+    ['heatmaps:false at init', { ...NO_REPLAY, heatmaps: HEAT, heatmapsDisabledAtInit: true }, null],
+    ['heatmaps out of sample', { ...NO_REPLAY, heatmaps: { enabled: true, sampleRate: 0 } }, null],
+    ['analytics consent / opt-out', { heatmaps: HEAT, tracking: false }, null],
+    ['marketing consent declined', { heatmaps: HEAT, marketing: false }, null],
+    ['strict privacy', { heatmaps: HEAT, strict: true }, null],
+    ['Do Not Track', { heatmaps: HEAT, doNotTrack: true }, null],
+    ['Global Privacy Control', { heatmaps: HEAT, globalPrivacyControl: true }, null],
+  ])('%s', (_label, patch, expected) => {
+    expect(replayMode({ ...OPEN, ...patch })).toBe(expected);
+  });
+
+  test('heat sample: own rate on the same session-id hash', () => {
+    const g = { ...OPEN, remote: undefined, heatmaps: { enabled: true, sampleRate: 0.5 } };
+    let hits = 0;
+    for (let i = 0; i < 2000; i++) if (heatmapsAllowed({ ...g, sessionId: `sess_${i}` })) hits++;
+    expect(hits / 2000).toBeGreaterThan(0.45);
+    expect(hits / 2000).toBeLessThan(0.55);
+    expect(heatmapsAllowed(g)).toBe(heatmapsAllowed({ ...g })); // stable
+  });
+});
+
 describe('what a track() call puts in the recording', () => {
   test('event name + value/currency/product ids only', () => {
     expect(replayTrackPayload('purchase', {
@@ -132,15 +169,15 @@ describe('ReplayLoader', () => {
 
   test('not allowed → nothing injected, nothing started (no-op without the key)', () => {
     const loader = new ReplayLoader(ctx);
-    loader.sync(false, '1.8.0');
+    loader.sync(null, '1.8.0');
     loader.event('track', { name: 'x' });
     expect(scripts()).toHaveLength(0);
   });
 
   test('allowed → injects the versioned module once, without crossOrigin, and starts it on load', () => {
     const loader = new ReplayLoader(ctx);
-    loader.sync(true, '1.8.2');
-    loader.sync(true, '1.8.2');
+    loader.sync('replay', '1.8.2');
+    loader.sync('replay', '1.8.2');
     expect(scripts()).toHaveLength(1);
     const script = scripts()[0];
     expect(script.src).toBe('https://track.datalyr.com/dl.replay.1.8.2.js');
@@ -151,7 +188,7 @@ describe('ReplayLoader', () => {
     const recorder = fakeRecorder();
     (window as any)[REPLAY_GLOBAL] = recorder;
     script.onload!(new Event('load'));
-    expect(recorder.start).toHaveBeenCalledWith(ctx);
+    expect(recorder.start).toHaveBeenCalledWith(ctx, 'replay');
 
     loader.event('track', { name: 'add_to_cart' });
     expect(recorder.event).toHaveBeenCalledWith('track', { name: 'add_to_cart' });
@@ -159,18 +196,18 @@ describe('ReplayLoader', () => {
 
   test('module fails to load → nothing recorded, no second injection', () => {
     const loader = new ReplayLoader(ctx);
-    loader.sync(true, '1.8.1');
+    loader.sync('replay', '1.8.1');
     scripts()[0].onerror!(new Event('error'));
-    loader.sync(true, '1.8.1');
+    loader.sync('replay', '1.8.1');
     expect(scripts()).toHaveLength(1);
     expect(() => loader.event('track', { name: 'x' })).not.toThrow();
   });
 
   test('a gate closing before the module arrives: it loads but never starts', () => {
     const loader = new ReplayLoader(ctx);
-    loader.sync(true, undefined);
+    loader.sync('replay', undefined);
     expect(scripts()[0].src).toBe('https://track.datalyr.com/dl.replay.1.8.0.js');
-    loader.sync(false, undefined);
+    loader.sync(null, undefined);
     const recorder = fakeRecorder();
     (window as any)[REPLAY_GLOBAL] = recorder;
     scripts()[0].onload!(new Event('load'));
@@ -181,13 +218,46 @@ describe('ReplayLoader', () => {
     const recorder = fakeRecorder();
     (window as any)[REPLAY_GLOBAL] = recorder;
     const loader = new ReplayLoader(ctx);
-    loader.sync(true, '1.8.0');
+    loader.sync('replay', '1.8.0');
     expect(scripts()).toHaveLength(0); // already registered: no second script
     expect(recorder.start).toHaveBeenCalledTimes(1);
-    loader.sync(false, '1.8.0');
+    loader.sync(null, '1.8.0');
     expect(recorder.stop).toHaveBeenCalledWith(true);
     loader.event('vis', { hidden: true });
     expect(recorder.event).not.toHaveBeenCalled();
+  });
+
+  test("heat mode: same module URL, started with 'heat'", () => {
+    const loader = new ReplayLoader(ctx);
+    loader.sync('heat', '1.9.0');
+    expect(scripts()).toHaveLength(1);
+    expect(scripts()[0].src).toBe('https://track.datalyr.com/dl.replay.1.9.0.js');
+    const recorder = { ...fakeRecorder(), modes: ['replay', 'heat'] as const };
+    (window as any)[REPLAY_GLOBAL] = recorder;
+    scripts()[0].onload!(new Event('load'));
+    expect(recorder.start).toHaveBeenCalledWith(ctx, 'heat');
+    loader.sync(null, '1.9.0');
+    expect(recorder.stop).toHaveBeenCalledWith(true);
+  });
+
+  test('heat mode never starts a module without heat support (pinned 1.8.x)', () => {
+    const recorder = fakeRecorder();
+    (window as any)[REPLAY_GLOBAL] = recorder;
+    const loader = new ReplayLoader(ctx);
+    loader.sync('heat', '1.8.2');
+    expect(recorder.start).not.toHaveBeenCalled();
+  });
+
+  test('mode change on the page: discard, restart in the new mode', () => {
+    const recorder = { ...fakeRecorder(), modes: ['replay', 'heat'] as const };
+    (window as any)[REPLAY_GLOBAL] = recorder;
+    const loader = new ReplayLoader(ctx);
+    loader.sync('heat', '1.9.0');
+    loader.sync('heat', '1.9.0');
+    expect(recorder.stop).not.toHaveBeenCalled();
+    loader.sync('replay', '1.9.0');
+    expect(recorder.stop).toHaveBeenCalledWith(true);
+    expect(recorder.start.mock.calls.map(c => c[1])).toEqual(['heat', 'heat', 'replay']);
   });
 
   test('a throwing recorder never breaks the SDK', () => {
@@ -198,10 +268,10 @@ describe('ReplayLoader', () => {
     (window as any)[REPLAY_GLOBAL] = recorder;
     const loader = new ReplayLoader(ctx);
     expect(() => {
-      loader.sync(true, '1.8.0');
+      loader.sync('replay', '1.8.0');
       loader.event('track', {});
       loader.sessionChanged('sess_2');
-      loader.sync(false, '1.8.0');
+      loader.sync(null, '1.8.0');
     }).not.toThrow();
   });
 });
@@ -227,9 +297,9 @@ describe('bundle guard: dl.js never contains the recorder', () => {
     return seen;
   }
 
-  test('src/index.ts does not reach @rrweb/*, fflate or src/replay/', () => {
+  test('src/index.ts does not reach @rrweb/*, rrweb-snapshot, fflate or src/replay/', () => {
     const graph = Array.from(importGraph(path.join(__dirname, 'index.ts')));
-    expect(graph.filter(x => x.startsWith('@rrweb') || x === 'rrweb' || x === 'fflate')).toEqual([]);
+    expect(graph.filter(x => x.startsWith('@rrweb') || x.startsWith('rrweb') || x === 'fflate')).toEqual([]);
     expect(graph.filter(x => x.includes(`${path.sep}replay${path.sep}`))).toEqual([]);
     expect(graph.some(x => x.endsWith('replay-loader.ts'))).toBe(true);
   });

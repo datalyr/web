@@ -100,6 +100,10 @@ export default [
   // fflate stay out of dl.js (scripts/check-bundle.js enforces that).
   {
     input: 'src/replay/recorder.ts',
+    // rrweb-snapshot's ESM build inlines postcss (used only by rebuild(), which heat mode
+    // never calls) behind an unannotated top-level `requirePostcss()` call; marking it
+    // pure lets rollup drop ~25 KB gz of it.
+    treeshake: { manualPureFunctions: ['requirePostcss'] },
     output: [
       {
         file: 'dist/datalyr.replay.min.js',

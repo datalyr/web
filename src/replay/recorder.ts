@@ -21,12 +21,17 @@
  * keys). NOT rewritten in v1: URLs inside DOM attributes (a[href], img[src], srcset,
  * form[action], inline style url()) are recorded as rrweb serialises them, query
  * included. Listed for the legal review; the distiller/worker must not surface them.
+ *
+ * Heat mode (1.9.0, start(ctx, 'heat')): no record(); src/replay/heat.ts captures
+ * clicks, scroll depth and one masked snapshot. Same transport, envelope plus m:'heat',
+ * POSTed to ?enc=gzip&mode=heat. Bundled into this same file.
  */
 import { record } from '@rrweb/record';
 import type { eventWithTime } from '@rrweb/types';
 import { gzipSync, strToU8 } from 'fflate';
 import { REPLAY_PARK_KEY, replayAttribution } from '../replay-loader';
-import type { ReplayContext, ReplayEventKind, ReplayRecorder } from '../replay-loader';
+import type { ReplayContext, ReplayEventKind, ReplayMode, ReplayRecorder } from '../replay-loader';
+import { HeatCapture, type HeatItem } from './heat';
 import { generateUUID } from '../utils';
 
 export const FLUSH_INTERVAL_MS = 10_000;
@@ -39,6 +44,8 @@ export const PARK_MAX_BYTES = 1_000_000;
 export const ERROR_MAX_CHARS = 300;
 export const TEXT_UNMASK_SELECTOR = 'button, a, label, [role=button], summary, [data-dl-unmask]';
 const TEXT_FORCE_MASK_SELECTOR = '[data-dl-mask]';
+// Every input/textarea/select value masked whatever its type (see record() options).
+const INPUT_MASK: Record<string, boolean> = { input: true, textarea: true, select: true, password: true };
 const MUTATION_BUCKET = 100;
 const MUTATION_REFILL_PER_S = 10;
 const RETRY_MAX = 3;
@@ -68,7 +75,7 @@ export function stripUrl(href: unknown): string {
   }
 }
 
-interface ParkedChunk { s: string; p: string; q: number; body: string }
+interface ParkedChunk { s: string; p: string; q: number; body: string; m?: 'heat' }
 
 /** Keep interactive text readable; mask everything else (see file header). */
 export function maskText(text: string, element: HTMLElement | null): string {
@@ -137,6 +144,9 @@ function writeParked(chunks: ParkedChunk[]): void {
 export class Recorder implements ReplayRecorder {
   // Build-time literal (rollup injectSdkVersion); scripts/check-bundle.js checks it.
   readonly replay_version = '__SDK_VERSION__';
+  readonly modes: ReadonlyArray<ReplayMode> = ['replay', 'heat'];
+  private mode: ReplayMode = 'replay';
+  private heat: HeatCapture | null = null;
   private ctx: ReplayContext | null = null;
   private stopRecord: (() => void) | undefined;
   private recording = false;
@@ -144,7 +154,7 @@ export class Recorder implements ReplayRecorder {
   private sid = '';
   private pageLoadId = '';
   private seq = 0;
-  private buf: eventWithTime[] = [];
+  private buf: Array<eventWithTime | HeatItem> = [];
   private bufBytes = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private startedAt = 0;
@@ -164,9 +174,10 @@ export class Recorder implements ReplayRecorder {
     return this.recording;
   }
 
-  start(ctx: ReplayContext): void {
+  start(ctx: ReplayContext, mode: ReplayMode = 'replay'): void {
     this.ctx = ctx;
     if (this.recording || this.capped) return;
+    this.mode = mode === 'heat' ? 'heat' : 'replay';
     this.sid = ctx.getSessionId();
     this.pageLoadId = generateUUID();
     this.seq = 0;
@@ -178,6 +189,10 @@ export class Recorder implements ReplayRecorder {
     this.buckets.clear();
     this.recording = true;
     this.sendParked();
+    if (this.mode === 'heat') {
+      this.startHeat();
+      return;
+    }
     try {
       this.stopRecord = record({
         emit: (event, isCheckout) => this.onEmit(event as eventWithTime, !!isCheckout),
@@ -186,7 +201,7 @@ export class Recorder implements ReplayRecorder {
         // input/textarea/select value whatever its type (rrweb maskInputValue checks
         // maskInputOptions[tagName] first). submit/button values stay: rrweb never masks them.
         maskAllInputs: false,
-        maskInputOptions: { input: true, textarea: true, select: true, password: true } as Record<string, boolean>,
+        maskInputOptions: { ...INPUT_MASK },
         maskTextSelector: '*',
         maskTextFn: maskText,
         blockSelector: '[data-dl-block]',
@@ -221,9 +236,11 @@ export class Recorder implements ReplayRecorder {
     }
     if (!this.recording) return;
     if (discard) {
+      this.heat?.stop(false);
       this.buf = [];
       this.bufBytes = 0;
     } else {
+      this.heat?.stop(true);
       this.flush();
     }
     this.teardown();
@@ -231,6 +248,11 @@ export class Recorder implements ReplayRecorder {
 
   event(kind: ReplayEventKind, payload: Record<string, unknown>): void {
     if (!this.recording) return;
+    if (this.mode === 'heat') {
+      // No recording to annotate: only a route change matters (scroll depth per path).
+      if (kind === 'url') this.heat?.pathChanged();
+      return;
+    }
     try {
       record.addCustomEvent('dl', { k: kind, ...payload });
     } catch {
@@ -240,8 +262,13 @@ export class Recorder implements ReplayRecorder {
 
   sessionChanged(sessionId: string): void {
     if (!this.recording || !sessionId || sessionId === this.sid) return;
+    this.heat?.flush();
     this.flush();
     this.sid = sessionId;
+    if (this.mode === 'heat') {
+      this.heatAttr(); // each session's chunks carry their own attribution
+      return;
+    }
     // Every session must start playable on its own.
     setTimeout(() => { this.fullSnapshot(); this.attr(); }, 0);
   }
@@ -249,7 +276,7 @@ export class Recorder implements ReplayRecorder {
   /** Send the buffer now (normal path: async gzip, fetch with retries). */
   flush(): void {
     const chunk = this.drain();
-    if (chunk) void this.send(chunk.body, 0, this.generation);
+    if (chunk) void this.send(chunk.body, 0, this.generation, chunk.m);
   }
 
   /**
@@ -258,6 +285,7 @@ export class Recorder implements ReplayRecorder {
    * page may also try a plain fetch. A successful send unparks the chunk.
    */
   flushUrgent(terminal: boolean): void {
+    this.heat?.flush();
     const chunk = this.drain();
     if (!chunk) return;
     const parked = readParked();
@@ -272,7 +300,7 @@ export class Recorder implements ReplayRecorder {
     const keepalive = gz.length <= KEEPALIVE_MAX_BYTES;
     if (!keepalive && terminal) return; // stays parked for the next page
     const gen = this.generation;
-    this.post(gz, keepalive, false, gen)
+    this.post(gz, keepalive, false, gen, chunk.m)
       .then(ok => { if (ok) this.unpark(chunk.p, chunk.q); })
       .catch(() => undefined);
   }
@@ -315,7 +343,7 @@ export class Recorder implements ReplayRecorder {
     this.push(event);
   }
 
-  private push(event: eventWithTime): void {
+  private push(event: eventWithTime | HeatItem): void {
     let size = 0;
     try {
       size = JSON.stringify(event).length;
@@ -366,13 +394,14 @@ export class Recorder implements ReplayRecorder {
     let v = '';
     try { v = this.ctx.getVisitorId(); } catch { /* keep empty */ }
     // Envelope: see datalyr-v2 docs/implementation/session-replay-2026-09-26/CHECKLIST.md "Interfaces".
+    const heat = this.mode === 'heat';
     const body = `{"w":${JSON.stringify(this.ctx.workspaceId)},"s":${JSON.stringify(this.sid)},"v":${JSON.stringify(v)},`
       + `"p":${JSON.stringify(this.pageLoadId)},"q":${q},"sv":${JSON.stringify(this.ctx.sdkVersion)},`
-      + `"rb":${byteLength(e)},"e":${e}}`;
-    return { s: this.sid, p: this.pageLoadId, q, body };
+      + `"rb":${byteLength(e)},"e":${e}${heat ? ',"m":"heat"' : ''}}`;
+    return heat ? { s: this.sid, p: this.pageLoadId, q, body, m: 'heat' } : { s: this.sid, p: this.pageLoadId, q, body };
   }
 
-  private async send(body: string, attempt: number, gen: number): Promise<void> {
+  private async send(body: string, attempt: number, gen: number, m?: 'heat'): Promise<void> {
     if (gen !== this.generation) return;
     let gz: Uint8Array;
     try {
@@ -380,19 +409,19 @@ export class Recorder implements ReplayRecorder {
     } catch {
       return;
     }
-    const ok = await this.post(gz, false, true, gen);
+    const ok = await this.post(gz, false, true, gen, m);
     if (ok !== null || attempt >= RETRY_MAX || gen !== this.generation) return;
-    setTimeout(() => { void this.send(body, attempt + 1, gen); }, RETRY_BASE_MS * Math.pow(2, attempt));
+    setTimeout(() => { void this.send(body, attempt + 1, gen, m); }, RETRY_BASE_MS * Math.pow(2, attempt));
   }
 
   /**
    * POST one gzipped chunk. Resolves true on 2xx, false on a refusal that must not be
    * retried (4xx), and null on a network error / 5xx when `retryable` is set.
    */
-  private async post(gz: Uint8Array, keepalive: boolean, retryable: boolean, gen: number): Promise<boolean | null> {
+  private async post(gz: Uint8Array, keepalive: boolean, retryable: boolean, gen: number, m?: 'heat'): Promise<boolean | null> {
     if (!this.ctx || typeof fetch !== 'function' || gen !== this.generation) return false;
     try {
-      const res = await fetch(`${this.ctx.endpoint}?enc=gzip`, {
+      const res = await fetch(`${this.ctx.endpoint}?enc=gzip${m === 'heat' ? '&mode=heat' : ''}`, {
         method: 'POST',
         mode: 'cors',
         credentials: 'omit',
@@ -413,7 +442,7 @@ export class Recorder implements ReplayRecorder {
     if (!parked.length) return;
     writeParked([]);
     for (const chunk of parked) {
-      if (chunk && chunk.s === this.sid && typeof chunk.body === 'string') void this.send(chunk.body, 0, this.generation);
+      if (chunk && chunk.s === this.sid && typeof chunk.body === 'string') void this.send(chunk.body, 0, this.generation, chunk.m === 'heat' ? 'heat' : undefined);
     }
   }
 
@@ -426,6 +455,50 @@ export class Recorder implements ReplayRecorder {
     let raw: Record<string, unknown> | null = null;
     try { raw = this.ctx?.getAttribution ? this.ctx.getAttribution() as unknown as Record<string, unknown> : null; } catch { raw = null; }
     this.event('attr', { ...replayAttribution(raw) });
+  }
+
+  /** Heat mode start: listeners, the attr item, and maybe the page load's snapshot. */
+  private startHeat(): void {
+    const heat = new HeatCapture(
+      item => this.pushHeat(item),
+      { unmaskSelector: TEXT_UNMASK_SELECTOR, forceMaskSelector: TEXT_FORCE_MASK_SELECTOR, maskText, inputMask: { ...INPUT_MASK } },
+      IDLE_PAUSE_MS,
+    );
+    this.heat = heat;
+    heat.start();
+    this.heatAttr();
+    const on = (target: EventTarget, type: string, handler: EventListener): void => {
+      target.addEventListener(type, handler);
+      this.removers.push(() => target.removeEventListener(type, handler));
+    };
+    on(document, 'visibilitychange', () => { if (document.visibilityState === 'hidden') this.flushUrgent(false); });
+    const unload = (): void => this.flushUrgent(true);
+    on(window, 'pagehide', unload);
+    on(window, 'beforeunload', unload);
+    on(window, 'popstate', () => heat.pathChanged());
+    const snap = (): void => { heat.snap(this.pageLoadId, this.seq === 0); };
+    if (typeof document !== 'undefined' && document.readyState === 'loading') on(document, 'DOMContentLoaded', snap);
+    else snap();
+    this.timer = setInterval(() => {
+      if (Date.now() - this.startedAt > MAX_PAGE_MS) {
+        this.capped = true;
+        this.stop(false);
+        return;
+      }
+      heat.tick(Date.now());
+      this.flush();
+    }, FLUSH_INTERVAL_MS);
+  }
+
+  private pushHeat(item: HeatItem): void {
+    if (!this.recording || this.mode !== 'heat') return;
+    this.push(item);
+  }
+
+  private heatAttr(): void {
+    let raw: Record<string, unknown> | null = null;
+    try { raw = this.ctx?.getAttribution ? this.ctx.getAttribution() as unknown as Record<string, unknown> : null; } catch { raw = null; }
+    this.pushHeat({ t: 'attr', ...replayAttribution(raw) });
   }
 
   private fullSnapshot(): void {
@@ -476,6 +549,7 @@ export class Recorder implements ReplayRecorder {
 
   private teardown(): void {
     this.recording = false;
+    this.heat = null;
     try { this.stopRecord?.(); } catch { /* best-effort */ }
     this.stopRecord = undefined;
     if (this.timer) clearInterval(this.timer);

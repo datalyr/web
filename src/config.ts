@@ -9,7 +9,7 @@
  *
  * Precedence per key:  explicit init() value  >  remote config  >  built-in default
  */
-import type { DatalyrConfig, ReplayRemoteConfig } from './types';
+import type { DatalyrConfig, HeatmapsRemoteConfig, ReplayRemoteConfig } from './types';
 
 /** Subset of DatalyrConfig the worker may deliver via the config envelope. */
 export interface SdkRemoteConfig {
@@ -38,6 +38,10 @@ export interface SdkRemoteConfig {
   // reads the REMOTE value only: an init() value can disable replay (`replay: false`),
   // never enable it. See replay-loader.ts.
   replay?: ReplayRemoteConfig;
+  // Heatmaps add-on (billed, dashboard-only): `{ enabled, sampleRate }`. Same rule as
+  // replay: init() `heatmaps: false` disables, nothing at init enables. Heat mode uses
+  // the replay module (dl.replay.<v>.js) and replay.v as its version.
+  heatmaps?: HeatmapsRemoteConfig;
 }
 
 /** Keys the remote config is allowed to fill on DatalyrConfig. */
@@ -55,6 +59,7 @@ const REMOTE_KEYS: ReadonlyArray<keyof SdkRemoteConfig> = [
   'privacyMode',
   'waitForShopifyConsent',
   'replay',
+  'heatmaps',
 ];
 
 /**

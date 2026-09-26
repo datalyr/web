@@ -50,6 +50,7 @@ const replayScripts = () => Array.from(document.querySelectorAll('script')).filt
 function fakeRecorder() {
   const recorder = {
     start: jest.fn(), stop: jest.fn(), event: jest.fn(), sessionChanged: jest.fn(), isRecording: jest.fn(() => true),
+    modes: ['replay', 'heat'],
   };
   (window as any).DatalyrReplay = recorder;
   return recorder;
@@ -117,6 +118,41 @@ describe('session replay in the SDK', () => {
     ['init cannot enable it', undefined, { replay: { enabled: true, sampleRate: 1 } }],
     ['privacyMode strict', ENABLED, { privacyMode: 'strict' }],
     ['container disabled (no remote config)', ENABLED, { enableContainer: false }],
+  ])('%s → no module', async (_label, remote, config) => {
+    const sdk = await boot(remote, config);
+    expect(replayScripts()).toHaveLength(0);
+    sdk.destroy();
+  });
+
+  const HEAT_ONLY = { heatmaps: { enabled: true, sampleRate: 1 } };
+
+  test("heatmaps only → same module, started in 'heat' mode", async () => {
+    const sdk = await boot(HEAT_ONLY);
+    const scripts = replayScripts();
+    expect(scripts).toHaveLength(1);
+    expect(scripts[0].src).toMatch(/\/dl\.replay\.[^/]+\.js$/);
+    const recorder = fakeRecorder();
+    scripts[0].onload!(new Event('load'));
+    expect(recorder.start).toHaveBeenCalledTimes(1);
+    expect(recorder.start.mock.calls[0][1]).toBe('heat');
+    sdk.optOut();
+    expect(recorder.stop).toHaveBeenCalledWith(true);
+    sdk.destroy();
+  });
+
+  test("replay + heatmaps → 'replay'", async () => {
+    const sdk = await boot({ ...ENABLED, ...HEAT_ONLY });
+    const recorder = fakeRecorder();
+    replayScripts()[0].onload!(new Event('load'));
+    expect(recorder.start.mock.calls[0][1]).toBe('replay');
+    sdk.destroy();
+  });
+
+  test.each<[string, Record<string, unknown> | undefined, Record<string, unknown>]>([
+    ['init heatmaps:false beats the dashboard', HEAT_ONLY, { heatmaps: false }],
+    ['init cannot enable heatmaps', undefined, { heatmaps: { enabled: true, sampleRate: 1 } }],
+    ['heatmaps disabled', { heatmaps: { enabled: false, sampleRate: 1 } }, {}],
+    ['heatmaps + strict privacy', HEAT_ONLY, { privacyMode: 'strict' }],
   ])('%s → no module', async (_label, remote, config) => {
     const sdk = await boot(remote, config);
     expect(replayScripts()).toHaveLength(0);

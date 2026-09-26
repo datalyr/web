@@ -13,13 +13,22 @@
  *
  * Sampling hashes the session id, so every page load of a session agrees without
  * persisting a roll anywhere.
+ *
+ * Heat mode (1.9.0, heatmaps add-on): when replay is not allowed for this page load but
+ * the dashboard's `heatmaps: { enabled, sampleRate }` is (same gates, own sample rate on
+ * the same session-id hash), the SAME module is loaded and started with mode 'heat': no
+ * rrweb recording, only click/scroll records (see src/replay/heat.ts). Replay wins when
+ * both are allowed: heatmap rows are derived server-side from the recording.
  */
-import type { ReplayRemoteConfig } from './types';
+import type { HeatmapsRemoteConfig, ReplayRemoteConfig } from './types';
 
 export const REPLAY_MODULE_BASE = 'https://track.datalyr.com';
 export const REPLAY_ENDPOINT = 'https://replay.datalyr.com/replay';
 export const REPLAY_GLOBAL = 'DatalyrReplay';
 export const REPLAY_PARK_KEY = 'dl_replay_park'; // sessionStorage; written by the recorder
+
+/** 'replay' = full rrweb recording; 'heat' = heatmaps-only light capture. */
+export type ReplayMode = 'replay' | 'heat';
 
 export type ReplayEventKind = 'track' | 'url' | 'vis' | 'ph' | 'err' | 'attr';
 
@@ -86,7 +95,10 @@ export interface ReplayContext {
 
 /** The surface dl.replay.<v>.js registers on window.DatalyrReplay. */
 export interface ReplayRecorder {
-  start(ctx: ReplayContext): void;
+  /** mode defaults to 'replay' (a 1.8.x module takes one argument). */
+  start(ctx: ReplayContext, mode?: ReplayMode): void;
+  /** Modes this module supports; a module without it (1.8.x) only records replay. */
+  modes?: ReadonlyArray<ReplayMode>;
   /** discard=true drops the unsent buffer and anything parked for the next page. */
   stop(discard: boolean): void;
   event(kind: ReplayEventKind, payload: Record<string, unknown>): void;
@@ -104,6 +116,8 @@ export interface ReplayGateInputs {
   doNotTrack: boolean;                            // honored for replay whatever respectDoNotTrack says
   globalPrivacyControl: boolean;                  // honored for replay whatever respectGlobalPrivacyControl says
   sessionId: string;
+  heatmaps?: HeatmapsRemoteConfig | null;         // the dashboard value, never the init() value
+  heatmapsDisabledAtInit?: boolean;               // init({ heatmaps: false })
 }
 
 /** 32-bit FNV-1a. Stable across loads and browsers; not a security boundary. */
@@ -125,12 +139,30 @@ export function replaySampleHit(sessionId: string, sampleRate: unknown): boolean
   return replayHash(sessionId) % 10000 < Math.round(rate * 10000);
 }
 
+function privacyGatesOpen(g: ReplayGateInputs): boolean {
+  return g.tracking && g.marketing && !g.strict && !g.doNotTrack && !g.globalPrivacyControl;
+}
+
 export function replayAllowed(g: ReplayGateInputs): boolean {
   return !!g.remote && g.remote.enabled === true
     && !g.disabledAtInit
-    && g.tracking && g.marketing && !g.strict
-    && !g.doNotTrack && !g.globalPrivacyControl
+    && privacyGatesOpen(g)
     && replaySampleHit(g.sessionId, g.remote.sampleRate);
+}
+
+/** Heat mode: the same gates as replay, the heatmaps key and its own sample rate. */
+export function heatmapsAllowed(g: ReplayGateInputs): boolean {
+  return !!g.heatmaps && g.heatmaps.enabled === true
+    && !g.heatmapsDisabledAtInit
+    && privacyGatesOpen(g)
+    && replaySampleHit(g.sessionId, g.heatmaps.sampleRate);
+}
+
+/** What this page load captures: replay wins over heat; null = nothing. */
+export function replayMode(g: ReplayGateInputs): ReplayMode | null {
+  if (replayAllowed(g)) return 'replay';
+  if (heatmapsAllowed(g)) return 'heat';
+  return null;
 }
 
 /** Versioned, immutable module URL. An odd `v` falls back to the SDK's own version. */
@@ -163,12 +195,19 @@ export class ReplayLoader {
   private recorder: ReplayRecorder | null = null;
   private injected = false;
   private wanted = false;
+  private mode: ReplayMode | null = null;
+  private running: ReplayMode | null = null; // mode the recorder was started in
 
   constructor(private readonly context: ReplayContext) {}
 
-  /** Start (loading the module once) when allowed; stop and discard when not. */
-  sync(allowed: boolean, moduleVersion: unknown): void {
-    if (!allowed) {
+  /**
+   * Start (loading the module once) in `mode`; stop and discard when null. A mode change
+   * on the same page (dashboard flip) discards the current capture and restarts.
+   */
+  sync(mode: ReplayMode | null, moduleVersion: unknown): void {
+    if (mode && this.running && mode !== this.running) this.stop(true);
+    this.mode = mode;
+    if (!mode) {
       this.wanted = false;
       this.stop(true);
       try { sessionStorage.removeItem(REPLAY_PARK_KEY); } catch { /* blocked storage */ }
@@ -213,11 +252,20 @@ export class ReplayLoader {
 
   stop(discard: boolean): void {
     if (!this.recorder) return;
+    this.running = null;
     try { this.recorder.stop(discard); } catch { /* best-effort */ }
   }
 
   private start(): void {
-    try { this.recorder?.start(this.context); } catch { /* best-effort */ }
+    const recorder = this.recorder;
+    const mode = this.mode;
+    if (!recorder || !mode) return;
+    // A 1.8.x module (pinned replay.v) would treat any start() as a full recording.
+    if (mode !== 'replay' && !(Array.isArray(recorder.modes) && recorder.modes.includes(mode))) return;
+    try {
+      recorder.start(this.context, mode);
+      this.running = mode;
+    } catch { /* best-effort */ }
   }
 
   private registered(): ReplayRecorder | null {

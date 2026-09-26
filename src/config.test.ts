@@ -98,3 +98,17 @@ describe('applyRemoteConfig — merge precedence', () => {
     expect(config.respectDoNotTrack).toBe(true);
   });
 });
+
+describe('applyRemoteConfig — heatmaps', () => {
+  it('folds the dashboard heatmaps object in', () => {
+    const config = makeConfig();
+    applyRemoteConfig(config, { heatmaps: { enabled: true, sampleRate: 0.5 } }, new Set());
+    expect(config.heatmaps).toEqual({ enabled: true, sampleRate: 0.5 });
+  });
+
+  it('an explicit init() heatmaps:false is kept over the dashboard value', () => {
+    const config = makeConfig({ heatmaps: false });
+    applyRemoteConfig(config, { heatmaps: { enabled: true, sampleRate: 1 } }, new Set(['heatmaps']));
+    expect(config.heatmaps).toBe(false);
+  });
+});
