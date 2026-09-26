@@ -15,6 +15,12 @@
  * with one keepalive attempt when it gzips to 16 KB or less; the next page of the same
  * session (same tab) sends whatever is still parked. src/queue.ts is untouched: the
  * event queue's unload beacons keep the whole keepalive quota except those 16 KB.
+ *
+ * URLs: the page URL in rrweb Meta events and in our `url` Custom event is cut to
+ * origin + pathname (no query, no fragment: emails, reset/magic-link tokens, checkout
+ * keys). NOT rewritten in v1: URLs inside DOM attributes (a[href], img[src], srcset,
+ * form[action], inline style url()) are recorded as rrweb serialises them, query
+ * included. Listed for the legal review; the distiller/worker must not surface them.
  */
 import { record } from '@rrweb/record';
 import type { eventWithTime } from '@rrweb/types';
@@ -43,12 +49,24 @@ const RESIZE_THROTTLE_MS = 1000;
 const EVENT_FULL_SNAPSHOT = 2;
 const EVENT_INCREMENTAL = 3;
 const EVENT_META = 4;
+const EVENT_CUSTOM = 5;
 const SRC_MUTATION = 0;
 const SRC_MOUSE_MOVE = 1;
 const SRC_MOUSE_INTERACTION = 2;
 const SRC_INPUT = 5;
 const SRC_TOUCH_MOVE = 6;
 const USER_SOURCES = new Set([SRC_MOUSE_MOVE, SRC_MOUSE_INTERACTION, SRC_INPUT, SRC_TOUCH_MOVE]);
+
+/** origin + pathname only; '' when unparseable (never the raw string). */
+export function stripUrl(href: unknown): string {
+  if (typeof href !== 'string' || !href) return '';
+  try {
+    const u = new URL(href, typeof location !== 'undefined' ? location.href : undefined);
+    return u.origin + u.pathname;
+  } catch {
+    return '';
+  }
+}
 
 interface ParkedChunk { s: string; p: string; q: number; body: string }
 
@@ -264,6 +282,15 @@ export class Recorder implements ReplayRecorder {
       this.capped = true;
       this.stop(false);
       return;
+    }
+    if (event.type === EVENT_META) {
+      const data = event.data as { href?: unknown };
+      if (data && 'href' in data) data.href = stripUrl(data.href);
+    } else if (event.type === EVENT_CUSTOM) {
+      const data = event.data as { tag?: unknown; payload?: { k?: unknown; href?: unknown } };
+      if (data && data.tag === 'dl' && data.payload && data.payload.k === 'url' && 'href' in data.payload) {
+        data.payload.href = stripUrl(data.payload.href);
+      }
     }
     if (event.type === EVENT_INCREMENTAL) {
       const source = (event.data as { source?: number }).source ?? -1;
