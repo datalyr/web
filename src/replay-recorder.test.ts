@@ -82,7 +82,7 @@ describe('replay recorder', () => {
       maskAllInputs: false,
       maskInputOptions: { input: true, textarea: true, select: true, password: true },
       maskTextSelector: '*',
-      maskTextFn: maskText,
+      maskTextFn: expect.any(Function),
       blockSelector: '[data-dl-block]',
       slimDOMOptions: 'all',
       inlineStylesheet: true,
@@ -95,6 +95,54 @@ describe('replay recorder', () => {
     expect(mockRrweb.opts.sampling).toEqual(expect.objectContaining({ scroll: 150, input: 'last' }));
     // No console plugin.
     expect(mockRrweb.opts.plugins).toBeUndefined();
+  });
+
+  test('privacy textMode: all masks interactive text too (data-dl-unmask kept); marked masks only [data-dl-mask]', () => {
+    document.body.innerHTML = `<p id="p">Jane Doe</p><button id="b">Add to bag</button>
+      <div data-dl-unmask><h2 id="u">Free shipping</h2></div><div data-dl-mask><span id="m">Hi Jane</span></div>`;
+    const el = (id: string) => document.getElementById(id) as HTMLElement;
+    recorder.start(ctx, 'replay', { textMode: 'all', attributes: false, urlQuery: false });
+    let fn = mockRrweb.opts.maskTextFn;
+    expect(fn('Add to bag', el('b'))).toBe('*** ** ***');
+    expect(fn('Jane Doe', el('p'))).toBe('**** ***');
+    expect(fn('Free shipping', el('u'))).toBe('Free shipping');
+    recorder.stop(true);
+    recorder = new Recorder();
+    recorder.start(ctx, 'replay', { textMode: 'marked', attributes: false, urlQuery: false });
+    fn = mockRrweb.opts.maskTextFn;
+    expect(fn('Jane Doe', el('p'))).toBe('Jane Doe');
+    expect(fn('Hi Jane', el('m'))).toBe('** ****');
+    // Inputs stay masked in every mode.
+    expect(mockRrweb.opts.maskInputOptions).toEqual({ input: true, textarea: true, select: true, password: true });
+    recorder.stop(true);
+    recorder = new Recorder();
+    recorder.start(ctx, 'replay', { textMode: 'bogus' } as any);
+    fn = mockRrweb.opts.maskTextFn;
+    expect(fn('Add to bag', el('b'))).toBe('Add to bag');
+    expect(fn('Jane Doe', el('p'))).toBe('**** ***');
+  });
+
+  test('privacy scrub in onEmit: attribute mutations; Meta href stripped even with urlQuery true', async () => {
+    recorder.start(ctx, 'replay', { textMode: 'interactive', attributes: false, urlQuery: false });
+    mockRrweb.emit!(inc(0, { adds: [], removes: [], texts: [], attributes: [
+      { id: 7, attributes: { href: '/a?t=1#x', title: 'secret', 'data-x': 'y', class: 'keep', style: { color: 'red' }, alt: null } },
+    ] }));
+    recorder.flush();
+    await flushPromises();
+    const env = decode(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]);
+    const mut = env.e.find((e: any) => e.type === 3 && e.data.source === 0);
+    expect(mut.data.attributes[0].attributes).toEqual({ href: '/a', title: '', 'data-x': '', class: 'keep', style: { color: 'red' }, alt: null });
+    recorder.stop(true);
+    fetchMock.mockClear();
+    recorder = new Recorder();
+    recorder.start(ctx, 'replay', { textMode: 'interactive', attributes: true, urlQuery: true });
+    mockRrweb.emit!({ type: 4, data: { href: 'https://shop.test/p?email=a@b.c', width: 1, height: 1 }, timestamp: Date.now() });
+    mockRrweb.emit!(inc(0, { adds: [], removes: [], texts: [], attributes: [{ id: 7, attributes: { href: '/a?t=1', title: 'kept' } }] }));
+    recorder.flush();
+    await flushPromises();
+    const env2 = decode(fetchMock.mock.calls[fetchMock.mock.calls.length - 1]);
+    expect(env2.e.find((e: any) => e.type === 4).data.href).toBe('https://shop.test/p');
+    expect(env2.e.find((e: any) => e.type === 3).data.attributes[0].attributes).toEqual({ href: '/a?t=1', title: 'kept' });
   });
 
   test('text masking: everything masked except interactive text; data-dl-mask wins inside it', () => {

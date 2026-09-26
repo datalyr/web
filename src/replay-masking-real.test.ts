@@ -48,3 +48,58 @@ describe('replay input masking (real rrweb)', () => {
     expect(json).toContain('*'.repeat('jane@secret.test'.length));
   });
 });
+
+describe('replay privacy defaults (real rrweb, through the recorder)', () => {
+  const ctx = {
+    workspaceId: 'ws', sdkVersion: '1.9.1', endpoint: 'https://replay.test/replay',
+    getSessionId: () => 's', getVisitorId: () => 'v',
+  };
+  const html = `
+    <img id="img" alt="Jane Doe portrait" src="https://cdn.test/p.jpg?sig=img-secret" srcset="https://cdn.test/p.jpg?w=1&t=srcset-secret 1x, https://cdn.test/p2.jpg?t=srcset2-secret 2x">
+    <input id="in" placeholder="jane@placeholder.test" title="title-secret" aria-label="aria-secret" data-user="data-secret">
+    <a id="a" href="https://shop.test/account?token=href-secret#frag-secret">Account</a>
+    <form action="/reset?key=action-secret"></form>`;
+
+  async function run(privacy?: any): Promise<string> {
+    document.body.innerHTML = html;
+    (global as any).fetch = jest.fn().mockResolvedValue({ ok: true, status: 204 });
+    const rec = new Recorder();
+    const pushed: any[] = [];
+    const push = (rec as any).push.bind(rec);
+    (rec as any).push = (e: any) => { pushed.push(e); push(e); };
+    rec.start(ctx, 'replay', privacy);
+    // Mutations: a node added later, and attribute changes on existing ones.
+    const late = document.createElement('img');
+    late.setAttribute('alt', 'late-alt-secret');
+    late.setAttribute('src', '/x.png?late=src-secret');
+    document.body.appendChild(late);
+    document.getElementById('a')!.setAttribute('href', '/next?token=mut-href-secret');
+    document.getElementById('in')!.setAttribute('placeholder', 'mut-placeholder-secret');
+    await new Promise(r => setTimeout(r, 30));
+    const json = JSON.stringify(pushed);
+    rec.stop(true);
+    expect(pushed.some(e => e.type === 2)).toBe(true);
+    expect(pushed.some(e => e.type === 3 && e.data.source === 0)).toBe(true);
+    return json;
+  }
+
+  test('default: alt/placeholder/title/aria-label/data-* blanked; query + fragment cut from href/src/srcset/action', async () => {
+    const json = await run(undefined);
+    for (const secret of ['Jane Doe portrait', 'jane@placeholder', 'title-secret', 'aria-secret', 'data-secret',
+      'img-secret', 'srcset-secret', 'srcset2-secret', 'href-secret', 'frag-secret', 'action-secret',
+      'late-alt-secret', 'src-secret', 'mut-href-secret', 'mut-placeholder-secret']) {
+      expect(json).not.toContain(secret);
+    }
+    expect(json).toContain('"alt":""');
+    expect(json).toContain('https://shop.test/account"');
+    expect(json).toContain('https://cdn.test/p.jpg 1x, https://cdn.test/p2.jpg 2x');
+  });
+
+  test('attributes: true, urlQuery: true → attributes kept as rrweb serialised them', async () => {
+    const json = await run({ textMode: 'interactive', attributes: true, urlQuery: true });
+    for (const kept of ['Jane Doe portrait', 'jane@placeholder', 'title-secret', 'aria-secret', 'data-secret',
+      'img-secret', 'href-secret', 'action-secret', 'late-alt-secret', 'mut-href-secret']) {
+      expect(json).toContain(kept);
+    }
+  });
+});

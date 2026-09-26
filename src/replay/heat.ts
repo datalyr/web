@@ -45,6 +45,8 @@ export interface HeatMasking {
   forceMaskSelector: string;
   maskText(text: string, element: HTMLElement | null): string;
   inputMask: Record<string, boolean>;
+  /** privacy.attributes / urlQuery scrub of the snapshot (1.9.1); absent = keep as is. */
+  scrub?: (node: unknown) => void;
 }
 
 /** Origin-less pathname of the current page; '/' when unknown. */
@@ -230,6 +232,9 @@ export class HeatCapture {
       node = null;
     }
     if (!node) return false;
+    if (this.masking.scrub) {
+      try { this.masking.scrub(node); } catch { return false; }
+    }
     const item: HeatSnap = { t: 'snap', ts: Date.now(), path: this.path || heatPath(), vw: window.innerWidth || 0, snapshot: node };
     let size = 0;
     try { size = JSON.stringify(item).length; } catch { return false; }

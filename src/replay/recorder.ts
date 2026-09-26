@@ -2,12 +2,15 @@
  * Session replay recorder: dl.replay.<v>.js (separate Rollup entry, never imported by
  * src/index.ts). Loaded on demand by replay-loader.ts, registers `window.DatalyrReplay`.
  *
- * Capture: rrweb record() with inputs masked and ALL text masked except interactive
- * text (buttons, links, labels, summaries, [role=button], [data-dl-unmask]). rrweb has
- * no "mask all text" switch, so maskTextSelector '*' marks every text node for masking
- * and maskTextFn decides: text inside an exempt element is kept (unless it is inside
- * [data-dl-mask]), everything else becomes '*' per non-space character, which is what
- * rrweb itself would write.
+ * Capture: rrweb record() with inputs ALWAYS masked. Text follows the merchant's
+ * privacy.textMode (1.9.1, see ./privacy.ts): 'interactive' (default) masks all text
+ * except buttons, links, labels, summaries, [role=button], [data-dl-unmask]; 'all' keeps
+ * only [data-dl-unmask]; 'marked' masks only [data-dl-mask]. rrweb has no "mask all text"
+ * switch, so maskTextSelector '*' marks every text node and maskTextFn decides; masked
+ * text becomes '*' per non-space character, which is what rrweb itself would write.
+ * privacy.attributes false (default) blanks alt/title/placeholder/aria-label/data-*
+ * values; privacy.urlQuery false (default) cuts query + fragment from href/src/srcset/
+ * action/formaction/poster (not <link>). Both are post-processed in onEmit.
  *
  * Transport: a chunk every 10 s or 256 KB of raw JSON, gzipped whole and POSTed as
  * text/plain to replay.datalyr.com/replay?enc=gzip (a CORS-simple request). When the
@@ -18,9 +21,8 @@
  *
  * URLs: the page URL in rrweb Meta events and in our `url` Custom event is cut to
  * origin + pathname (no query, no fragment: emails, reset/magic-link tokens, checkout
- * keys). NOT rewritten in v1: URLs inside DOM attributes (a[href], img[src], srcset,
- * form[action], inline style url()) are recorded as rrweb serialises them, query
- * included. Listed for the legal review; the distiller/worker must not surface them.
+ * keys), whatever privacy.urlQuery says. DOM attribute URLs follow privacy.urlQuery
+ * (above). NOT rewritten: inline style url() and <link> hrefs.
  *
  * Heat mode (1.9.0, start(ctx, 'heat')): no record(); src/replay/heat.ts captures
  * clicks, scroll depth and one masked snapshot. Same transport, envelope plus m:'heat',
@@ -29,8 +31,9 @@
 import { record } from '@rrweb/record';
 import type { eventWithTime } from '@rrweb/types';
 import { gzipSync, strToU8 } from 'fflate';
-import { REPLAY_PARK_KEY, replayAttribution } from '../replay-loader';
-import type { ReplayContext, ReplayEventKind, ReplayMode, ReplayRecorder } from '../replay-loader';
+import { REPLAY_PARK_KEY, replayAttribution, resolveReplayPrivacy } from '../replay-loader';
+import type { ReplayContext, ReplayEventKind, ReplayMode, ReplayPrivacy, ReplayRecorder } from '../replay-loader';
+import { TEXT_FORCE_MASK_SELECTOR, TEXT_UNMASK_SELECTOR, maskTextFor, scrubEvent, scrubNode, needsScrub } from './privacy';
 import { HeatCapture, type HeatItem } from './heat';
 import { generateUUID } from '../utils';
 
@@ -42,8 +45,7 @@ export const MAX_PAGE_MS = 60 * 60 * 1000;
 export const PARK_KEY = REPLAY_PARK_KEY;
 export const PARK_MAX_BYTES = 1_000_000;
 export const ERROR_MAX_CHARS = 300;
-export const TEXT_UNMASK_SELECTOR = 'button, a, label, [role=button], summary, [data-dl-unmask]';
-const TEXT_FORCE_MASK_SELECTOR = '[data-dl-mask]';
+export { TEXT_UNMASK_SELECTOR };
 // Every input/textarea/select value masked whatever its type (see record() options).
 const INPUT_MASK: Record<string, boolean> = { input: true, textarea: true, select: true, password: true };
 const MUTATION_BUCKET = 100;
@@ -77,17 +79,8 @@ export function stripUrl(href: unknown): string {
 
 interface ParkedChunk { s: string; p: string; q: number; body: string; m?: 'heat' }
 
-/** Keep interactive text readable; mask everything else (see file header). */
-export function maskText(text: string, element: HTMLElement | null): string {
-  try {
-    if (element && element.closest && element.closest(TEXT_UNMASK_SELECTOR) && !element.closest(TEXT_FORCE_MASK_SELECTOR)) {
-      return text;
-    }
-  } catch {
-    // fall through to masking
-  }
-  return text.replace(/[\S]/g, '*');
-}
+/** textMode 'interactive' (the default): keep interactive text, mask the rest. */
+export const maskText = maskTextFor('interactive');
 
 function isIOS(): boolean {
   try {
@@ -146,6 +139,7 @@ export class Recorder implements ReplayRecorder {
   readonly replay_version = '__SDK_VERSION__';
   readonly modes: ReadonlyArray<ReplayMode> = ['replay', 'heat'];
   private mode: ReplayMode = 'replay';
+  private privacy: ReplayPrivacy = resolveReplayPrivacy(undefined);
   private heat: HeatCapture | null = null;
   private ctx: ReplayContext | null = null;
   private stopRecord: (() => void) | undefined;
@@ -174,10 +168,11 @@ export class Recorder implements ReplayRecorder {
     return this.recording;
   }
 
-  start(ctx: ReplayContext, mode: ReplayMode = 'replay'): void {
+  start(ctx: ReplayContext, mode: ReplayMode = 'replay', privacy?: ReplayPrivacy): void {
     this.ctx = ctx;
     if (this.recording || this.capped) return;
     this.mode = mode === 'heat' ? 'heat' : 'replay';
+    this.privacy = resolveReplayPrivacy(privacy); // re-validated: the loader may be older/newer
     this.sid = ctx.getSessionId();
     this.pageLoadId = generateUUID();
     this.seq = 0;
@@ -203,7 +198,7 @@ export class Recorder implements ReplayRecorder {
         maskAllInputs: false,
         maskInputOptions: { ...INPUT_MASK },
         maskTextSelector: '*',
-        maskTextFn: maskText,
+        maskTextFn: maskTextFor(this.privacy.textMode),
         blockSelector: '[data-dl-block]',
         slimDOMOptions: 'all',
         inlineStylesheet: true,
@@ -313,7 +308,9 @@ export class Recorder implements ReplayRecorder {
       this.stop(false);
       return;
     }
+    scrubEvent(event, this.privacy); // attributes / urlQuery (rrweb has no option for them)
     if (event.type === EVENT_META) {
+      // Page URL: origin + pathname whatever urlQuery says.
       const data = event.data as { href?: unknown };
       if (data && 'href' in data) data.href = stripUrl(data.href);
     } else if (event.type === EVENT_CUSTOM) {
@@ -461,7 +458,13 @@ export class Recorder implements ReplayRecorder {
   private startHeat(): void {
     const heat = new HeatCapture(
       item => this.pushHeat(item),
-      { unmaskSelector: TEXT_UNMASK_SELECTOR, forceMaskSelector: TEXT_FORCE_MASK_SELECTOR, maskText, inputMask: { ...INPUT_MASK } },
+      {
+        unmaskSelector: TEXT_UNMASK_SELECTOR, // the clicked control whose text may be kept
+        forceMaskSelector: TEXT_FORCE_MASK_SELECTOR,
+        maskText: maskTextFor(this.privacy.textMode),
+        inputMask: { ...INPUT_MASK },
+        scrub: needsScrub(this.privacy) ? (node: unknown) => scrubNode(node, this.privacy) : undefined,
+      },
       IDLE_PAUSE_MS,
     );
     this.heat = heat;
