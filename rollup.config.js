@@ -95,6 +95,35 @@ export default [
     ]
   },
   
+  // Session replay recorder (dl.replay.<version>.js on the CDN). A separate entry that
+  // src/index.ts never imports: replay-loader.ts injects it on demand, so rrweb and
+  // fflate stay out of dl.js (scripts/check-bundle.js enforces that).
+  {
+    input: 'src/replay/recorder.ts',
+    output: [
+      {
+        file: 'dist/datalyr.replay.min.js',
+        format: 'iife',
+        banner,
+        plugins: [terser()],
+        sourcemap: true
+      }
+    ],
+    plugins: [
+      injectSdkVersion(),
+      resolve({
+        browser: true,
+        preferBuiltins: false
+      }),
+      commonjs(),
+      typescript({
+        tsconfig: './tsconfig.json',
+        declaration: false,
+        declarationMap: false
+      })
+    ]
+  },
+
   // CommonJS build
   {
     input: 'src/index.ts',
