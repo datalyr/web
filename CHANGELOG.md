@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.1
+
+- Merchant-chosen privacy for session replay and heatmaps, delivered by the dashboard as `replay.privacy` / `heatmaps.privacy` (one object for both): `{ textMode: 'all' | 'interactive' | 'marked', attributes: boolean, urlQuery: boolean }`. Anything missing or invalid falls back to the safe default (`interactive`, `false`, `false`). Form input values are always masked whatever these say.
+- `textMode`: `interactive` (default) is the 1.8/1.9.0 behaviour (all text masked except buttons, links, labels, summaries, `[role=button]`, `[data-dl-unmask]`); `all` masks every text node including buttons and links, keeping only `[data-dl-unmask]` (the merchant placed it deliberately); `marked` masks only text inside `[data-dl-mask]`. Heat-mode click text and the heat snapshot follow the same mode.
+- **Behaviour change (defaults):** `attributes: false` now blanks the values of `alt`, `title`, `placeholder`, `aria-label` and every `data-*` attribute, and `urlQuery: false` now cuts the query string and fragment from `href`, `src`, `srcset`, `action`, `formaction`, `poster` and `xlink:href` (not `<link>` hrefs, which the replay needs to load fonts/stylesheets; `data:`/`blob:` URLs untouched). Both apply to the initial snapshot, added nodes and attribute changes, and to the heat snapshot. rrweb 2.1.6 has no attribute-masking option, so this is done on each event before it is buffered. Set `attributes: true` / `urlQuery: true` to record them as before. Page URLs (rrweb page metadata, SPA URL marker) stay cut to origin + path regardless.
+- The replay module grows ~0.5 KB gzip (~37.7 → ~38.3 KB); dl.js +~0.2 KB gzip (privacy validation in the loader).
+
 ## 1.9.0
 
 - Heatmaps add-on ("heat mode"). Off unless the Datalyr dashboard delivers `heatmaps: { enabled: true, sampleRate }`; `heatmaps: false` in `init()` keeps it off, nothing in `init()` turns it on. Per page load the SDK picks one mode: session replay when replay is allowed (unchanged; heatmap data is derived from the recording), otherwise heat mode when heatmaps are allowed (the same consent / opt-out / strict privacy / Do Not Track / GPC gates, its own sample rate on the session id), otherwise nothing. Both modes load the same module, `dl.replay.<version>.js`.
