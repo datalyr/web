@@ -15,8 +15,14 @@
  *      from current source, not a stale concatenation,
  * and unless the bundle's `sdk_version` matches package.json "version" (FSR-103 drift).
  *
+ * Session replay (1.8.0): no bundle checked here may contain rrweb (the recorder is
+ * the separate dl.replay.<v>.js, loaded on demand), and with --dist the freshly built
+ * dist/datalyr.min.js + dist/datalyr.replay.min.js are checked too, with the replay
+ * bundle's size reported.
+ *
  * Usage:
  *   node scripts/check-bundle.js [bundle ...]
+ *   node scripts/check-bundle.js --dist     (this package's dist/ after `npm run build`)
  * With no args it checks the three public bundles relative to this package.
  */
 
@@ -49,8 +55,21 @@ const DEFAULT_TARGETS = [
   path.resolve(__dirname, '..', '..', '..', 'datalyr-v2', 'infra', 'tracking', 'dl.min.js'),
 ];
 
-const targets = process.argv.slice(2);
-const files = targets.length > 0 ? targets : DEFAULT_TARGETS;
+// rrweb fingerprints: rrweb's own serialized attribute names and its public API names.
+// None of them may appear in dl.js; the replay bundle must contain them.
+const RRWEB_MARKERS = ['rr_dataURL', 'rr_mediaState', 'takeFullSnapshot', 'addCustomEvent'];
+const MAX_REPLAY_GZIP_BYTES = 40 * 1024; // measured 1.8.0: ~28 KB gz; alarm well before it doubles
+
+const args = process.argv.slice(2);
+const distMode = args.includes('--dist');
+const targets = args.filter(a => a !== '--dist');
+const distDir = path.resolve(__dirname, '..', 'dist');
+const files = distMode
+  ? [path.join(distDir, 'datalyr.min.js'), ...targets]
+  : (targets.length > 0 ? targets : DEFAULT_TARGETS);
+// dist/datalyr.min.js is the raw rollup output: the script-tag bootstrap is only
+// concatenated in by datalyr-v2's tracking build, so it is not required there.
+const bootstrapOptional = new Set(distMode ? [path.join(distDir, 'datalyr.min.js')] : []);
 
 let failures = 0;
 
@@ -65,6 +84,7 @@ for (const file of files) {
   const problems = [];
 
   for (const marker of REQUIRED_MARKERS) {
+    if (marker === 'data-workspace-id' && bootstrapOptional.has(file)) continue;
     if (!content.includes(marker)) {
       problems.push(`missing required marker "${marker}"`);
     }
@@ -79,11 +99,46 @@ for (const file of files) {
     problems.push(`sdk_version "${versionMatch[1]}" !== package.json "${expectedVersion}"`);
   }
 
+  const rrweb = RRWEB_MARKERS.filter(m => content.includes(m));
+  if (rrweb.length > 0) {
+    problems.push(`contains rrweb code (${rrweb.join(', ')}) — the recorder must stay in dl.replay.<v>.js`);
+  }
+
   if (problems.length > 0) {
     console.error(`✗ ${path.basename(file)} — ${problems.join('; ')}`);
     failures++;
   } else {
-    console.log(`✓ ${path.basename(file)} — bootstrap present, sdk_version ${expectedVersion}`);
+    console.log(`✓ ${path.basename(file)} — ${bootstrapOptional.has(file) ? 'markers present' : 'bootstrap present'}, sdk_version ${expectedVersion}, no rrweb`);
+  }
+}
+
+if (distMode) {
+  const replayFile = path.join(distDir, 'datalyr.replay.min.js');
+  if (!fs.existsSync(replayFile)) {
+    console.error(`✗ ${replayFile} — NOT FOUND`);
+    failures++;
+  } else {
+    const content = fs.readFileSync(replayFile, 'utf8');
+    const problems = [];
+    const versionMatch = content.match(/replay_version\s*[:=]\s*["']([^"']+)["']/);
+    if (!versionMatch) problems.push('no replay_version literal found');
+    else if (versionMatch[1] !== expectedVersion) problems.push(`replay_version "${versionMatch[1]}" !== package.json "${expectedVersion}"`);
+    const missing = RRWEB_MARKERS.filter(m => !content.includes(m));
+    if (missing.length > 0) problems.push(`rrweb markers missing (${missing.join(', ')})`);
+    const raw = Buffer.byteLength(content);
+    const gz = require('zlib').gzipSync(content, { level: 9 }).length;
+    if (gz > MAX_REPLAY_GZIP_BYTES) problems.push(`gzip ${gz} B > ${MAX_REPLAY_GZIP_BYTES} B budget`);
+    if (problems.length > 0) {
+      console.error(`✗ ${path.basename(replayFile)} — ${problems.join('; ')}`);
+      failures++;
+    } else {
+      console.log(`✓ ${path.basename(replayFile)} — replay_version ${expectedVersion}, ${raw} B min / ${gz} B gzip`);
+    }
+    const dl = path.join(distDir, 'datalyr.min.js');
+    if (fs.existsSync(dl)) {
+      const dlContent = fs.readFileSync(dl);
+      console.log(`  datalyr.min.js — ${dlContent.length} B min / ${require('zlib').gzipSync(dlContent, { level: 9 }).length} B gzip`);
+    }
   }
 }
 
@@ -93,4 +148,4 @@ if (failures > 0) {
   process.exit(1);
 }
 
-console.log(`\nBundle guard passed for ${files.length} file(s).`);
+console.log(`\nBundle guard passed for ${files.length + (distMode ? 1 : 0)} file(s).`);
