@@ -111,6 +111,9 @@ export interface DatalyrConfig {
   //   the dashboard says. Nothing passed here can turn it on; the object form is what the
   //   dashboard delivers and is ignored when passed to init().
   replay?: false | ReplayRemoteConfig;
+  // - heatmaps: the heatmaps add-on (click/scroll capture without a recording), also
+  //   dashboard-only and billed. `heatmaps: false` keeps it off; nothing here turns it on.
+  heatmaps?: false | HeatmapsRemoteConfig;
 
   // Fallback endpoints for resilience
   fallbackEndpoints?: string[];         // Additional endpoints to try
@@ -124,6 +127,12 @@ export interface ReplayRemoteConfig {
   enabled?: boolean;
   sampleRate?: number; // 0.01–1, share of sessions recorded
   v?: string;          // replay module version (dl.replay.<v>.js); falls back to the SDK version
+}
+
+/** Dashboard heatmaps settings as delivered by /container-scripts `config.heatmaps`. */
+export interface HeatmapsRemoteConfig {
+  enabled?: boolean;
+  sampleRate?: number; // share of sessions captured in heat mode (when replay is not recording them)
 }
 
 export interface EventProperties {
