@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.9.3
+
+- Session replay: a full page snapshot is taken about a second after every client-side route change (`history.pushState` / `replaceState` / `popstate`, the same signal as the `url` marker), coalescing rapid changes. Heatmap backdrops are one per path and were only ever taken at record start, so single-page apps had no backdrop for any route but the landing one. Recordings grow by one snapshot per route visited (typically 20–50 KB gzip each).
+- Heatmaps: heat mode now samples on its own hash of the session id (salted), so the Heatmaps sample is independent of the Replay sample. Before, both used the same hash and a Heatmaps rate at or below the Replay rate never produced a heat-mode session. **Behaviour change:** which sessions fall in the heat sample changes at upgrade; replay sampling is unchanged.
+- No size change worth noting in either bundle.
+
 ## 1.9.2
 
 - Heatmaps click fidelity. Heat click items gain `pos`, `bx`, `by`, `bw`, `bh`, `ox`, `oy`: `{ t: 'click', ts, path, x_pct, y_pct, y_px, vw, vh, ph, text, sel, kind, pos, bx, by, bw, bh, ox, oy }`. `pos` is `fixed` when the target or an ancestor is `position: fixed`, or `sticky` and currently at its sticky offset; otherwise `page`. For `fixed` clicks `y_pct` is `clientY / innerHeight` (was page-relative). `bx/by/bw/bh` is the target's box in page px (viewport px for `fixed`), rounded; `ox/oy` is the click's offset inside that box (0..1, 4 decimals).

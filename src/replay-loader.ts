@@ -156,13 +156,19 @@ export function replayHash(value: string): number {
   return h >>> 0;
 }
 
-/** True when this session falls inside the sample. Missing rate = every session. */
-export function replaySampleHit(sessionId: string, sampleRate: unknown): boolean {
+/** Heat mode samples on its own hash (1.9.3), so its share is not a subset of replay's. */
+export const HEAT_SAMPLE_SALT = 'heat:';
+
+/**
+ * True when this session falls inside the sample. Missing rate = every session.
+ * `salt` picks an independent draw for the same session (heat vs replay).
+ */
+export function replaySampleHit(sessionId: string, sampleRate: unknown, salt = ''): boolean {
   if (!sessionId) return false;
   const rate = sampleRate === undefined || sampleRate === null
     ? 1
     : (typeof sampleRate === 'number' && Number.isFinite(sampleRate) ? Math.min(1, Math.max(0, sampleRate)) : 0);
-  return replayHash(sessionId) % 10000 < Math.round(rate * 10000);
+  return replayHash(salt + sessionId) % 10000 < Math.round(rate * 10000);
 }
 
 function privacyGatesOpen(g: ReplayGateInputs): boolean {
@@ -181,7 +187,7 @@ export function heatmapsAllowed(g: ReplayGateInputs): boolean {
   return !!g.heatmaps && g.heatmaps.enabled === true
     && !g.heatmapsDisabledAtInit
     && privacyGatesOpen(g)
-    && replaySampleHit(g.sessionId, g.heatmaps.sampleRate);
+    && replaySampleHit(g.sessionId, g.heatmaps.sampleRate, HEAT_SAMPLE_SALT);
 }
 
 /** What this page load captures: replay wins over heat; null = nothing. */

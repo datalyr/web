@@ -14,6 +14,7 @@ import {
   replayHash,
   replayModuleUrl,
   replaySampleHit,
+  HEAT_SAMPLE_SALT,
   replayTrackPayload,
   resolveReplayPrivacy,
   type ReplayGateInputs,
@@ -83,6 +84,17 @@ describe('sampling by session id hash', () => {
     expect(ten.every(id => fifty.includes(id))).toBe(true);
     expect(at(1)).toHaveLength(ids.length);
     expect(at(0)).toHaveLength(0);
+  });
+
+  test('heat mode draws on its own hash: not a subset of the replay sample', () => {
+    const replay50 = new Set(ids.filter(id => replaySampleHit(id, 0.5)));
+    const heat25 = ids.filter(id => replaySampleHit(id, 0.25, HEAT_SAMPLE_SALT));
+    expect(heat25.length / ids.length).toBeGreaterThan(0.2);
+    expect(heat25.length / ids.length).toBeLessThan(0.3);
+    const outsideReplay = heat25.filter(id => !replay50.has(id)).length;
+    // Independent draws: about half of the heat sample falls outside replay's half.
+    expect(outsideReplay / heat25.length).toBeGreaterThan(0.35);
+    expect(outsideReplay / heat25.length).toBeLessThan(0.65);
   });
 
   test('nothing is persisted to decide the sample', () => {
