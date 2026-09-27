@@ -177,7 +177,7 @@ class Datalyr {
       flushAt: 10,
       criticalEvents: undefined,
       highPriorityEvents: undefined,
-      sessionTimeout: 60 * 60 * 1000, // 60 minutes (increased from 30 for OAuth flows)
+      sessionTimeout: 30 * 60 * 1000, // 30 minutes since last activity (1.9.4; was 60 since 1.x for OAuth flows, which round-trip in well under 30)
       trackSessions: true,
       attributionWindow: 90 * 24 * 60 * 60 * 1000, // 90 days (increased from 30 for B2B sales cycles)
       trackedParams: [],

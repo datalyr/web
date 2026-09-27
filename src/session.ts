@@ -19,7 +19,7 @@ export class SessionManager {
   // to flush the old id's buffer and start the new id with a full snapshot.
   private sessionChangeListener: ((sessionId: string) => void) | null = null;
 
-  constructor(timeout = 60 * 60 * 1000) { // 60 minutes default (matches docs)
+  constructor(timeout = 30 * 60 * 1000) { // 30 minutes since last activity (1.9.4; GA4/Mixpanel/PostHog default)
     this.sessionTimeout = timeout;
     this.initSession();
     this.setupActivityMonitor();
