@@ -172,7 +172,7 @@ Four identifiers ship on every event. They are not alternatives to each other.
 | `visitor_id` | The anonymous browser ID, format `anon_<uuid>`. Stays anonymous even after `identify()`. |
 | `user_id` | The ID you pass to `identify()`. `null` until then. |
 | `distinct_id` | The `user_id` when identified. The `visitor_id` before that. |
-| `session_id` | Format `sess_<uuid>`. New after 60 minutes idle. |
+| `session_id` | Format `sess_<uuid>`. New after 30 minutes idle. |
 
 Use `visitor_id` in server-side and webhook work. Stripe, Whop, and Shopify all key off
 it. Use `distinct_id` when you reason about event-level identity.
@@ -273,7 +273,7 @@ Only `workspaceId` is required.
 ```javascript
 datalyr.init({
   workspaceId: 'YOUR_WORKSPACE_ID',
-  sessionTimeout: 3600000,      // 60 minutes, in milliseconds
+  sessionTimeout: 1800000,      // 30 minutes, in milliseconds
   attributionWindow: 7776000000, // 90 days, in milliseconds
   debug: true,
 });
@@ -289,7 +289,7 @@ datalyr.init({
 | `flushInterval` | `number` ms | `5000`, clamped 250–3600000 |
 | `criticalEvents` | `string[]` | `['purchase', 'signup', 'subscribe', 'lead', 'conversion']`. Flushed immediately. |
 | `highPriorityEvents` | `string[]` | `['add_to_cart', 'begin_checkout', 'view_item', 'search']`. Flushed after 1000 ms. |
-| `sessionTimeout` | `number` ms | `3600000` — 60 minutes |
+| `sessionTimeout` | `number` ms | `1800000` — 30 minutes |
 | `attributionWindow` | `number` ms | `7776000000` — 90 days |
 | `trackedParams` | `string[]` | `[]`, merged onto the default list |
 | `respectDoNotTrack` | `boolean` | `false` |
@@ -1014,7 +1014,7 @@ When nothing arrives, set `debug: true`, then call `getErrors()` and `getNetwork
 | No events, network tab shows a `4xx` | Wrong `workspaceId`. The batch is dropped with no retry. | Copy the ID from **Settings → Tracking → Install** |
 | No events, no network request | `init()` never ran, or the visitor opted out | Call `datalyr.getWorkspaceId()` and `datalyr.isOptedOut()` |
 | No events, requests blocked | An ad blocker or a privacy extension | Test in a clean private window |
-| A session expires on every event | `sessionTimeout` was set in minutes | Set it in milliseconds: `3600000` for 60 minutes |
+| A session expires on every event | `sessionTimeout` was set in minutes | Set it in milliseconds: `1800000` for 30 minutes |
 | Attribution disappears after a few days | `attributionWindow` was set in days | Set it in milliseconds: `7776000000` for 90 days |
 | Two `visitor_id` values for one person | The script tag and the npm package both loaded | Remove one |
 | Conversions do not link to the visit | `reset()` runs on page load | Call `reset()` on logout only |

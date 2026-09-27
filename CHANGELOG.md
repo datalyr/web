@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.9.4
+
+- **Behaviour change:** the default `sessionTimeout` is 30 minutes since the last activity (was 60). A new `session_id` starts when a visitor comes back after 30 quiet minutes, matching GA4, Mixpanel and PostHog, so session counts line up with those tools. Expect slightly more sessions and slightly lower per-session figures from the day you upgrade; nothing is recomputed. An explicit `sessionTimeout` in `init()` is unchanged. The 60-minute value dated from OAuth sign-in flows, which round-trip in far less than 30 minutes.
+- Session replay: recordings therefore close, and appear on the Replays page, about half an hour sooner (the backend waits for the session timeout plus a margin).
+
 ## 1.9.3
 
 - Session replay: a full page snapshot is taken about a second after every client-side route change (`history.pushState` / `replaceState` / `popstate`, the same signal as the `url` marker), coalescing rapid changes. Heatmap backdrops are one per path and were only ever taken at record start, so single-page apps had no backdrop for any route but the landing one. Recordings grow by one snapshot per route visited (typically 20–50 KB gzip each).
