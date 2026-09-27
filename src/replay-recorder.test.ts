@@ -29,7 +29,7 @@ jest.mock('@rrweb/record', () => {
 });
 
 import {
-  FLUSH_INTERVAL_MS, IDLE_PAUSE_MS, KEEPALIVE_MAX_BYTES, PARK_KEY, Recorder, maskText, stripUrl,
+  FLUSH_INTERVAL_MS, IDLE_PAUSE_MS, KEEPALIVE_MAX_BYTES, PARK_KEY, ROUTE_SNAPSHOT_DELAY_MS, Recorder, maskText, stripUrl,
 } from './replay/recorder';
 
 const flushPromises = () => new Promise(resolve => jest.requireActual<typeof globalThis>('timers').setImmediate(resolve));
@@ -217,6 +217,22 @@ describe('replay recorder', () => {
     expect(url.data.payload.href).toBe('https://shop.test/checkouts/c/xyz/thank_you');
     expect(stripUrl('https://a.test/p?q=1')).toBe('https://a.test/p');
     expect(stripUrl(undefined)).toBe('');
+  });
+
+  test('SPA route change: one full snapshot after the view settles; rapid changes coalesce; none after stop', () => {
+    recorder.start(ctx);
+    mockRrweb.full.mockClear();
+    recorder.event('url', { href: 'https://shop.test/onboarding/sports' });
+    recorder.event('url', { href: 'https://shop.test/onboarding/bets' });
+    jest.advanceTimersByTime(ROUTE_SNAPSHOT_DELAY_MS - 1);
+    expect(mockRrweb.full).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(1);
+    expect(mockRrweb.full).toHaveBeenCalledTimes(1);
+    expect(mockRrweb.full).toHaveBeenCalledWith(true);
+    recorder.event('url', { href: 'https://shop.test/app' });
+    recorder.stop(true);
+    jest.advanceTimersByTime(ROUTE_SNAPSHOT_DELAY_MS * 2);
+    expect(mockRrweb.full).toHaveBeenCalledTimes(1);
   });
 
   test('custom events: track/url/vis/ph/err as rrweb type 5 with tag dl', async () => {

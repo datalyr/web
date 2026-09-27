@@ -58,6 +58,8 @@ const RESIZE_THROTTLE_MS = 1000;
 // rrweb enums, inlined so the bundle doesn't need @rrweb/types at runtime.
 const EVENT_FULL_SNAPSHOT = 2;
 const EVENT_INCREMENTAL = 3;
+/** Wait after an SPA route change before the full snapshot, so the new view has rendered. */
+export const ROUTE_SNAPSHOT_DELAY_MS = 1000;
 const EVENT_META = 4;
 const EVENT_CUSTOM = 5;
 const SRC_MUTATION = 0;
@@ -158,6 +160,8 @@ export class Recorder implements ReplayRecorder {
   private buckets = new Map<number, { tokens: number; at: number }>();
   private removers: Array<() => void> = [];
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 1.9.3: pending full snapshot after an SPA route change (see ROUTE_SNAPSHOT_DELAY_MS). */
+  private routeSnapTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Bumped by stop(true) (a gate closed: consent withdrawn, opt-out, reset...). Every
    * send and retry carries the generation of its chunk and aborts once it changed, so
@@ -253,6 +257,14 @@ export class Recorder implements ReplayRecorder {
       record.addCustomEvent('dl', { k: kind, ...payload });
     } catch {
       // best-effort
+    }
+    // 1.9.3: a client-side route change is a new page to the merchant (heatmap
+    // backdrops are one per path) but rrweb only snapshots at record start, so
+    // single-page apps never had a backdrop for any route but the landing one.
+    // Snapshot once the new view has rendered; rapid successive changes coalesce.
+    if (kind === 'url') {
+      if (this.routeSnapTimer) clearTimeout(this.routeSnapTimer);
+      this.routeSnapTimer = setTimeout(() => { this.routeSnapTimer = null; this.fullSnapshot(); }, ROUTE_SNAPSHOT_DELAY_MS);
     }
   }
 
@@ -579,6 +591,8 @@ export class Recorder implements ReplayRecorder {
     this.timer = null;
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     this.resizeTimer = null;
+    if (this.routeSnapTimer) clearTimeout(this.routeSnapTimer);
+    this.routeSnapTimer = null;
     for (const remove of this.removers.splice(0)) {
       try { remove(); } catch { /* best-effort */ }
     }
