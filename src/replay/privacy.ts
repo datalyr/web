@@ -67,16 +67,52 @@ export function stripQuery(value: string, srcset = false): string {
   return value.replace(/[?#][^\s]*/g, m => (m.endsWith(',') ? ',' : ''));
 }
 
-export function needsScrub(p: ReplayPrivacy): boolean {
-  return !p.attributes || !p.urlQuery;
+/**
+ * Always true since 1.9.5: large inline images are replaced whatever the
+ * merchant's settings (see INLINE_DATA_MAX). Kept as a function so callers
+ * need not change.
+ */
+export function needsScrub(_p: ReplayPrivacy): boolean {
+  return true;
+}
+
+/**
+ * Inline images (`data:` URIs) longer than this are replaced, always. On real
+ * stores they are the visitor's own uploads far more often than site art (a
+ * photo to engrave, previewed and re-cropped as a data URL many times a second:
+ * one product page produced 50 MB of recording in a minute), so recording them
+ * is both a privacy leak and a size blow-up. Small inline icons stay.
+ */
+export const INLINE_DATA_MAX = 2048;
+/** 1×1 transparent GIF: the image box keeps its layout, the content is gone. */
+export const BLANK_IMAGE = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+const DATA_URL_IN_CSS = /url\(\s*(['"]?)data:[^)]*\)/gi;
+
+function withoutInlineData(name: string, value: string): string {
+  if (value.length <= INLINE_DATA_MAX) return value;
+  if (name === 'style') return value.replace(DATA_URL_IN_CSS, 'url()');
+  if (!URL_ATTRIBUTES.has(name) || !/data:/i.test(value)) return value;
+  if (name === 'srcset') return '';
+  return /^\s*data:image\//i.test(value) ? BLANK_IMAGE : '';
 }
 
 /** Rewrite one attribute map in place. tagName is unknown for attribute mutations. */
 export function scrubAttributes(attrs: Record<string, unknown>, p: ReplayPrivacy, tagName?: string): void {
   for (const name of Object.keys(attrs)) {
-    const value = attrs[name];
-    if (typeof value !== 'string') continue; // null = removed; objects = style diffs
+    const raw = attrs[name];
     const lower = name.toLowerCase();
+    // rrweb style diffs: {prop: value | [value, priority] | false}; a background image can be a data URL.
+    if (lower === 'style' && raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const diff = raw as Record<string, unknown>;
+      for (const [prop, v] of Object.entries(diff)) {
+        if (typeof v === 'string') diff[prop] = withoutInlineData('style', v);
+        else if (Array.isArray(v) && typeof v[0] === 'string') v[0] = withoutInlineData('style', v[0]);
+      }
+      continue;
+    }
+    if (typeof raw !== 'string') continue; // null = removed
+    const value = withoutInlineData(lower, raw);
+    if (value !== raw) attrs[name] = value;
     if (!p.attributes && (MASKED_ATTRIBUTES.has(lower) || lower.startsWith('data-'))) {
       attrs[name] = '';
       continue;
