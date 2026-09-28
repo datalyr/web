@@ -1,5 +1,5 @@
 /** Unit tests for src/replay/privacy.ts (the scrub helpers). */
-import { scrubAttributes, scrubNode, stripQuery } from './replay/privacy';
+import { BLANK_IMAGE, INLINE_DATA_MAX, scrubAttributes, scrubEvent, scrubNode, stripQuery } from './replay/privacy';
 
 const DEF = { textMode: 'interactive' as const, attributes: false, urlQuery: false };
 
@@ -32,5 +32,41 @@ describe('replay privacy scrub', () => {
     const b = { href: '/x?q=1', alt: 'gone' };
     scrubAttributes(b, { ...DEF, urlQuery: true }, 'img');
     expect(b).toEqual({ href: '/x?q=1', alt: '' });
+  });
+
+  test('large inline images are replaced whatever the settings; small ones and remote URLs stay', () => {
+    const photo = 'data:image/png;base64,' + 'A'.repeat(INLINE_DATA_MAX * 20);
+    const icon = 'data:image/svg+xml;utf8,<svg/>';
+    const OPEN = { textMode: 'marked' as const, attributes: true, urlQuery: true };
+    for (const p of [DEF, OPEN]) {
+      const a: Record<string, unknown> = { src: photo, srcset: `${photo} 2x`, poster: photo, alt: 'me' };
+      scrubAttributes(a, p, 'img');
+      expect(a.src).toBe(BLANK_IMAGE);
+      expect(a.srcset).toBe('');
+      expect(a.poster).toBe(BLANK_IMAGE);
+      const b: Record<string, unknown> = { src: icon, href: 'https://a.test/x.png' };
+      scrubAttributes(b, p, 'img');
+      expect(b.src).toBe(icon);
+      expect(b.href).toBe(p.urlQuery ? 'https://a.test/x.png' : 'https://a.test/x.png');
+      const s: Record<string, unknown> = { style: `width:10px;background-image:url("${photo}")` };
+      scrubAttributes(s, p, 'div');
+      expect(s.style).toBe('width:10px;background-image:url()');
+    }
+  });
+
+  test('attribute mutations and style diffs from rrweb are scrubbed too (the cropper case)', () => {
+    const photo = 'data:image/jpeg;base64,' + 'B'.repeat(500_000);
+    const ev = { type: 3, data: { source: 0, adds: [], attributes: [
+      { id: 1, attributes: { src: photo } },
+      { id: 2, attributes: { style: { backgroundImage: `url(${photo})`, color: 'red' } } },
+      { id: 3, attributes: { style: { backgroundImage: [`url(${photo})`, 'important'] } } },
+    ] } };
+    scrubEvent(ev, { textMode: 'marked', attributes: true, urlQuery: true });
+    const [m1, m2, m3] = ev.data.attributes;
+    expect(m1.attributes.src).toBe(BLANK_IMAGE);
+    expect((m2.attributes.style as Record<string, unknown>).backgroundImage).toBe('url()');
+    expect((m2.attributes.style as Record<string, unknown>).color).toBe('red');
+    expect(((m3.attributes.style as Record<string, unknown>).backgroundImage as string[])[0]).toBe('url()');
+    expect(JSON.stringify(ev).length).toBeLessThan(2000);
   });
 });

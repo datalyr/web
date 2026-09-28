@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.9.5
+
+- Session replay and heatmaps: inline images (`data:` URLs) longer than 2 KB are replaced before anything leaves the browser, whatever the merchant's privacy settings. `src` / `poster` / `href` become a 1×1 transparent GIF (the image box keeps its layout), `srcset` is emptied, and `url(data:…)` inside `style` attributes and rrweb style diffs becomes `url()`. On real stores these are the visitor's own uploads (a photo to engrave, previewed and re-cropped as a data URL several times a second), so recording them leaked the photo and could fill a session's 50 MB cap in a minute. Small inline icons and remote image URLs are unchanged.
+
 ## 1.9.4
 
 - **Behaviour change:** the default `sessionTimeout` is 30 minutes since the last activity (was 60). A new `session_id` starts when a visitor comes back after 30 quiet minutes, matching GA4, Mixpanel and PostHog, so session counts line up with those tools. Expect slightly more sessions and slightly lower per-session figures from the day you upgrade; nothing is recomputed. An explicit `sessionTimeout` in `init()` is unchanged. The 60-minute value dated from OAuth sign-in flows, which round-trip in far less than 30 minutes.
