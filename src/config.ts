@@ -18,7 +18,6 @@ export interface SdkRemoteConfig {
   autoIdentifyAPI?: boolean;
   autoIdentifyShopify?: boolean;
   shopifyCartAttributes?: boolean;
-  shopifyAutoViewItem?: boolean;
   stripeCheckoutSessions?: boolean;
   inAppHandoff?: boolean;
   checkoutChampDomains?: string[];
@@ -52,7 +51,6 @@ const REMOTE_KEYS: ReadonlyArray<keyof SdkRemoteConfig> = [
   'autoIdentifyAPI',
   'autoIdentifyShopify',
   'shopifyCartAttributes',
-  'shopifyAutoViewItem',
   'stripeCheckoutSessions',
   'inAppHandoff',
   'checkoutChampDomains',

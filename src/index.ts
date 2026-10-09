@@ -527,6 +527,7 @@ class Datalyr {
         // pageview and release it from onShopifyConsentChanged() once allowed.
         this.initialPageViewReady = true;
         this.trackInitialPageViewOnce();
+        if (!this.config.trackPageViews) this.maybeTrackShopifyProductView();
 
         this.log('Async initialization complete');
       } catch (error) {
@@ -2494,6 +2495,15 @@ class Datalyr {
     this.log('Shopify consent collected — analytics allowed:', allowed, '— marketing blocked:', marketingBlocked);
   }
 
+  /** The theme editor previews the storefront: not a visitor. */
+  private shopifyDesignMode(): boolean {
+    try {
+      return (window as any).Shopify?.designMode === true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Release the automatic landing pageview once, after init and consent. */
   private trackInitialPageViewOnce(): void {
     if (!this.initialPageViewReady || this.initialPageViewSent) return;
@@ -2515,8 +2525,10 @@ class Datalyr {
    */
   private maybeTrackShopifyProductView(): void {
     try {
-      if (this.shopifyProductViewSettled || !this.initialPageViewSent) return;
-      if (this.config.shopifyAutoViewItem === false || !this.isShopifyStorefront()) {
+      if (this.shopifyProductViewSettled || !this.initialPageViewReady) return;
+      // After the landing pageview (or once tracking is allowed, without one).
+      if (this.config.trackPageViews ? !this.initialPageViewSent : !this.shouldTrack()) return;
+      if (this.config.shopifyAutoViewItem === false || !this.isShopifyStorefront() || this.shopifyDesignMode()) {
         this.shopifyProductViewSettled = true;
         return;
       }

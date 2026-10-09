@@ -237,6 +237,61 @@ describe('dl.js view_item on Shopify product pages', () => {
     expect(views[0].event_data.product_id).toBe('own');
   });
 
+  test('the Customer Privacy API answers late (after the policy and the wait): one view_item then', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({ loaded: false });
+    const enqueue = await boot(baseConfig, 20);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await settle();
+    expect(named(enqueue, 'pageview')).toHaveLength(1);
+    expect(named(enqueue, 'view_item')).toHaveLength(0);
+    (window as any).Shopify.customerPrivacy = {
+      analyticsProcessingAllowed: () => false,
+      marketingAllowed: () => false,
+      currentVisitorConsent: () => ({ analytics: '', marketing: '', preferences: '', sale_of_data: '' }),
+    };
+    document.dispatchEvent(new Event('visitorConsentCollected'));
+    await settle();
+    expect(named(enqueue, 'view_item')).toHaveLength(1);
+  });
+
+  test('UK market prices: price and currency as Shopify inlines them (same as the pixel)', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    const gbMeta = { ...PRODUCT_META, product: { ...PRODUCT_META.product, variants: PRODUCT_META.product.variants.map((v) => ({ ...v, price: 2500 })) } };
+    stubShopify({ meta: gbMeta });
+    const enqueue = await boot();
+    const [view] = named(enqueue, 'view_item');
+    expect(view.event_data).toEqual(expect.objectContaining({ price: 25, unit_price: 25, currency: 'USD' }));
+  });
+
+  test('trackPageViews: false still sends the product view', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({});
+    const enqueue = await boot({ ...baseConfig, trackPageViews: false });
+    expect(named(enqueue, 'pageview')).toHaveLength(0);
+    expect(named(enqueue, 'view_item')).toHaveLength(1);
+  });
+
+  test('the theme editor (Shopify.designMode): nothing', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({});
+    (window as any).Shopify.designMode = true;
+    const enqueue = await boot();
+    expect(named(enqueue, 'view_item')).toHaveLength(0);
+  });
+
+  test('Global Privacy Control respected: nothing', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({});
+    Object.defineProperty(navigator, 'globalPrivacyControl', { configurable: true, value: true });
+    try {
+      const enqueue = await boot({ ...baseConfig, respectGlobalPrivacyControl: true });
+      expect(named(enqueue, 'view_item')).toHaveLength(0);
+    } finally {
+      delete (navigator as any).globalPrivacyControl;
+    }
+  });
+
   test('not a Shopify storefront: nothing', async () => {
     mockNetwork({ waitForShopifyConsent: false });
     const sdk = loadSdk();
