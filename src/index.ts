@@ -530,11 +530,12 @@ class Datalyr {
    */
   private startLateTrackedFeatures(): void {
     if (!this.initialized || !this.shouldTrack()) return;
+    // A container about to start delivers the dashboard config (Honor DNT,
+    // autoIdentify off, strict mode, a sensitive-vertical default) that may still
+    // say no: wait for it. Its onRemoteConfig and its ready promise call back here.
+    if (this.containerAboutToStart()) return;
     this.captureLandingAttribution();
-    // A container about to start delivers the dashboard config (autoIdentify off,
-    // strict mode, a sensitive-vertical default): auto-identify waits for it and
-    // starts from onRemoteConfig instead.
-    if (!this.containerAboutToStart()) this.startAutoIdentify();
+    this.startAutoIdentify();
     this.startStripeLinkFeatures();
   }
 
@@ -630,7 +631,7 @@ class Datalyr {
           this.autoIdentify.destroy();
           this.autoIdentify = undefined;
         }
-        if (this.initialPageViewReady) this.startAutoIdentify();
+        if (this.initialPageViewReady) this.startLateTrackedFeatures();
       },
       // Lazy: invoked at the moment a third-party pixel inits, AFTER the
       // /container-scripts roundtrip resolves — so a pre-init identify()
@@ -1956,6 +1957,8 @@ class Datalyr {
 
     const stampLink = (anchor: HTMLAnchorElement) => {
       if (!anchor.href || !matchesPaymentLinkHost(anchor.href)) return;
+      // Every write re-checks: a dashboard setting arriving later on the page can still say no.
+      if (!this.shouldTrack() || !this.consentAllowsMarketing()) return;
       try {
         const u = new URL(anchor.href, window.location.href);
         let mutated = false;
@@ -2545,7 +2548,11 @@ class Datalyr {
     if (allowed) {
       const containerReady = this.containerGateReached ? this.startContainer() : undefined;
       if (containerReady) {
-        void containerReady.then(() => this.trackInitialPageViewOnce());
+        void containerReady.then(() => {
+          // Also when the config fetch failed (no onRemoteConfig): the init-time config stands.
+          this.startLateTrackedFeatures();
+          this.trackInitialPageViewOnce();
+        });
       } else {
         this.trackInitialPageViewOnce();
       }

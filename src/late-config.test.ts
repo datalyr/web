@@ -171,6 +171,34 @@ describe('GPC turned off by the merchant', () => {
     }
   });
 
+  test('released for GPC, but the dashboard honors DNT and the browser sends it: nothing starts, no link stamped', async () => {
+    (navigator as any).globalPrivacyControl = true;
+    Object.defineProperty(navigator, 'doNotTrack', { configurable: true, value: '1' });
+    document.body.innerHTML = '<a id="pl" href="https://buy.stripe.com/test_abc">Buy</a>';
+    try {
+      mockNetwork({ waitForShopifyConsent: true, respectGlobalPrivacyControl: false }, { respectDoNotTrack: true, autoIdentify: true });
+      const enqueue = await boot({ ...baseConfig, enableContainer: true, stripePaymentLinks: true });
+      expect(enqueue).not.toHaveBeenCalled();
+      expect(document.getElementById('pl')!.getAttribute('href')).toBe('https://buy.stripe.com/test_abc');
+      expect(instance.autoIdentify).toBeUndefined();
+    } finally {
+      document.body.innerHTML = '';
+    }
+  });
+
+  test('released for GPC with a container whose config allows it: links stamped after the config arrives', async () => {
+    (navigator as any).globalPrivacyControl = true;
+    document.body.innerHTML = '<a id="pl" href="https://buy.stripe.com/test_abc">Buy</a>';
+    try {
+      mockNetwork({ waitForShopifyConsent: true, respectGlobalPrivacyControl: false }, {});
+      const enqueue = await boot({ ...baseConfig, enableContainer: true, stripePaymentLinks: true });
+      expect(names(enqueue)).toContain('pageview');
+      expect(document.getElementById('pl')!.getAttribute('href')).toContain('client_reference_id=');
+    } finally {
+      document.body.innerHTML = '';
+    }
+  });
+
   test('a visitor without GPC on a plain site: no policy request', async () => {
     const fetchMock = mockNetwork({ waitForShopifyConsent: true });
     const enqueue = await boot();
