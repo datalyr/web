@@ -129,6 +129,8 @@ class Datalyr {
   private shopifyProductViewSettled = false; // maybeTrackShopifyProductView: decided for this page load
   private pageSentShopifyEvents = new Set<string>(); // view_item / search the page sent itself
   private trackingShopifyProductView = false;
+  private pendingShopifyView: { eventName: string; properties: Record<string, unknown>; timer: ReturnType<typeof setTimeout> } | null = null;
+  private shopifyViewHoldMs = 5000; // see maybeTrackShopifyProductView
   // Container lifecycle (see startContainer): created at most once per page.
   // containerGateReached = initializeAsync() has evaluated the container gate, so
   // a later Shopify consent grant may start it (earlier grants are picked up by
@@ -2549,9 +2551,27 @@ class Datalyr {
       const eventName = view ? 'view_item' : 'search';
       const properties = view ?? search;
       if (!properties || this.pageSentShopifyEvents.has(eventName)) return;
+      // Held briefly: a visitor who accepts the banner on this page makes Shopify
+      // load the pixel, which then reports this view itself. Sent after the hold,
+      // or at once when the page is left; dropped if the pixel runs by then.
+      const timer = setTimeout(() => this.sendPendingShopifyView(), this.shopifyViewHoldMs);
+      this.pendingShopifyView = { eventName, properties, timer };
+    } catch (error) {
+      this.log('Shopify product view failed:', error);
+    }
+  }
+
+  private sendPendingShopifyView(): void {
+    const pending = this.pendingShopifyView;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingShopifyView = null;
+    try {
+      if (shopifyPixelWillRun(this.getShopifyCustomerPrivacy()) === true) return; // the pixel has it
+      if (!this.shouldTrack() || this.pageSentShopifyEvents.has(pending.eventName)) return;
       this.trackingShopifyProductView = true;
       try {
-        this.track(eventName, properties);
+        this.track(pending.eventName, pending.properties);
       } finally {
         this.trackingShopifyProductView = false;
       }
@@ -2633,9 +2653,10 @@ class Datalyr {
     // non-terminal path (response-checked fetch drain that never erases the backlog).
     // The Shopify cart report goes first so the flush carries it (leaving for
     // checkout is when a widget-created cart is last seen).
-    this.unloadHandler = () => { this.reportShopifyCartFromCookie(); this.queue.forceFlush(true); };
+    this.unloadHandler = () => { this.sendPendingShopifyView(); this.reportShopifyCartFromCookie(); this.queue.forceFlush(true); };
     this.visibilityHandler = () => {
       if (document.visibilityState === 'hidden') {
+        this.sendPendingShopifyView();
         this.reportShopifyCartFromCookie();
         this.queue.forceFlush(false);
       }
@@ -2860,6 +2881,8 @@ class Datalyr {
     this.initialPageViewSent = false;
     this.shopifyProductViewSettled = false;
     this.pageSentShopifyEvents.clear();
+    if (this.pendingShopifyView) clearTimeout(this.pendingShopifyView.timer);
+    this.pendingShopifyView = null;
 
     // Clear any remaining data
     this.superProperties = {};

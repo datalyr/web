@@ -61,7 +61,16 @@ export function readShopifyProductView(win: any, doc: Document): Record<string, 
     } catch {
       requested = null;
     }
-    const wanted = requested || (meta.selectedVariantId ? String(meta.selectedVariantId) : null);
+    // The variant the product form holds is Shopify's selected-or-first-available
+    // one (what the pixel reports); variants[0] may be sold out.
+    let formVariant: string | null = null;
+    try {
+      const input = doc.querySelector('form[action*="/cart/add"] [name="id"]') as HTMLInputElement | HTMLSelectElement | null;
+      formVariant = input && input.value ? String(input.value) : null;
+    } catch {
+      formVariant = null;
+    }
+    const wanted = requested || formVariant || (meta.selectedVariantId ? String(meta.selectedVariantId) : null);
     const variant = (wanted && variants.find((v) => String(v?.id) === wanted)) || variants[0] || null;
 
     const currency = win?.Shopify?.currency?.active || meta.currency || null;

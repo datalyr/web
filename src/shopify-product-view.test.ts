@@ -108,10 +108,11 @@ describe('dl.js view_item on Shopify product pages', () => {
     window.history.replaceState({}, '', '/');
   });
 
-  async function boot(config: Record<string, unknown> = baseConfig, waitMs = 20): Promise<jest.SpyInstance> {
+  async function boot(config: Record<string, unknown> = baseConfig, waitMs = 20, holdMs = 0): Promise<jest.SpyInstance> {
     const sdk = loadSdk();
     instance = sdk.createDatalyrInstance();
     instance.shopifyConsentOverrideWaitMs = waitMs;
+    instance.shopifyViewHoldMs = holdMs;
     instance.init(config);
     const enqueue = jest.spyOn(instance.queue, 'enqueue');
     await instance.ready();
@@ -140,6 +141,50 @@ describe('dl.js view_item on Shopify product pages', () => {
       categories: ['Necklace'],
       tracked_via: 'dl_storefront',
     }));
+  });
+
+  test('accepting the banner during the hold: the pixel reports the view, dl.js drops its copy', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({});
+    const enqueue = await boot(baseConfig, 20, 60);
+    expect(named(enqueue, 'view_item')).toHaveLength(0); // held
+    (window as any).Shopify.customerPrivacy.analyticsProcessingAllowed = () => true;
+    (window as any).Shopify.customerPrivacy.marketingAllowed = () => true;
+    (window as any).Shopify.customerPrivacy.currentVisitorConsent = () => ({ analytics: 'yes', marketing: 'yes', preferences: '', sale_of_data: '' });
+    document.dispatchEvent(new Event('visitorConsentCollected'));
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    await settle();
+    expect(named(enqueue, 'view_item')).toHaveLength(0);
+  });
+
+  test('no answer during the hold: sent when it ends', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({});
+    const enqueue = await boot(baseConfig, 20, 60);
+    expect(named(enqueue, 'view_item')).toHaveLength(0);
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    expect(named(enqueue, 'view_item')).toHaveLength(1);
+  });
+
+  test('leaving the page during the hold sends it at once, before the queue flush', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({});
+    const enqueue = await boot(baseConfig, 20, 60_000);
+    expect(named(enqueue, 'view_item')).toHaveLength(0);
+    window.dispatchEvent(new Event('pagehide'));
+    expect(named(enqueue, 'view_item')).toHaveLength(1);
+  });
+
+  test('the product form\'s variant (selected or first available) wins over the first variant', async () => {
+    document.body.innerHTML = '<form action="/cart/add"><input type="hidden" name="id" value="50624903151664"></form>';
+    try {
+      mockNetwork({ waitForShopifyConsent: false });
+      stubShopify({});
+      const enqueue = await boot();
+      expect(named(enqueue, 'view_item')[0].event_data.variant_id).toBe('50624903151664');
+    } finally {
+      document.body.innerHTML = '';
+    }
   });
 
   test('the ?variant= in the URL picks the variant', async () => {
