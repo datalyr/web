@@ -487,6 +487,7 @@ class Datalyr {
         // Track the initial page view after encryption is ready. On Shopify the
         // Customer Privacy API can still be loading, so retain one pending
         // pageview and release it from onShopifyConsentChanged() once allowed.
+        this.captureLandingAttribution(); // allowed during the awaits above (privacy policy)
         this.initialPageViewReady = true;
         this.trackInitialPageViewOnce();
         if (!this.config.trackPageViews) this.maybeTrackShopifyProductView();
@@ -509,10 +510,14 @@ class Datalyr {
     try { this.attribution.getAttributionData(); } catch (e) { this.log('Eager attribution capture failed:', e); }
   }
 
-  /** Stripe Payment Link decoration + Checkout Session capture (both DEFAULT ON), once per page. */
+  /**
+   * Stripe Payment Link decoration + Checkout Session capture (both DEFAULT ON), once per page.
+   * Link decoration also needs marketing consent: it is what a withdrawal tears down
+   * (disposeMarketingLinkDecorators), and stamped hrefs are not undone by that.
+   */
   private startStripeLinkFeatures(): void {
     if (!this.shouldTrack()) return;
-    if (this.config.stripePaymentLinks !== false && !this.stripeLinksDisposer) {
+    if (this.config.stripePaymentLinks !== false && !this.stripeLinksDisposer && this.consentAllowsMarketing()) {
       this.syncStripePaymentLinks(this.config.stripeLinkDomains ?? []);
     }
     if (this.config.stripeCheckoutSessions !== false) this.startStripeSessionCapture();
@@ -526,8 +531,17 @@ class Datalyr {
   private startLateTrackedFeatures(): void {
     if (!this.initialized || !this.shouldTrack()) return;
     this.captureLandingAttribution();
-    this.startAutoIdentify();
+    // A container about to start delivers the dashboard config (autoIdentify off,
+    // strict mode, a sensitive-vertical default): auto-identify waits for it and
+    // starts from onRemoteConfig instead.
+    if (!this.containerAboutToStart()) this.startAutoIdentify();
     this.startStripeLinkFeatures();
+  }
+
+  /** startContainer() would start a container now (it has not started on this page). */
+  private containerAboutToStart(): boolean {
+    return !this.containerStarted && this.containerGateReached && this.config.enableContainer !== false
+      && this.config.privacyMode !== 'strict' && this.consentAllowsMarketing();
   }
 
   /**
@@ -546,7 +560,7 @@ class Datalyr {
    */
   private startAutoIdentify(): void {
     if (this.autoIdentify || this.autoIdentifyStopped) return;
-    if (this.config.autoIdentify !== true || !this.shouldTrack() || this.shopifyMarketingConsent() === false) return;
+    if (this.config.autoIdentify !== true || !this.shouldTrack() || !this.consentAllowsMarketing()) return;
     this.autoIdentify = new AutoIdentifyManager({
       enabled: true,
       captureFromForms: this.config.autoIdentifyForms,
@@ -611,6 +625,11 @@ class Datalyr {
         // A container started late (Shopify consent) delivers replay only here.
         if (this.initialized) this.syncReplay(remote ?? undefined);
         // ... and the dashboard's auto-identify (init decided before it arrived).
+        // The dashboard (or strict mode) turning it off stops one already running.
+        if (this.config.autoIdentify !== true && this.autoIdentify) {
+          this.autoIdentify.destroy();
+          this.autoIdentify = undefined;
+        }
         if (this.initialPageViewReady) this.startAutoIdentify();
       },
       // Lazy: invoked at the moment a third-party pixel inits, AFTER the
@@ -2371,35 +2390,28 @@ class Datalyr {
     }
   }
 
-  /** GPC / DNT is what holds this visitor, and the snippet did not fix either setting. */
+  /**
+   * GPC holds this visitor, and the snippet did not fix the setting. (DNT is not
+   * honored by default, and only the snippet can turn it on, so there is nothing
+   * for a dashboard answer to release there.)
+   */
   private privacyPolicyCouldRelease(): boolean {
-    const gpc = this.config.respectGlobalPrivacyControl === true && isGlobalPrivacyControlEnabled()
-      && !this.explicitConfigKeys.has('respectGlobalPrivacyControl');
-    const dnt = this.config.respectDoNotTrack === true && isDoNotTrackEnabled()
-      && !this.explicitConfigKeys.has('respectDoNotTrack');
-    return gpc || dnt;
+    return this.config.respectGlobalPrivacyControl === true && isGlobalPrivacyControlEnabled()
+      && !this.explicitConfigKeys.has('respectGlobalPrivacyControl')
+      && !(this.config.respectDoNotTrack === true && isDoNotTrackEnabled());
   }
 
   /**
-   * The merchant turned off honoring GPC and/or DNT in the dashboard: apply it
-   * before consent and re-evaluate, exactly as when the container's config
-   * arrives. Only an explicit `false` changes anything; every other gate
-   * (opt-out, setConsent, a Shopify decline, strict mode) still applies.
+   * The merchant turned off honoring GPC in the dashboard: apply it before
+   * consent and re-evaluate, exactly as when the container's config arrives.
+   * Only an explicit `false` changes anything; every other gate (opt-out,
+   * setConsent, a Shopify decline, strict mode, DNT set by the snippet) still applies.
    */
   private applyPrivacyPolicy(policy: Record<string, unknown>): void {
-    let changed = false;
-    if (policy.respectGlobalPrivacyControl === false && !this.explicitConfigKeys.has('respectGlobalPrivacyControl')
-      && this.config.respectGlobalPrivacyControl !== false) {
-      this.config.respectGlobalPrivacyControl = false;
-      changed = true;
-    }
-    if (policy.respectDoNotTrack === false && !this.explicitConfigKeys.has('respectDoNotTrack')
-      && this.config.respectDoNotTrack !== false) {
-      this.config.respectDoNotTrack = false;
-      changed = true;
-    }
-    if (!changed) return;
-    this.log('Merchant turned off GPC / DNT; re-evaluating');
+    if (policy.respectGlobalPrivacyControl !== false || this.explicitConfigKeys.has('respectGlobalPrivacyControl')
+      || this.config.respectGlobalPrivacyControl === false) return;
+    this.config.respectGlobalPrivacyControl = false;
+    this.log('Merchant turned off GPC; re-evaluating');
     try { this.onShopifyConsentChanged(); } catch (error) { this.log('Consent re-evaluation failed:', error); }
   }
 
@@ -2419,8 +2431,7 @@ class Datalyr {
     // visitor who already declined gets the same answer either way)
     const askShopify = !this.explicitConfigKeys.has('waitForShopifyConsent')
       && this.isShopifyStorefront() && !this.shopifyServerTimingDecline('analytics');
-    // Any site: a visitor held only by GPC / DNT, whose merchant may have turned
-    // that off. The dashboard config that says so otherwise only arrives with
+    // Any site: a visitor held only by GPC, whose merchant may have turned that off. The dashboard config that says so otherwise only arrives with
     // the container, which never starts for a visitor we may not track.
     const askPrivacy = this.privacyPolicyCouldRelease();
     if (!askShopify && !askPrivacy) return;

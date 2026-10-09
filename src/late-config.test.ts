@@ -59,7 +59,7 @@ function policyCalls(fetchMock: jest.Mock): any[] {
   return fetchMock.mock.calls.filter(([url]) => String(url).includes('/sdk-consent-policy'));
 }
 
-describe('GPC / DNT turned off by the merchant', () => {
+describe('GPC turned off by the merchant', () => {
   const originalFetch = global.fetch;
   let instance: any;
 
@@ -111,19 +111,13 @@ describe('GPC / DNT turned off by the merchant', () => {
     expect(enqueue).not.toHaveBeenCalled();
   });
 
-  test('DNT visitor, merchant turned DNT off: released; GPC still honored', async () => {
-    Object.defineProperty(navigator, 'doNotTrack', { configurable: true, value: '1' });
-    mockNetwork({ waitForShopifyConsent: true, respectDoNotTrack: false });
-    const enqueue = await boot({ ...baseConfig, respectDoNotTrack: undefined });
-    expect(names(enqueue)).toEqual(['pageview']);
-  });
-
   test('a GPC answer does not release a visitor who is also held by DNT', async () => {
     (navigator as any).globalPrivacyControl = true;
     Object.defineProperty(navigator, 'doNotTrack', { configurable: true, value: '1' });
-    mockNetwork({ waitForShopifyConsent: true, respectGlobalPrivacyControl: false });
+    const fetchMock = mockNetwork({ waitForShopifyConsent: true, respectGlobalPrivacyControl: false });
     const enqueue = await boot({ ...baseConfig, respectDoNotTrack: true });
     expect(enqueue).not.toHaveBeenCalled();
+    expect(policyCalls(fetchMock)).toHaveLength(0); // nothing a dashboard answer could release
   });
 
   test('the snippet sets respectGlobalPrivacyControl: true — the snippet wins, nothing is asked', async () => {
@@ -146,7 +140,38 @@ describe('GPC / DNT turned off by the merchant', () => {
     }
   });
 
-  test('a visitor with neither GPC nor DNT on a plain site: no policy request', async () => {
+  test('released GPC visitor who declined marketing: Stripe payment links are not stamped', async () => {
+    (navigator as any).globalPrivacyControl = true;
+    document.body.innerHTML = '<a id="pl" href="https://buy.stripe.com/test_abc">Buy</a>';
+    try {
+      mockNetwork({ waitForShopifyConsent: true, respectGlobalPrivacyControl: false });
+      const sdk = loadSdk();
+      instance = sdk.createDatalyrInstance();
+      instance.setConsent({ analytics: true, marketing: false });
+      instance.init({ ...baseConfig, stripePaymentLinks: true });
+      const enqueue = jest.spyOn(instance.queue, 'enqueue');
+      await instance.ready();
+      await settle();
+      expect(names(enqueue)).toContain('pageview');
+      expect(document.getElementById('pl')!.getAttribute('href')).toBe('https://buy.stripe.com/test_abc');
+    } finally {
+      document.body.innerHTML = '';
+    }
+  });
+
+  test('released GPC visitor with marketing allowed: Stripe payment links are stamped', async () => {
+    (navigator as any).globalPrivacyControl = true;
+    document.body.innerHTML = '<a id="pl" href="https://buy.stripe.com/test_abc">Buy</a>';
+    try {
+      mockNetwork({ waitForShopifyConsent: true, respectGlobalPrivacyControl: false });
+      await boot({ ...baseConfig, stripePaymentLinks: true });
+      expect(document.getElementById('pl')!.getAttribute('href')).toContain('client_reference_id=');
+    } finally {
+      document.body.innerHTML = '';
+    }
+  });
+
+  test('a visitor without GPC on a plain site: no policy request', async () => {
     const fetchMock = mockNetwork({ waitForShopifyConsent: true });
     const enqueue = await boot();
     expect(policyCalls(fetchMock)).toHaveLength(0);
@@ -235,6 +260,27 @@ describe('auto-identify from a container that starts after consent (Shopify)', (
     };
     document.dispatchEvent(new Event('visitorConsentCollected'));
     await settle();
+    expect(instance.autoIdentify).toBeUndefined();
+  });
+
+  test.each([
+    ['dashboard autoIdentify false', { autoIdentify: false }],
+    ['dashboard strict mode', { privacyMode: 'strict' }],
+  ])('snippet asks for auto-identify, %s arrives with the late container: never runs', async (_name, remote) => {
+    mockNetwork({ waitForShopifyConsent: true }, remote);
+    stubShopify(false);
+    const sdk = loadSdk();
+    instance = sdk.createDatalyrInstance();
+    instance.init({ ...shopifyConfig, checkoutChampDomains: ['checkout.example.com'] });
+    await instance.ready();
+    await settle();
+    const created = jest.fn();
+    const original = instance.startAutoIdentify.bind(instance);
+    instance.startAutoIdentify = () => { original(); if (instance.autoIdentify) created(); };
+    stubShopify(true);
+    document.dispatchEvent(new Event('visitorConsentCollected'));
+    await settle();
+    expect(created).not.toHaveBeenCalled();
     expect(instance.autoIdentify).toBeUndefined();
   });
 
