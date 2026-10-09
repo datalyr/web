@@ -212,6 +212,9 @@ export interface SessionData {
   events: number;
   duration: number;
   isActive: boolean;
+  /** The visitor id this session belongs to — a recovery copy for when the
+   *  browser loses the visitor id but keeps the session (see IdentityManager). */
+  visitorId?: string;
 }
 
 export interface Attribution {

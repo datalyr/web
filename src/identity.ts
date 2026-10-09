@@ -7,9 +7,13 @@ import { storage, cookies } from './storage';
 import { generateUUID, getRootDomain } from './utils';
 import { IN_APP_HANDOFF_PARAM, isInAppBrowser, parseInAppHandoff } from './in-app-handoff';
 
+const VISITOR_ID_RE = /^anon_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export class IdentityManager {
   /** True when this browser continued an in-app browser's visitor (measurement only). */
   adoptedFromInAppHandoff = false;
+  /** True when the visitor id came back from the stored session record (measurement only). */
+  recoveredFromSession = false;
   private anonymousId: string;
   private userId: string | null = null;
   private sessionId: string | null = null;
@@ -68,6 +72,20 @@ export class IdentityManager {
       console.warn('[Datalyr] Failed to parse URL for _dl_vid:', e);
     }
 
+    // 2a. The browser kept our session record but lost the visitor id: Meta's
+    // in-app browsers (Instagram ~2%, Facebook ~1% of sessions vs 0.2%
+    // elsewhere, measured 2026-10-08) reload the ad landing page mid-session
+    // with the session intact and both the cookie and dl_anonymous_id gone,
+    // so a fresh id split one visit into two visitors. The record is this
+    // browser's own storage (never the URL) and reset() always starts a new
+    // session, so this cannot resurrect a logged-out visitor.
+    const fromSession = this.visitorIdFromSessionRecord();
+    if (fromSession) {
+      this.recoveredFromSession = true;
+      this.persistAnonymousId(fromSession);
+      return fromSession;
+    }
+
     // 2b. A fresh in-app handoff: this browser has no visitor yet and was opened from an
     // in-app webview on this device moments ago — continue as that visitor.
     if (handedOffId) {
@@ -105,6 +123,24 @@ export class IdentityManager {
     } catch {
       return null;
     }
+  }
+
+  private visitorIdFromSessionRecord(): string | null {
+    try {
+      const record = storage.get('dl_session_data');
+      const id = record && typeof record === 'object' ? record.visitorId : null;
+      return typeof id === 'string' && VISITOR_ID_RE.test(id) ? id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The visitor id for the session record's recovery copy, or null while ids
+   * must stay in memory only (FSR-107).
+   */
+  getPersistableAnonymousId(): string | null {
+    return this.persistNewId ? this.anonymousId : null;
   }
 
   /**

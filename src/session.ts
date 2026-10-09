@@ -18,6 +18,7 @@ export class SessionManager {
   // Fired after the session id changes (new session or rotation). Session replay uses it
   // to flush the old id's buffer and start the new id with a full snapshot.
   private sessionChangeListener: ((sessionId: string) => void) | null = null;
+  private visitorIdProvider: (() => string | null) | null = null;
 
   constructor(timeout = 30 * 60 * 1000) { // 30 minutes since last activity (1.9.4; GA4/Mixpanel/PostHog default)
     this.sessionTimeout = timeout;
@@ -215,8 +216,22 @@ export class SessionManager {
    */
   private saveSession(): void {
     if (this.sessionData) {
-      storage.set(this.SESSION_KEY, this.sessionData);
+      // The stored record carries the visitor id so IdentityManager can
+      // recover it when the browser drops the visitor id but keeps this
+      // record. Not written while the id must not persist (FSR-107).
+      const { visitorId: _stale, ...data } = this.sessionData;
+      const visitorId = this.visitorIdProvider?.() ?? null;
+      storage.set(this.SESSION_KEY, visitorId ? { ...data, visitorId } : data);
     }
+  }
+
+  /**
+   * Stamp the current visitor id onto the stored session record from now on,
+   * starting with the record already in storage.
+   */
+  setVisitorIdProvider(provider: () => string | null): void {
+    this.visitorIdProvider = provider;
+    this.saveSession();
   }
 
   /**

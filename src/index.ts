@@ -107,6 +107,7 @@ class Datalyr {
   private inAppHandoffTimer: ReturnType<typeof setInterval> | null = null;
   private inAppHandoffWrite: (() => void) | null = null;
   private inAppHandoffReported = false;
+  private visitorRecoveryReported = false;
   // Session replay (replay-loader.ts): created on the first sync that allows it.
   private replay: ReplayLoader | null = null;
   private replayDisabledAtInit = false; // init({ replay: false })
@@ -241,6 +242,7 @@ class Datalyr {
     // anyway). shouldTrack() is computable here (config/opt-out/consent are all set above).
     this.identity = new IdentityManager({ persistNewId: this.shouldTrack() });
     this.session = new SessionManager(this.config.sessionTimeout);
+    this.session.setVisitorIdProvider(() => this.identity.getPersistableAnonymousId());
     this.replayDisabledAtInit = config.replay === false;
     this.heatmapsDisabledAtInit = config.heatmaps === false;
     // Replay: flush the old session's recording under its own id, then re-check the
@@ -614,6 +616,13 @@ class Datalyr {
       // Meta Pixel co-fire below. Sharing it is what lets Meta dedupe the Pixel
       // event against the server-side CAPI event (dedup = event_id + event_name).
       const eventId = generateUUID();
+
+      // Measurement only: mark the first event after the visitor id was
+      // recovered from the session record.
+      if (this.identity.recoveredFromSession && !this.visitorRecoveryReported && !INTERNAL_SIGNAL_EVENTS.has(eventName)) {
+        this.visitorRecoveryReported = true;
+        properties = { ...properties, visitor_recovered: 'session' };
+      }
 
       // Create event payload
       const payload = this.createEventPayload(eventName, properties, eventId);
