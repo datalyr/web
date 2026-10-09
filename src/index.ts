@@ -131,6 +131,8 @@ class Datalyr {
   private trackingShopifyProductView = false;
   private pendingShopifyView: { eventName: string; properties: Record<string, unknown>; timer: ReturnType<typeof setTimeout> } | null = null;
   private shopifyViewHoldMs = 2000; // see maybeTrackShopifyProductView
+  private autoIdentifyStopped = false; // withdrawn on this page: resumes on the next load
+  private eagerAttributionCaptured = false;
   // Container lifecycle (see startContainer): created at most once per page.
   // containerGateReached = initializeAsync() has evaluated the container gate, so
   // a later Shopify consent grant may start it (earlier grants are picked up by
@@ -349,9 +351,7 @@ class Datalyr {
         // id-less-at-init privacy invariant. For a TRACKED visitor with marketing declined,
         // getAttributionData already strips the click-ids / marketing cookies (TR-03), so TR-22's
         // early-capture benefit is preserved for consenting/default visitors.
-        if (this.shouldTrack()) {
-          try { this.attribution.getAttributionData(); } catch (e) { this.log('Eager attribution capture failed:', e); }
-        }
+        this.captureLandingAttribution();
 
         // SEC-03: encryption is for PII-AT-REST only — it must NOT gate event delivery,
         // pageviews, or pixels. On a non-secure context (http://) or an old browser,
@@ -438,42 +438,8 @@ class Datalyr {
           this.config.autoIdentify = true;
         }
 
-        // Initialize auto-identify when enabled (explicit or remote) AND
-        // tracking is allowed. The shouldTrack() gate keeps capture from even
-        // setting up its form/API interceptors for opted-out / DNT / GPC users.
-        // 9.A.1: the captured email feeds Meta advanced matching / CAPI, so a
-        // declined Shopify marketing consent also blocks setup (incl. the
-        // /account.json polling); null = no Shopify signal → unchanged.
-        if (this.config.autoIdentify === true && this.shouldTrack() && this.shopifyMarketingConsent() !== false) {
-          this.autoIdentify = new AutoIdentifyManager({
-            enabled: true,
-            captureFromForms: this.config.autoIdentifyForms,
-            captureFromAPI: this.config.autoIdentifyAPI,
-            captureFromShopify: this.config.autoIdentifyShopify,
-            trustedDomains: this.config.autoIdentifyTrustedDomains,
-            debug: this.config.debug
-          });
-
-          // Setup auto-identify callback
-          this.autoIdentify.initialize((email: string, source: string) => {
-            this.log(`Auto-identified user: ${email} from ${source}`);
-
-            // WEB-21: ONE event, not two.
-            //
-            // This used to emit `$auto_identify` and then call identify(),
-            // which emits `$identify` — two events ~1ms apart carrying the same
-            // email. Production over 7 days on workspace f6260736 showed a
-            // perfect 379 / 379 / 379 split ($identify / $auto_identify /
-            // visitors): every auto-identification was booked twice.
-            //
-            // Nothing consumed `$auto_identify`: grepped across the whole
-            // platform (app/, lib/, all Cloudflare workers, all Tinybird pipes)
-            // — zero readers, while prod carried 6,197 of them in 30 days.
-            // The only information it added over `$identify` was WHICH detector
-            // found the email, so that is preserved as a trait instead.
-            this.identify(email, { email, auto_identify_source: source });
-          });
-        }
+        // Auto-identify when enabled (explicit or remote) and allowed; see startAutoIdentify.
+        this.startAutoIdentify();
 
         // Stamp attribution signals into the Shopify cart (OPT-IN, default off).
         // Lets server-side order webhooks recover the browser visitor + Meta click
@@ -502,9 +468,7 @@ class Datalyr {
         // snippet-only merchant's checkout.session.completed webhooks attribute
         // deterministically with zero server work. Gated on shouldTrack() so
         // opted-out / DNT / GPC visitors never get an id stamped into outbound links.
-        if (this.config.stripePaymentLinks !== false && this.shouldTrack()) {
-          this.syncStripePaymentLinks(this.config.stripeLinkDomains ?? []);
-        }
+        this.startStripeLinkFeatures();
 
         // Checkout Session capture (DEFAULT ON). The decorator above cannot help
         // when the merchant's BACKEND creates the session — checkout.stripe.com
@@ -514,10 +478,6 @@ class Datalyr {
         // The session id still has to reach the browser, so we observe it and
         // let the server join on session.id. Same shouldTrack() gate as the
         // decorator: an opted-out visitor's id is never paired with a checkout.
-        if (this.config.stripeCheckoutSessions !== false && this.shouldTrack()) {
-          this.startStripeSessionCapture();
-        }
-
         // In-app browser -> real browser handoff (see in-app-handoff.ts). Same
         // shouldTrack() gate: an opted-out visitor's id never goes into a URL.
         this.syncInAppHandoff();
@@ -540,6 +500,81 @@ class Datalyr {
     })();
 
     return this.initializationPromise;
+  }
+
+  /** The landing attribution (TR-22), once per page and only while tracking is allowed. */
+  private captureLandingAttribution(): void {
+    if (this.eagerAttributionCaptured || !this.shouldTrack()) return;
+    this.eagerAttributionCaptured = true;
+    try { this.attribution.getAttributionData(); } catch (e) { this.log('Eager attribution capture failed:', e); }
+  }
+
+  /** Stripe Payment Link decoration + Checkout Session capture (both DEFAULT ON), once per page. */
+  private startStripeLinkFeatures(): void {
+    if (!this.shouldTrack()) return;
+    if (this.config.stripePaymentLinks !== false && !this.stripeLinksDisposer) {
+      this.syncStripePaymentLinks(this.config.stripeLinkDomains ?? []);
+    }
+    if (this.config.stripeCheckoutSessions !== false) this.startStripeSessionCapture();
+  }
+
+  /**
+   * Tracking became allowed after init on this page (late Shopify consent, or
+   * the merchant's privacy policy releasing a GPC / DNT visitor): start what
+   * init skipped because shouldTrack() was false then. Each piece runs once.
+   */
+  private startLateTrackedFeatures(): void {
+    if (!this.initialized || !this.shouldTrack()) return;
+    this.captureLandingAttribution();
+    this.startAutoIdentify();
+    this.startStripeLinkFeatures();
+  }
+
+  /**
+   * Start auto-identify (email capture) when it is enabled (explicit or
+   * dashboard) and tracking is allowed. Called at init and again whenever the
+   * answer can change later on this page: the dashboard config arriving with a
+   * container started after consent (the usual Shopify case), a late Shopify
+   * consent grant, or the merchant's privacy policy releasing a GPC / DNT
+   * visitor. Once per page; after a withdrawal tore it down it resumes on the
+   * next page load, as with optIn().
+   * The shouldTrack() gate keeps capture from even setting up its form/API
+   * interceptors for opted-out / DNT / GPC users. 9.A.1: the captured email
+   * feeds Meta advanced matching / CAPI, so a declined Shopify marketing
+   * consent also blocks setup (incl. the /account.json polling); null = no
+   * Shopify signal → unchanged.
+   */
+  private startAutoIdentify(): void {
+    if (this.autoIdentify || this.autoIdentifyStopped) return;
+    if (this.config.autoIdentify !== true || !this.shouldTrack() || this.shopifyMarketingConsent() === false) return;
+    this.autoIdentify = new AutoIdentifyManager({
+      enabled: true,
+      captureFromForms: this.config.autoIdentifyForms,
+      captureFromAPI: this.config.autoIdentifyAPI,
+      captureFromShopify: this.config.autoIdentifyShopify,
+      trustedDomains: this.config.autoIdentifyTrustedDomains,
+      debug: this.config.debug
+    });
+
+    // Setup auto-identify callback
+    this.autoIdentify.initialize((email: string, source: string) => {
+      this.log(`Auto-identified user: ${email} from ${source}`);
+
+      // WEB-21: ONE event, not two.
+      //
+      // This used to emit `$auto_identify` and then call identify(),
+      // which emits `$identify` — two events ~1ms apart carrying the same
+      // email. Production over 7 days on workspace f6260736 showed a
+      // perfect 379 / 379 / 379 split ($identify / $auto_identify /
+      // visitors): every auto-identification was booked twice.
+      //
+      // Nothing consumed `$auto_identify`: grepped across the whole
+      // platform (app/, lib/, all Cloudflare workers, all Tinybird pipes)
+      // — zero readers, while prod carried 6,197 of them in 30 days.
+      // The only information it added over `$identify` was WHICH detector
+      // found the email, so that is preserved as a trait instead.
+      this.identify(email, { email, auto_identify_source: source });
+    });
   }
 
   /**
@@ -575,6 +610,8 @@ class Datalyr {
         if (this.config.privacyMode === 'strict') this.config.autoIdentify = false;
         // A container started late (Shopify consent) delivers replay only here.
         if (this.initialized) this.syncReplay(remote ?? undefined);
+        // ... and the dashboard's auto-identify (init decided before it arrived).
+        if (this.initialPageViewReady) this.startAutoIdentify();
       },
       // Lazy: invoked at the moment a third-party pixel inits, AFTER the
       // /container-scripts roundtrip resolves — so a pre-init identify()
@@ -1232,6 +1269,7 @@ class Datalyr {
     // Tear down auto-identify so it stops capturing email into storage post-opt-out.
     this.autoIdentify?.destroy();
     this.autoIdentify = undefined;
+    this.autoIdentifyStopped = true;
     // Stop forwarding to (and drop) third-party pixels for this visitor.
     if (this.container) {
       this.container.cleanupAllIframes();
@@ -1329,6 +1367,7 @@ class Datalyr {
       // resumes on the next page load if consent is re-granted, matching optOut/optIn.)
       this.autoIdentify?.destroy();
       this.autoIdentify = undefined;
+      this.autoIdentifyStopped = true;
       this.userProperties = {};
       // D02: see optOut() — the in-flight encrypted hydration has to be
       // invalidated too, or it restores the user we just purged.
@@ -2332,6 +2371,38 @@ class Datalyr {
     }
   }
 
+  /** GPC / DNT is what holds this visitor, and the snippet did not fix either setting. */
+  private privacyPolicyCouldRelease(): boolean {
+    const gpc = this.config.respectGlobalPrivacyControl === true && isGlobalPrivacyControlEnabled()
+      && !this.explicitConfigKeys.has('respectGlobalPrivacyControl');
+    const dnt = this.config.respectDoNotTrack === true && isDoNotTrackEnabled()
+      && !this.explicitConfigKeys.has('respectDoNotTrack');
+    return gpc || dnt;
+  }
+
+  /**
+   * The merchant turned off honoring GPC and/or DNT in the dashboard: apply it
+   * before consent and re-evaluate, exactly as when the container's config
+   * arrives. Only an explicit `false` changes anything; every other gate
+   * (opt-out, setConsent, a Shopify decline, strict mode) still applies.
+   */
+  private applyPrivacyPolicy(policy: Record<string, unknown>): void {
+    let changed = false;
+    if (policy.respectGlobalPrivacyControl === false && !this.explicitConfigKeys.has('respectGlobalPrivacyControl')
+      && this.config.respectGlobalPrivacyControl !== false) {
+      this.config.respectGlobalPrivacyControl = false;
+      changed = true;
+    }
+    if (policy.respectDoNotTrack === false && !this.explicitConfigKeys.has('respectDoNotTrack')
+      && this.config.respectDoNotTrack !== false) {
+      this.config.respectDoNotTrack = false;
+      changed = true;
+    }
+    if (!changed) return;
+    this.log('Merchant turned off GPC / DNT; re-evaluating');
+    try { this.onShopifyConsentChanged(); } catch (error) { this.log('Consent re-evaluation failed:', error); }
+  }
+
   /**
    * Fetch the merchant's Shopify consent choice before consent.
    *
@@ -2344,10 +2415,15 @@ class Datalyr {
    */
   private loadShopifyConsentPolicy(): void {
     if (typeof window === 'undefined' || typeof fetch !== 'function') return;
-    if (this.explicitConfigKeys.has('waitForShopifyConsent')) return; // the snippet decides
-    if (!this.isShopifyStorefront()) return;
-    // Nothing to fetch for a visitor who already declined: the answer is the same.
-    if (this.shopifyServerTimingDecline('analytics')) return;
+    // Shopify: does the merchant wait for consent? (the snippet may decide; a
+    // visitor who already declined gets the same answer either way)
+    const askShopify = !this.explicitConfigKeys.has('waitForShopifyConsent')
+      && this.isShopifyStorefront() && !this.shopifyServerTimingDecline('analytics');
+    // Any site: a visitor held only by GPC / DNT, whose merchant may have turned
+    // that off. The dashboard config that says so otherwise only arrives with
+    // the container, which never starts for a visitor we may not track.
+    const askPrivacy = this.privacyPolicyCouldRelease();
+    if (!askShopify && !askPrivacy) return;
     const workspaceId = this.config.workspaceId;
     const endpoint = this.config.endpoint;
     if (!workspaceId || !endpoint) return;
@@ -2358,7 +2434,9 @@ class Datalyr {
       })
         .then((response) => (response && response.ok ? response.json() : null))
         .then((policy) => {
-          if (!policy || policy.waitForShopifyConsent !== false) return;
+          if (!policy) return;
+          if (askPrivacy) this.applyPrivacyPolicy(policy);
+          if (!askShopify || policy.waitForShopifyConsent !== false) return;
           if (this.config.waitForShopifyConsent === false) return;
           this.config.waitForShopifyConsent = false;
           this.log('Merchant chose not to wait for Shopify consent; re-evaluating');
@@ -2443,6 +2521,7 @@ class Datalyr {
     // visitor_id that vanishes on the next page load. Idempotent.
     if (allowed) this.identity.enablePersistence();
     this.session.refreshStoredRecord(); // the record's visitor id follows the decision
+    if (allowed && this.initialPageViewReady) this.startLateTrackedFeatures();
     this.syncInAppHandoff();
     this.syncReplay();
     // Late grant: the init-time container gate read false (Customer Privacy API
@@ -2473,6 +2552,7 @@ class Datalyr {
     if ((!allowed || marketingBlocked) && this.autoIdentify) {
       this.autoIdentify.destroy();
       this.autoIdentify = undefined;
+      this.autoIdentifyStopped = true;
     }
 
     // Same caveat as setConsent(): an already-injected pixel global (fbq/gtag/ttq)
@@ -2885,6 +2965,8 @@ class Datalyr {
     this.pageSentShopifyEvents.clear();
     if (this.pendingShopifyView) clearTimeout(this.pendingShopifyView.timer);
     this.pendingShopifyView = null;
+    this.autoIdentifyStopped = false;
+    this.eagerAttributionCaptured = false;
 
     // Clear any remaining data
     this.superProperties = {};
