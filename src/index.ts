@@ -130,7 +130,7 @@ class Datalyr {
   private pageSentShopifyEvents = new Set<string>(); // view_item / search the page sent itself
   private trackingShopifyProductView = false;
   private pendingShopifyView: { eventName: string; properties: Record<string, unknown>; timer: ReturnType<typeof setTimeout> } | null = null;
-  private shopifyViewHoldMs = 5000; // see maybeTrackShopifyProductView
+  private shopifyViewHoldMs = 2000; // see maybeTrackShopifyProductView
   // Container lifecycle (see startContainer): created at most once per page.
   // containerGateReached = initializeAsync() has evaluated the container gate, so
   // a later Shopify consent grant may start it (earlier grants are picked up by
@@ -626,6 +626,8 @@ class Datalyr {
       const eventId = generateUUID();
 
       if ((eventName === 'view_item' || eventName === 'search') && !this.trackingShopifyProductView) this.pageSentShopifyEvents.add(eventName);
+      // A held Shopify view goes first, so funnels see it before what followed it.
+      if (this.pendingShopifyView && !this.trackingShopifyProductView && !INTERNAL_SIGNAL_EVENTS.has(eventName)) this.sendPendingShopifyView();
 
       // Measurement only: mark the first event after the visitor id was
       // recovered from the session record.

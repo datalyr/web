@@ -175,6 +175,15 @@ describe('dl.js view_item on Shopify product pages', () => {
     expect(named(enqueue, 'view_item')).toHaveLength(1);
   });
 
+  test('another event during the hold sends the held view first', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({});
+    const enqueue = await boot(baseConfig, 20, 60_000);
+    instance.track('add_to_cart', { value: 35, currency: 'USD' });
+    const order = enqueue.mock.calls.map((call: any[]) => call[0].event_name).filter((n: string) => n !== 'pageview');
+    expect(order).toEqual(['view_item', 'add_to_cart']);
+  });
+
   test('the product form\'s variant (selected or first available) wins over the first variant', async () => {
     document.body.innerHTML = '<form action="/cart/add"><input type="hidden" name="id" value="50624903151664"></form>';
     try {
