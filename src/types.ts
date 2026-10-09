@@ -69,7 +69,7 @@ export interface DatalyrConfig {
   autoIdentifyShopify?: boolean;         // Default: true - Capture email from Shopify endpoints (when autoIdentify enabled)
   autoIdentifyTrustedDomains?: string[]; // Default: [] - Additional domains to trust for API capture
   shopifyCartAttributes?: boolean;       // Default: false, BUT auto-enabled when platform:'shopify' is set (unless explicitly false). On Shopify storefronts, stamp visitor_id + Meta click signals (_fbc/_fbp/fbclid) into the cart so server-side order webhooks can attribute. QA on a real store before enabling.
-  shopifyAutoViewItem?: boolean;        // Default: true (init option only). On Shopify product pages, send view_item from dl.js when Shopify will not run the Datalyr Web Pixel for this visitor (it needs analytics and marketing consent), so the view is not lost. Where the pixel runs, it alone sends view_item.
+  shopifyAutoViewItem?: boolean;        // Default: true (init option only). On Shopify product pages, send view_item from dl.js when Shopify will not run the Datalyr Web Pixel for this visitor (it needs analytics and marketing consent), so the view is not lost. Search results pages get the pixel's search the same way. Where the pixel runs, it alone sends them.
 
   // Checkout Champ (CC) bridge.
   // - platform: 'checkoutchamp' on a CC funnel page restores _dl_* URL params to cookies on init,

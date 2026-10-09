@@ -7,7 +7,7 @@
  */
 export {}; // module scope: index.test.ts declares the same helper names globally
 
-import { readShopifyProductView, shopifyPixelWillRun } from './shopify-product-view';
+import { readShopifyProductView, readShopifySearch, shopifyPixelWillRun } from './shopify-product-view';
 
 type SdkModule = typeof import('./index');
 
@@ -292,6 +292,56 @@ describe('dl.js view_item on Shopify product pages', () => {
     }
   });
 
+  const SEARCH_META = {
+    page: { pageType: 'searchresults', requestId: 'req-s' },
+    products: [{ id: 8087288315952, variants: [{ id: 1 }, { id: 2 }] }],
+  };
+
+  test('search results page, pixel will not run: one search like the pixel (query + matched variants)', async () => {
+    window.history.replaceState({}, '', '/search?q=necklace');
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({ meta: SEARCH_META });
+    const enqueue = await boot();
+    const searches = named(enqueue, 'search');
+    expect(searches).toHaveLength(1);
+    expect(searches[0].event_data).toEqual(expect.objectContaining({ query: 'necklace', results_count: 2, tracked_via: 'dl_storefront' }));
+    expect(named(enqueue, 'view_item')).toHaveLength(0);
+  });
+
+  test('search results page, pixel runs: no search from dl.js', async () => {
+    window.history.replaceState({}, '', '/search?q=necklace');
+    mockNetwork({ waitForShopifyConsent: true });
+    stubShopify({ meta: SEARCH_META, analyticsAllowed: true, marketingAllowed: true, visitor: { analytics: 'yes', marketing: 'yes' } });
+    const enqueue = await boot();
+    expect(named(enqueue, 'search')).toHaveLength(0);
+  });
+
+  test('search results page, explicit decline: nothing', async () => {
+    window.history.replaceState({}, '', '/search?q=necklace');
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({ meta: SEARCH_META, visitor: { analytics: 'no', marketing: 'no' } });
+    const enqueue = await boot();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  test('the page already sent its own search: no automatic one', async () => {
+    window.history.replaceState({}, '', '/search?q=necklace');
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({ meta: SEARCH_META, loaded: false });
+    const enqueue = await boot();
+    instance.track('search', { query: 'own' });
+    (window as any).Shopify.customerPrivacy = {
+      analyticsProcessingAllowed: () => false,
+      marketingAllowed: () => false,
+      currentVisitorConsent: () => ({ analytics: '', marketing: '', preferences: '', sale_of_data: '' }),
+    };
+    document.dispatchEvent(new Event('visitorConsentCollected'));
+    await settle();
+    const searches = named(enqueue, 'search');
+    expect(searches).toHaveLength(1);
+    expect(searches[0].event_data.query).toBe('own');
+  });
+
   test('not a Shopify storefront: nothing', async () => {
     mockNetwork({ waitForShopifyConsent: false });
     const sdk = loadSdk();
@@ -334,5 +384,17 @@ describe('readShopifyProductView', () => {
   test('no product data: null', () => {
     expect(readShopifyProductView({ location: { pathname: '/', search: '' } }, document)).toBeNull();
     expect(readShopifyProductView({ ShopifyAnalytics: { meta: { page: { pageType: 'home' } } } }, document)).toBeNull();
+  });
+});
+
+describe('readShopifySearch', () => {
+  test('no query or not a search page: null', () => {
+    expect(readShopifySearch({ location: { search: '' }, meta: { page: { pageType: 'searchresults' }, products: [] } })).toBeNull();
+    expect(readShopifySearch({ location: { search: '?q=x' }, meta: { page: { pageType: 'product' } } })).toBeNull();
+  });
+
+  test('no results: results_count 0', () => {
+    expect(readShopifySearch({ location: { search: '?q=zzz' }, meta: { page: { pageType: 'searchresults' }, products: [] } }))
+      .toEqual({ query: 'zzz', results_count: 0, tracked_via: 'dl_storefront' });
   });
 });

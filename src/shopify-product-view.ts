@@ -1,5 +1,5 @@
 /**
- * Shopify product views from dl.js.
+ * Shopify product views and searches from dl.js.
  *
  * On Shopify, `view_item` normally comes from the Datalyr Web Pixel
  * (`product_viewed`). Shopify only runs that pixel when the visitor allows
@@ -8,6 +8,7 @@
  * silent while dl.js may still track (the merchant chose not to wait for
  * consent). dl.js then sends the product view itself, with the same fields the
  * pixel sends, so funnels, the Ads view_item column and Meta ViewContent see it.
+ * Search results pages get the pixel's `search` the same way (Meta Search).
  */
 
 /** Whether Shopify will run the Web Pixel for this visitor: true / false, or null while unknown. */
@@ -97,6 +98,32 @@ export function readShopifyProductView(win: any, doc: Document): Record<string, 
       currency,
       tracked_via: 'dl_storefront',
     };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The search on a Shopify search results page, shaped like the pixel's
+ * `search` (search_submitted: query + results_count = matched variants), or
+ * null when this is not a search results page with a query.
+ */
+export function readShopifySearch(win: any): Record<string, unknown> | null {
+  try {
+    const meta = win?.ShopifyAnalytics?.meta ?? win?.meta;
+    if (meta?.page?.pageType !== 'searchresults') return null;
+    let query: string | null = null;
+    try {
+      query = new URLSearchParams(win.location?.search ?? '').get('q');
+    } catch {
+      query = null;
+    }
+    query = query ? query.trim() : '';
+    if (!query) return null;
+    const products: any[] = Array.isArray(meta.products) ? meta.products : [];
+    const resultsCount = products.reduce(
+      (sum, product) => sum + (Array.isArray(product?.variants) ? product.variants.length : 0), 0);
+    return { query, results_count: resultsCount, tracked_via: 'dl_storefront' };
   } catch {
     return null;
   }

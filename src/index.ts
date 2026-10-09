@@ -15,7 +15,7 @@ import { AutoIdentifyManager } from './auto-identify';
 import { StripeSessionWatcher } from './stripe-session';
 import { applyRemoteConfig, type SdkRemoteConfig } from './config';
 import { shopifyCartId } from './shopify-cart';
-import { readShopifyProductView, shopifyPixelWillRun } from './shopify-product-view';
+import { readShopifyProductView, readShopifySearch, shopifyPixelWillRun } from './shopify-product-view';
 import { ReplayLoader, REPLAY_ENDPOINT, replayMode, replayAttribution, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
 import {
@@ -127,7 +127,7 @@ class Datalyr {
   private initialPageViewReady = false;
   private initialPageViewSent = false;
   private shopifyProductViewSettled = false; // maybeTrackShopifyProductView: decided for this page load
-  private viewItemTrackedThisPage = false;   // the page sent its own view_item
+  private pageSentShopifyEvents = new Set<string>(); // view_item / search the page sent itself
   private trackingShopifyProductView = false;
   // Container lifecycle (see startContainer): created at most once per page.
   // containerGateReached = initializeAsync() has evaluated the container gate, so
@@ -623,7 +623,7 @@ class Datalyr {
       // event against the server-side CAPI event (dedup = event_id + event_name).
       const eventId = generateUUID();
 
-      if (eventName === 'view_item' && !this.trackingShopifyProductView) this.viewItemTrackedThisPage = true;
+      if ((eventName === 'view_item' || eventName === 'search') && !this.trackingShopifyProductView) this.pageSentShopifyEvents.add(eventName);
 
       // Measurement only: mark the first event after the visitor id was
       // recovered from the session record.
@@ -2514,9 +2514,9 @@ class Datalyr {
   }
 
   /**
-   * Send `view_item` on a Shopify product page when Shopify will not run the
-   * Datalyr Web Pixel for this visitor (it needs analytics AND marketing
-   * consent). Where the pixel runs it already sends view_item, so this stays
+   * Send `view_item` on a Shopify product page (and `search` on a search
+   * results page) when Shopify will not run the Datalyr Web Pixel for this
+   * visitor (it needs analytics AND marketing consent). Where the pixel runs it already sends view_item, so this stays
    * quiet; where it can't (a consent region with no answer, and the merchant
    * chose not to wait), this is the only view_item. Same gate as every other
    * dl.js event (shouldTrack(); an explicit decline blocks). Once per page
@@ -2529,10 +2529,6 @@ class Datalyr {
       // After the landing pageview (or once tracking is allowed, without one).
       if (this.config.trackPageViews ? !this.initialPageViewSent : !this.shouldTrack()) return;
       if (this.config.shopifyAutoViewItem === false || !this.isShopifyStorefront() || this.shopifyDesignMode()) {
-        this.shopifyProductViewSettled = true;
-        return;
-      }
-      if (this.viewItemTrackedThisPage) {
         this.shopifyProductViewSettled = true;
         return;
       }
@@ -2549,10 +2545,13 @@ class Datalyr {
       if (!this.shouldTrack()) return; // a later grant may still allow it
       this.shopifyProductViewSettled = true;
       const view = readShopifyProductView(window, document);
-      if (!view) return;
+      const search = view ? null : readShopifySearch(window);
+      const eventName = view ? 'view_item' : 'search';
+      const properties = view ?? search;
+      if (!properties || this.pageSentShopifyEvents.has(eventName)) return;
       this.trackingShopifyProductView = true;
       try {
-        this.track('view_item', view);
+        this.track(eventName, properties);
       } finally {
         this.trackingShopifyProductView = false;
       }
@@ -2860,7 +2859,7 @@ class Datalyr {
     this.initialPageViewReady = false;
     this.initialPageViewSent = false;
     this.shopifyProductViewSettled = false;
-    this.viewItemTrackedThisPage = false;
+    this.pageSentShopifyEvents.clear();
 
     // Clear any remaining data
     this.superProperties = {};
