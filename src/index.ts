@@ -15,6 +15,7 @@ import { AutoIdentifyManager } from './auto-identify';
 import { StripeSessionWatcher } from './stripe-session';
 import { applyRemoteConfig, type SdkRemoteConfig } from './config';
 import { shopifyCartId } from './shopify-cart';
+import { readShopifyProductView, readShopifySearch, shopifyPixelWillRun } from './shopify-product-view';
 import { ReplayLoader, REPLAY_ENDPOINT, replayMode, replayAttribution, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
 import {
@@ -125,6 +126,11 @@ class Datalyr {
   // then release it exactly once when consent allows tracking.
   private initialPageViewReady = false;
   private initialPageViewSent = false;
+  private shopifyProductViewSettled = false; // maybeTrackShopifyProductView: decided for this page load
+  private pageSentShopifyEvents = new Set<string>(); // view_item / search the page sent itself
+  private trackingShopifyProductView = false;
+  private pendingShopifyView: { eventName: string; properties: Record<string, unknown>; timer: ReturnType<typeof setTimeout> } | null = null;
+  private shopifyViewHoldMs = 2000; // see maybeTrackShopifyProductView
   // Container lifecycle (see startContainer): created at most once per page.
   // containerGateReached = initializeAsync() has evaluated the container gate, so
   // a later Shopify consent grant may start it (earlier grants are picked up by
@@ -523,6 +529,7 @@ class Datalyr {
         // pageview and release it from onShopifyConsentChanged() once allowed.
         this.initialPageViewReady = true;
         this.trackInitialPageViewOnce();
+        if (!this.config.trackPageViews) this.maybeTrackShopifyProductView();
 
         this.log('Async initialization complete');
       } catch (error) {
@@ -617,6 +624,10 @@ class Datalyr {
       // Meta Pixel co-fire below. Sharing it is what lets Meta dedupe the Pixel
       // event against the server-side CAPI event (dedup = event_id + event_name).
       const eventId = generateUUID();
+
+      if ((eventName === 'view_item' || eventName === 'search') && !this.trackingShopifyProductView) this.pageSentShopifyEvents.add(eventName);
+      // A held Shopify view goes first, so funnels see it before what followed it.
+      if (this.pendingShopifyView && !this.trackingShopifyProductView && !INTERNAL_SIGNAL_EVENTS.has(eventName)) this.sendPendingShopifyView();
 
       // Measurement only: mark the first event after the visitor id was
       // recovered from the session record.
@@ -2483,7 +2494,18 @@ class Datalyr {
       });
     }
 
+    this.maybeTrackShopifyProductView();
+
     this.log('Shopify consent collected — analytics allowed:', allowed, '— marketing blocked:', marketingBlocked);
+  }
+
+  /** The theme editor previews the storefront: not a visitor. */
+  private shopifyDesignMode(): boolean {
+    try {
+      return (window as any).Shopify?.designMode === true;
+    } catch {
+      return false;
+    }
   }
 
   /** Release the automatic landing pageview once, after init and consent. */
@@ -2492,6 +2514,72 @@ class Datalyr {
     if (!this.config.trackPageViews || !this.initialized || !this.shouldTrack()) return;
     this.initialPageViewSent = true;
     this.page();
+    this.maybeTrackShopifyProductView();
+  }
+
+  /**
+   * Send `view_item` on a Shopify product page (and `search` on a search
+   * results page) when Shopify will not run the Datalyr Web Pixel for this
+   * visitor (it needs analytics AND marketing consent). Where the pixel runs it already sends view_item, so this stays
+   * quiet; where it can't (a consent region with no answer, and the merchant
+   * chose not to wait), this is the only view_item. Same gate as every other
+   * dl.js event (shouldTrack(); an explicit decline blocks). Once per page
+   * load, after the landing pageview; re-run from onShopifyConsentChanged()
+   * until the Customer Privacy API has answered.
+   */
+  private maybeTrackShopifyProductView(): void {
+    try {
+      if (this.shopifyProductViewSettled || !this.initialPageViewReady) return;
+      // After the landing pageview (or once tracking is allowed, without one).
+      if (this.config.trackPageViews ? !this.initialPageViewSent : !this.shouldTrack()) return;
+      if (this.config.shopifyAutoViewItem === false || !this.isShopifyStorefront() || this.shopifyDesignMode()) {
+        this.shopifyProductViewSettled = true;
+        return;
+      }
+      const pixelRuns = shopifyPixelWillRun(this.getShopifyCustomerPrivacy());
+      if (pixelRuns === null) {
+        // Without an answer the pixel may still run: never risk a double count.
+        if (this.shopifyConsentUnresolvable) this.shopifyProductViewSettled = true;
+        return;
+      }
+      if (pixelRuns) {
+        this.shopifyProductViewSettled = true;
+        return;
+      }
+      if (!this.shouldTrack()) return; // a later grant may still allow it
+      this.shopifyProductViewSettled = true;
+      const view = readShopifyProductView(window, document);
+      const search = view ? null : readShopifySearch(window);
+      const eventName = view ? 'view_item' : 'search';
+      const properties = view ?? search;
+      if (!properties || this.pageSentShopifyEvents.has(eventName)) return;
+      // Held briefly: a visitor who accepts the banner on this page makes Shopify
+      // load the pixel, which then reports this view itself. Sent after the hold,
+      // or at once when the page is left; dropped if the pixel runs by then.
+      const timer = setTimeout(() => this.sendPendingShopifyView(), this.shopifyViewHoldMs);
+      this.pendingShopifyView = { eventName, properties, timer };
+    } catch (error) {
+      this.log('Shopify product view failed:', error);
+    }
+  }
+
+  private sendPendingShopifyView(): void {
+    const pending = this.pendingShopifyView;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingShopifyView = null;
+    try {
+      if (shopifyPixelWillRun(this.getShopifyCustomerPrivacy()) === true) return; // the pixel has it
+      if (!this.shouldTrack() || this.pageSentShopifyEvents.has(pending.eventName)) return;
+      this.trackingShopifyProductView = true;
+      try {
+        this.track(pending.eventName, pending.properties);
+      } finally {
+        this.trackingShopifyProductView = false;
+      }
+    } catch (error) {
+      this.log('Shopify product view failed:', error);
+    }
   }
 
   /**
@@ -2567,9 +2655,10 @@ class Datalyr {
     // non-terminal path (response-checked fetch drain that never erases the backlog).
     // The Shopify cart report goes first so the flush carries it (leaving for
     // checkout is when a widget-created cart is last seen).
-    this.unloadHandler = () => { this.reportShopifyCartFromCookie(); this.queue.forceFlush(true); };
+    this.unloadHandler = () => { this.sendPendingShopifyView(); this.reportShopifyCartFromCookie(); this.queue.forceFlush(true); };
     this.visibilityHandler = () => {
       if (document.visibilityState === 'hidden') {
+        this.sendPendingShopifyView();
         this.reportShopifyCartFromCookie();
         this.queue.forceFlush(false);
       }
@@ -2792,6 +2881,10 @@ class Datalyr {
     this.lastSpaPath = null;
     this.initialPageViewReady = false;
     this.initialPageViewSent = false;
+    this.shopifyProductViewSettled = false;
+    this.pageSentShopifyEvents.clear();
+    if (this.pendingShopifyView) clearTimeout(this.pendingShopifyView.timer);
+    this.pendingShopifyView = null;
 
     // Clear any remaining data
     this.superProperties = {};
