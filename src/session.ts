@@ -235,6 +235,15 @@ export class SessionManager {
   }
 
   /**
+   * Re-write the stored record now, so a consent change takes effect on it
+   * immediately: the visitor id is added on a grant and removed on a
+   * withdrawal / opt-out (the provider answers null then).
+   */
+  refreshStoredRecord(): void {
+    this.saveSession();
+  }
+
+  /**
    * Get session timeout
    */
   getTimeout(): number {

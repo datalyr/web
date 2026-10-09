@@ -21,6 +21,7 @@ export class IdentityManager {
   // generated id is kept in MEMORY only — no cookie / localStorage write. Events don't
   // send anyway; a later optIn()/consent grant persists on the next identify/reset.
   private persistNewId: boolean;
+  private sessionTimeout: number;
   /** WEB-26: bumps whenever the persisted identity changes, so an in-flight
    *  encrypted write — or read (D01) — can tell it has been superseded. */
   private piiGeneration = 0;
@@ -30,8 +31,9 @@ export class IdentityManager {
    *  after a logout or a consent withdrawal cannot land on the new identity. */
   private inFlightHydration: Promise<void> | null = null;
 
-  constructor(options: { persistNewId?: boolean } = {}) {
+  constructor(options: { persistNewId?: boolean; sessionTimeout?: number } = {}) {
     this.persistNewId = options.persistNewId !== false;
+    this.sessionTimeout = options.sessionTimeout ?? 30 * 60 * 1000;
     this.anonymousId = this.getOrCreateAnonymousId();
     this.userId = this.getStoredUserId();
   }
@@ -77,9 +79,12 @@ export class IdentityManager {
     // elsewhere, measured 2026-10-08) reload the ad landing page mid-session
     // with the session intact and both the cookie and dl_anonymous_id gone,
     // so a fresh id split one visit into two visitors. The record is this
-    // browser's own storage (never the URL) and reset() always starts a new
-    // session, so this cannot resurrect a logged-out visitor.
-    const fromSession = this.visitorIdFromSessionRecord();
+    // browser's own storage (never the URL), only a LIVE session counts (an
+    // expired record means the visit is over: a fresh id, as before 1.9.6), the
+    // record carries the id only while tracking is allowed, and reset() always
+    // starts a new session. Nothing is recovered for a visitor whose id must
+    // stay in memory (FSR-107).
+    const fromSession = this.persistNewId ? this.visitorIdFromSessionRecord() : null;
     if (fromSession) {
       this.recoveredFromSession = true;
       this.persistAnonymousId(fromSession);
@@ -128,7 +133,12 @@ export class IdentityManager {
   private visitorIdFromSessionRecord(): string | null {
     try {
       const record = storage.get('dl_session_data');
-      const id = record && typeof record === 'object' ? record.visitorId : null;
+      if (!record || typeof record !== 'object') return null;
+      // The same test SessionManager uses to continue a session.
+      const lastActivity = Number(record.lastActivity);
+      if (record.isActive !== true || !Number.isFinite(lastActivity)
+        || Date.now() - lastActivity >= this.sessionTimeout) return null;
+      const id = record.visitorId;
       return typeof id === 'string' && VISITOR_ID_RE.test(id) ? id : null;
     } catch {
       return null;
@@ -140,7 +150,16 @@ export class IdentityManager {
    * must stay in memory only (FSR-107).
    */
   getPersistableAnonymousId(): string | null {
-    return this.persistNewId ? this.anonymousId : null;
+    if (!this.persistNewId) return null;
+    // Another tab may have moved this browser to a new visitor (reset() on
+    // logout): never stamp the old id over it.
+    try {
+      const stored = storage.get('dl_anonymous_id');
+      if (typeof stored === 'string' && stored && stored !== this.anonymousId) return null;
+    } catch {
+      // unreadable storage: stamp what this page holds
+    }
+    return this.anonymousId;
   }
 
   /**

@@ -90,7 +90,7 @@ describe('IdentityManager recovers a lost visitor id from the session record', (
   afterEach(clearAll);
 
   test('cookie and dl_anonymous_id gone, record kept: the same visitor comes back and is re-persisted', () => {
-    storage.set('dl_session_data', { id: 'sess_x', isActive: true, visitorId: VISITOR });
+    storage.set('dl_session_data', { id: 'sess_x', isActive: true, lastActivity: Date.now(), visitorId: VISITOR });
     const identity = new IdentityManager();
     expect(identity.getAnonymousId()).toBe(VISITOR);
     expect(identity.recoveredFromSession).toBe(true);
@@ -101,7 +101,7 @@ describe('IdentityManager recovers a lost visitor id from the session record', (
   test('a persisted visitor id still wins over the record', () => {
     const existing = 'anon_11111111-1111-4111-8111-111111111111';
     storage.set('dl_anonymous_id', existing);
-    storage.set('dl_session_data', { id: 'sess_x', isActive: true, visitorId: VISITOR });
+    storage.set('dl_session_data', { id: 'sess_x', isActive: true, lastActivity: Date.now(), visitorId: VISITOR });
     const identity = new IdentityManager();
     expect(identity.getAnonymousId()).toBe(existing);
     expect(identity.recoveredFromSession).toBe(false);
@@ -110,12 +110,48 @@ describe('IdentityManager recovers a lost visitor id from the session record', (
   test('a record without a well-formed visitor id mints a fresh one', () => {
     for (const visitorId of [undefined, 'not-an-id', 'anon_' + 'A'.repeat(500), 42]) {
       clearAll();
-      storage.set('dl_session_data', { id: 'sess_x', isActive: true, visitorId });
+      storage.set('dl_session_data', { id: 'sess_x', isActive: true, lastActivity: Date.now(), visitorId });
       const identity = new IdentityManager();
       expect(identity.getAnonymousId()).toMatch(/^anon_[0-9a-f-]{36}$/i);
       expect(identity.getAnonymousId()).not.toBe(visitorId);
       expect(identity.recoveredFromSession).toBe(false);
     }
+  });
+
+  test('an expired or ended session record is not recovered (the visit is over)', () => {
+    for (const record of [
+      { id: 'sess_x', isActive: true, lastActivity: Date.now() - 31 * 60 * 1000, visitorId: VISITOR },
+      { id: 'sess_x', isActive: false, lastActivity: Date.now(), visitorId: VISITOR },
+      { id: 'sess_x', isActive: true, visitorId: VISITOR },
+    ]) {
+      clearAll();
+      storage.set('dl_session_data', record);
+      const identity = new IdentityManager();
+      expect(identity.getAnonymousId()).not.toBe(VISITOR);
+      expect(identity.recoveredFromSession).toBe(false);
+    }
+  });
+
+  test('the session timeout decides what counts as live', () => {
+    storage.set('dl_session_data', { id: 'sess_x', isActive: true, lastActivity: Date.now() - 45 * 60 * 1000, visitorId: VISITOR });
+    expect(new IdentityManager({ sessionTimeout: 60 * 60 * 1000 }).getAnonymousId()).toBe(VISITOR);
+  });
+
+  test('nothing is recovered for a visitor whose id must stay in memory (FSR-107)', () => {
+    storage.set('dl_session_data', { id: 'sess_x', isActive: true, lastActivity: Date.now(), visitorId: VISITOR });
+    const identity = new IdentityManager({ persistNewId: false });
+    expect(identity.getAnonymousId()).not.toBe(VISITOR);
+    expect(identity.recoveredFromSession).toBe(false);
+  });
+
+  test('another tab moved this browser to a new visitor: the old id is not stamped over it', () => {
+    const identity = new IdentityManager();
+    const session = new SessionManager();
+    session.setVisitorIdProvider(() => identity.getPersistableAnonymousId());
+    storage.set('dl_anonymous_id', 'anon_22222222-2222-4222-8222-222222222222'); // the other tab's reset()
+    session.refreshStoredRecord();
+    expect(storedRecord()?.visitorId).toBeUndefined();
+    session.destroy();
   });
 
   test('no record at all mints a fresh one', () => {
@@ -156,6 +192,28 @@ describe('end to end through the SDK', () => {
     expect(reloaded.getSessionId()).toBe(sessionId);
     expect(queued[0].event_data.visitor_recovered).toBe('session');
     expect(queued[1].event_data.visitor_recovered).toBeUndefined();
+  });
+
+  test('optOut() drops the visitor id from the record at once, and activity does not put it back', async () => {
+    const sdk: any = await makeSdk();
+    expect(storedRecord()?.visitorId).toBe(sdk.getAnonymousId());
+    sdk.optOut();
+    expect(storedRecord()?.visitorId).toBeUndefined();
+    sdk.session.updateActivity('scroll');
+    expect(storedRecord()?.visitorId).toBeUndefined();
+    loseVisitorId();
+    const reloaded = await makeSdk();
+    expect(reloaded.getAnonymousId()).not.toBe(sdk.getAnonymousId());
+    document.cookie = '__dl_opt_out=; path=/; max-age=0';
+  });
+
+  test('analytics consent withdrawn: the record loses the id; granted again: it is back', async () => {
+    const sdk: any = await makeSdk();
+    sdk.setConsent({ analytics: false });
+    expect(storedRecord()?.visitorId).toBeUndefined();
+    sdk.setConsent({ analytics: true });
+    expect(storedRecord()?.visitorId).toBe(sdk.getAnonymousId());
+    storage.remove('dl_consent');
   });
 
   test('reset() starts a new session whose record carries the new visitor, so recovery never resurrects the old one', async () => {
