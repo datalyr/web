@@ -105,7 +105,8 @@ export function readShopifyProductView(win: any, doc: Document): Record<string, 
 
 /**
  * The search on a Shopify search results page, shaped like the pixel's
- * `search` (search_submitted: query + results_count = matched variants), or
+ * `search` (search_submitted: query + results_count, which the pixel reports
+ * as the number of products on the page: 1 for one 2-variant match), or
  * null when this is not a search results page with a query.
  */
 export function readShopifySearch(win: any): Record<string, unknown> | null {
@@ -120,9 +121,7 @@ export function readShopifySearch(win: any): Record<string, unknown> | null {
     }
     query = query ? query.trim() : '';
     if (!query) return null;
-    const products: any[] = Array.isArray(meta.products) ? meta.products : [];
-    const resultsCount = products.reduce(
-      (sum, product) => sum + (Array.isArray(product?.variants) ? product.variants.length : 0), 0);
+    const resultsCount = Array.isArray(meta.products) ? meta.products.length : 0;
     return { query, results_count: resultsCount, tracked_via: 'dl_storefront' };
   } catch {
     return null;

@@ -294,10 +294,10 @@ describe('dl.js view_item on Shopify product pages', () => {
 
   const SEARCH_META = {
     page: { pageType: 'searchresults', requestId: 'req-s' },
-    products: [{ id: 8087288315952, variants: [{ id: 1 }, { id: 2 }] }],
+    products: [{ id: 8087288315952, variants: [{ id: 1 }, { id: 2 }] }, { id: 8087288315999, variants: [{ id: 3 }] }],
   };
 
-  test('search results page, pixel will not run: one search like the pixel (query + matched variants)', async () => {
+  test('search results page, pixel will not run: one search like the pixel (query + products on the page)', async () => {
     window.history.replaceState({}, '', '/search?q=necklace');
     mockNetwork({ waitForShopifyConsent: false });
     stubShopify({ meta: SEARCH_META });
@@ -306,6 +306,21 @@ describe('dl.js view_item on Shopify product pages', () => {
     expect(searches).toHaveLength(1);
     expect(searches[0].event_data).toEqual(expect.objectContaining({ query: 'necklace', results_count: 2, tracked_via: 'dl_storefront' }));
     expect(named(enqueue, 'view_item')).toHaveLength(0);
+  });
+
+  test('a product page sends no search', async () => {
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({});
+    const enqueue = await boot();
+    expect(named(enqueue, 'search')).toHaveLength(0);
+  });
+
+  test('search with trackPageViews: false', async () => {
+    window.history.replaceState({}, '', '/search?q=necklace');
+    mockNetwork({ waitForShopifyConsent: false });
+    stubShopify({ meta: SEARCH_META });
+    const enqueue = await boot({ ...baseConfig, trackPageViews: false });
+    expect(named(enqueue, 'search')).toHaveLength(1);
   });
 
   test('search results page, pixel runs: no search from dl.js', async () => {
