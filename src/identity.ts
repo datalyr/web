@@ -82,9 +82,10 @@ export class IdentityManager {
     // browser's own storage (never the URL), only a LIVE session counts (an
     // expired record means the visit is over: a fresh id, as before 1.9.6), the
     // record carries the id only while tracking is allowed, and reset() always
-    // starts a new session. Nothing is recovered for a visitor whose id must
-    // stay in memory (FSR-107).
-    const fromSession = this.persistNewId ? this.visitorIdFromSessionRecord() : null;
+    // starts a new session. While ids must stay in memory (FSR-107; on Shopify
+    // that is also every page load before the Customer Privacy API answers) the
+    // id is recovered into memory only and written on a grant.
+    const fromSession = this.visitorIdFromSessionRecord();
     if (fromSession) {
       this.recoveredFromSession = true;
       this.persistAnonymousId(fromSession);
@@ -154,8 +155,8 @@ export class IdentityManager {
     // Another tab may have moved this browser to a new visitor (reset() on
     // logout): never stamp the old id over it.
     try {
-      const stored = storage.get('dl_anonymous_id');
-      if (typeof stored === 'string' && stored && stored !== this.anonymousId) return null;
+      const stored = storage.getString('dl_anonymous_id');
+      if (stored && stored !== this.anonymousId) return null;
     } catch {
       // unreadable storage: stamp what this page holds
     }

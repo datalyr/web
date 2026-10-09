@@ -137,11 +137,14 @@ describe('IdentityManager recovers a lost visitor id from the session record', (
     expect(new IdentityManager({ sessionTimeout: 60 * 60 * 1000 }).getAnonymousId()).toBe(VISITOR);
   });
 
-  test('nothing is recovered for a visitor whose id must stay in memory (FSR-107)', () => {
+  test('ids must stay in memory for now (e.g. Shopify before consent loads): recovered into memory, written on a grant', () => {
     storage.set('dl_session_data', { id: 'sess_x', isActive: true, lastActivity: Date.now(), visitorId: VISITOR });
     const identity = new IdentityManager({ persistNewId: false });
-    expect(identity.getAnonymousId()).not.toBe(VISITOR);
-    expect(identity.recoveredFromSession).toBe(false);
+    expect(identity.getAnonymousId()).toBe(VISITOR);
+    expect(storage.getString('dl_anonymous_id')).toBeNull();
+    expect(cookies.get('__dl_visitor_id')).toBeNull();
+    identity.enablePersistence();
+    expect(storage.getString('dl_anonymous_id')).toBe(VISITOR);
   });
 
   test('another tab moved this browser to a new visitor: the old id is not stamped over it', () => {
