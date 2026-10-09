@@ -15,6 +15,7 @@ import { AutoIdentifyManager } from './auto-identify';
 import { StripeSessionWatcher } from './stripe-session';
 import { applyRemoteConfig, type SdkRemoteConfig } from './config';
 import { shopifyCartId } from './shopify-cart';
+import { readShopifyProductView, shopifyPixelWillRun } from './shopify-product-view';
 import { ReplayLoader, REPLAY_ENDPOINT, replayMode, replayAttribution, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
 import {
@@ -125,6 +126,9 @@ class Datalyr {
   // then release it exactly once when consent allows tracking.
   private initialPageViewReady = false;
   private initialPageViewSent = false;
+  private shopifyProductViewSettled = false; // maybeTrackShopifyProductView: decided for this page load
+  private viewItemTrackedThisPage = false;   // the page sent its own view_item
+  private trackingShopifyProductView = false;
   // Container lifecycle (see startContainer): created at most once per page.
   // containerGateReached = initializeAsync() has evaluated the container gate, so
   // a later Shopify consent grant may start it (earlier grants are picked up by
@@ -617,6 +621,8 @@ class Datalyr {
       // Meta Pixel co-fire below. Sharing it is what lets Meta dedupe the Pixel
       // event against the server-side CAPI event (dedup = event_id + event_name).
       const eventId = generateUUID();
+
+      if (eventName === 'view_item' && !this.trackingShopifyProductView) this.viewItemTrackedThisPage = true;
 
       // Measurement only: mark the first event after the visitor id was
       // recovered from the session record.
@@ -2483,6 +2489,8 @@ class Datalyr {
       });
     }
 
+    this.maybeTrackShopifyProductView();
+
     this.log('Shopify consent collected — analytics allowed:', allowed, '— marketing blocked:', marketingBlocked);
   }
 
@@ -2492,6 +2500,53 @@ class Datalyr {
     if (!this.config.trackPageViews || !this.initialized || !this.shouldTrack()) return;
     this.initialPageViewSent = true;
     this.page();
+    this.maybeTrackShopifyProductView();
+  }
+
+  /**
+   * Send `view_item` on a Shopify product page when Shopify will not run the
+   * Datalyr Web Pixel for this visitor (it needs analytics AND marketing
+   * consent). Where the pixel runs it already sends view_item, so this stays
+   * quiet; where it can't (a consent region with no answer, and the merchant
+   * chose not to wait), this is the only view_item. Same gate as every other
+   * dl.js event (shouldTrack(); an explicit decline blocks). Once per page
+   * load, after the landing pageview; re-run from onShopifyConsentChanged()
+   * until the Customer Privacy API has answered.
+   */
+  private maybeTrackShopifyProductView(): void {
+    try {
+      if (this.shopifyProductViewSettled || !this.initialPageViewSent) return;
+      if (this.config.shopifyAutoViewItem === false || !this.isShopifyStorefront()) {
+        this.shopifyProductViewSettled = true;
+        return;
+      }
+      if (this.viewItemTrackedThisPage) {
+        this.shopifyProductViewSettled = true;
+        return;
+      }
+      const pixelRuns = shopifyPixelWillRun(this.getShopifyCustomerPrivacy());
+      if (pixelRuns === null) {
+        // Without an answer the pixel may still run: never risk a double count.
+        if (this.shopifyConsentUnresolvable) this.shopifyProductViewSettled = true;
+        return;
+      }
+      if (pixelRuns) {
+        this.shopifyProductViewSettled = true;
+        return;
+      }
+      if (!this.shouldTrack()) return; // a later grant may still allow it
+      this.shopifyProductViewSettled = true;
+      const view = readShopifyProductView(window, document);
+      if (!view) return;
+      this.trackingShopifyProductView = true;
+      try {
+        this.track('view_item', view);
+      } finally {
+        this.trackingShopifyProductView = false;
+      }
+    } catch (error) {
+      this.log('Shopify product view failed:', error);
+    }
   }
 
   /**
@@ -2792,6 +2847,8 @@ class Datalyr {
     this.lastSpaPath = null;
     this.initialPageViewReady = false;
     this.initialPageViewSent = false;
+    this.shopifyProductViewSettled = false;
+    this.viewItemTrackedThisPage = false;
 
     // Clear any remaining data
     this.superProperties = {};
