@@ -107,6 +107,7 @@ class Datalyr {
   private inAppHandoffTimer: ReturnType<typeof setInterval> | null = null;
   private inAppHandoffWrite: (() => void) | null = null;
   private inAppHandoffReported = false;
+  private visitorRecoveryReported = false;
   // Session replay (replay-loader.ts): created on the first sync that allows it.
   private replay: ReplayLoader | null = null;
   private replayDisabledAtInit = false; // init({ replay: false })
@@ -239,8 +240,10 @@ class Datalyr {
     // FSR-107: don't write a persistent tracking cookie/localStorage id for a visitor who
     // is opted-out / GPC / DNT at init — the id stays in memory only (events don't send
     // anyway). shouldTrack() is computable here (config/opt-out/consent are all set above).
-    this.identity = new IdentityManager({ persistNewId: this.shouldTrack() });
+    this.identity = new IdentityManager({ persistNewId: this.shouldTrack(), sessionTimeout: this.config.sessionTimeout });
     this.session = new SessionManager(this.config.sessionTimeout);
+    // Only while tracking is allowed: a withdrawal / opt-out must not keep the id at rest.
+    this.session.setVisitorIdProvider(() => (this.shouldTrack() ? this.identity.getPersistableAnonymousId() : null));
     this.replayDisabledAtInit = config.replay === false;
     this.heatmapsDisabledAtInit = config.heatmaps === false;
     // Replay: flush the old session's recording under its own id, then re-check the
@@ -614,6 +617,13 @@ class Datalyr {
       // Meta Pixel co-fire below. Sharing it is what lets Meta dedupe the Pixel
       // event against the server-side CAPI event (dedup = event_id + event_name).
       const eventId = generateUUID();
+
+      // Measurement only: mark the first event after the visitor id was
+      // recovered from the session record.
+      if (this.identity.recoveredFromSession && !this.visitorRecoveryReported && !INTERNAL_SIGNAL_EVENTS.has(eventName)) {
+        this.visitorRecoveryReported = true;
+        properties = { ...properties, visitor_recovered: 'session' };
+      }
 
       // Create event payload
       const payload = this.createEventPayload(eventName, properties, eventId);
@@ -1199,6 +1209,7 @@ class Datalyr {
       return;
     }
     this.optedOut = true;
+    this.session.refreshStoredRecord(); // drop the visitor id from the session record
     this.syncInAppHandoff(); // remove the visitor id from the address bar now, not in 30s
     this.syncReplay(); // stop and discard the recording
     this.cookies.set('__dl_opt_out', 'true', this.config.cookieExpires);
@@ -1260,6 +1271,7 @@ class Datalyr {
     this.queue.setEnabled(this.shouldTrack());
     // TR-15 (P3): opt-in → persist the in-memory anon id now (see onShopifyConsentChanged).
     if (this.shouldTrack()) this.identity.enablePersistence();
+    this.session.refreshStoredRecord();
     this.syncInAppHandoff();
     this.syncReplay();
     this.log('User opted in');
@@ -1325,6 +1337,7 @@ class Datalyr {
       // TR-15 (P3): grant → persist the in-memory anon id now (see onShopifyConsentChanged).
       this.identity.enablePersistence();
     }
+    this.session.refreshStoredRecord(); // the record's visitor id follows the decision
     this.syncInAppHandoff(); // grant starts the writer; withdrawal removes the token now
     this.syncReplay(); // withdrawal (analytics or marketing) stops and discards the recording
 
@@ -2418,6 +2431,7 @@ class Datalyr {
     // visitor declined at init keeps a memory-only id and this session's events land under a
     // visitor_id that vanishes on the next page load. Idempotent.
     if (allowed) this.identity.enablePersistence();
+    this.session.refreshStoredRecord(); // the record's visitor id follows the decision
     this.syncInAppHandoff();
     this.syncReplay();
     // Late grant: the init-time container gate read false (Customer Privacy API
