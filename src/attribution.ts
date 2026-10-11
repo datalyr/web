@@ -9,6 +9,11 @@ import type { Attribution, TouchPoint } from './types';
 
 export class AttributionManager {
   private static readonly KLAVIYO_BINDING_KEY = 'dl_klaviyo_profile_binding';
+  /** Last twclid this browser took from a URL or a referrer (see recoverReferrerTwclid). */
+  static readonly SEEN_TWCLID_KEY = 'dl_seen_twclid';
+  // AppLovin's pixel accepts only a UUID v4 browser id; anything else is dropped.
+  private static readonly AXWRT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  private referrerTwclidChecked = false;
   private static readonly KLAVIYO_BINDING_TTL_MS = 10 * 60 * 1000;
   private attributionWindow: number;
   private trackedParams: string[];
@@ -190,24 +195,39 @@ export class AttributionManager {
   }
 
   /**
-   * twclid from document.referrer's query string (X pixel precedence: URL, then referrer).
-   * Skipped when the stored last touch already carries the same value: that is the
-   * visitor's next internal page after the landing that had it, which the persisted touch
-   * already covers, and re-capturing it would only re-stamp the touch as a fresh click.
+   * X's pixel takes twclid from the URL, then from document.referrer's query string (then
+   * its _twclid cookie, read in captureAdCookies under its own key). The referrer case is a
+   * landing page that redirected, or was left, before dl.js read its URL.
+   *
+   * Decided ONCE per document, when the params cache is first filled: a recovered value is
+   * injected into the params so it behaves exactly like a URL twclid for every later
+   * getAttributionData() call on this page (no flip-flopping between calls). Every twclid
+   * taken from a URL or a referrer is recorded under SEEN_TWCLID_KEY, and a referrer value
+   * equal to it is never recovered again: that covers the next internal page after a landing
+   * that carried it, and a reload / back / restored tab of a page whose referrer had it,
+   * which must not overwrite a newer touch.
    */
-  private twclidFromReferrer(): string | null {
+  private recoverReferrerTwclid(params: Record<string, string>): void {
+    const remember = (value: string) => {
+      if (this.isMarketingAllowed()) storage.set(AttributionManager.SEEN_TWCLID_KEY, value);
+    };
+    if (params.twclid) {
+      remember(params.twclid);
+      return;
+    }
+    if (this.referrerTwclidChecked) return;
+    this.referrerTwclidChecked = true;
     const referrer = typeof document !== 'undefined' ? document.referrer : '';
-    if (!referrer || referrer.indexOf('twclid=') === -1) return null;
+    if (!referrer || referrer.indexOf('twclid=') === -1) return;
     let value: string | undefined;
     try {
       value = getAllQueryParams(new URL(referrer).search).twclid;
     } catch {
-      return null;
+      return;
     }
-    if (!value) return null;
-    const stored = storage.get('dl_last_touch');
-    if (stored && stored.twclid === value) return null;
-    return value;
+    if (!value || storage.get(AttributionManager.SEEN_TWCLID_KEY) === value) return;
+    params.twclid = value;
+    remember(value);
   }
 
   /**
@@ -236,6 +256,7 @@ export class AttributionManager {
     const params = this.queryParamsCache || getAllQueryParams();
     if (!this.queryParamsCache) {
       this.queryParamsCache = params;
+      this.recoverReferrerTwclid(params);
     }
 
     this.captureKlaviyoProfileBinding(params);
@@ -291,21 +312,6 @@ export class AttributionManager {
           attribution.clickIdType = canonical;
         }
         attribution[canonical] = value;
-      }
-    }
-
-    // X's own pixel takes twclid from the URL, then from document.referrer's query
-    // string, then from its _twclid cookie (the cookie is read in captureAdCookies and
-    // stays under its own key). The referrer case is a landing page that redirected
-    // (or was navigated away from) before dl.js read its URL.
-    if (!attribution.twclid) {
-      const twclid = this.twclidFromReferrer();
-      if (twclid) {
-        if (!attribution.clickId) {
-          attribution.clickId = twclid;
-          attribution.clickIdType = 'twclid';
-        }
-        attribution.twclid = twclid;
       }
     }
 
@@ -488,9 +494,11 @@ export class AttributionManager {
 
     // AppLovin pixel: _axeid (its copy of aleid), the browser id (UUID v4) and _axart (its
     // copy of alart), raw. The browser id prefers the server-mirrored `axwrt` cookie over
-    // the pixel's `_axwrt`, as the AppLovin pixel does; either ships as `_axwrt`.
+    // the pixel's `_axwrt`, as the AppLovin pixel does; either ships as `_axwrt`, and only
+    // when it is a UUID v4 (the pixel's own check).
     adCookies._axeid = cookies.get('_axeid');
-    adCookies._axwrt = cookies.get('axwrt') || cookies.get('_axwrt');
+    adCookies._axwrt = [cookies.get('axwrt'), cookies.get('_axwrt')]
+      .find((v): v is string => !!v && AttributionManager.AXWRT_RE.test(v)) ?? null;
     adCookies._axart = cookies.get('_axart');
 
     // LinkedIn Insight Tag's first-party cookie. Its name is the URL param's, so it ships

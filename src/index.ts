@@ -1118,6 +1118,7 @@ class Datalyr {
     // already de-links the visitor server-side.)
     storage.remove('dl_first_touch');
     storage.remove('dl_last_touch');
+    storage.remove(AttributionManager.SEEN_TWCLID_KEY);
     this.session.createNewSession();
     this.syncReplay();
     this.log('User reset');
@@ -1321,6 +1322,7 @@ class Datalyr {
     // directly above.
     storage.remove('dl_first_touch');
     storage.remove('dl_last_touch');
+    storage.remove(AttributionManager.SEEN_TWCLID_KEY);
     this.log('User opted out');
   }
 
@@ -1403,6 +1405,7 @@ class Datalyr {
       // marketing attribution at rest either.
       storage.remove('dl_first_touch');
       storage.remove('dl_last_touch');
+      storage.remove(AttributionManager.SEEN_TWCLID_KEY);
     } else {
       // TR-15 (P3): grant → persist the in-memory anon id now (see onShopifyConsentChanged).
       this.identity.enablePersistence();

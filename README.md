@@ -545,7 +545,8 @@ A URL carrying several click IDs sends all of them. `clickIdType` takes the firs
 the order of the table above. Any click ID forces `medium` to `cpc`.
 
 When the page URL has no `twclid`, the SDK takes it from the query string of
-`document.referrer`, as X's own pixel does. `aleid` and `alart` are captured **as of 1.9.9**.
+`document.referrer`, as X's own pixel does, once per page load; a referrer `twclid` the
+browser has already seen is not taken again. `aleid` and `alart` are captured **as of 1.9.9**.
 `alart` is an app-user id, not a click: it never becomes `clickIdType`, never makes the
 visit paid, and on its own never replaces the stored touch.
 
@@ -575,7 +576,7 @@ arrives as `source`.
 | TikTok | `_ttp`, `_ttc` | No |
 | Snapchat | `_scid` | No |
 | X | `_twclid`, `_twpid` | No |
-| AppLovin | `_axeid`, `_axart`, `axwrt` or `_axwrt` (sent as `_axwrt`, `axwrt` first) | No |
+| AppLovin | `_axeid`, `_axart`, `axwrt` or `_axwrt` (sent as `_axwrt`, `axwrt` first, UUID v4 only) | No |
 | LinkedIn | `li_fat_id`, sent as `_li_fat_id` | No |
 
 Cookies are sent under their own names and never fill a click-ID field. `_twclid` holds

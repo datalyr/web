@@ -39,6 +39,7 @@ const X_PIXEL_TWCLID = encodeURIComponent(JSON.stringify({
   twclid: '26l6412g5p4iyj65a2oic2ayg2', pixelVersion: '2.4.11', timestamp: '1760000000000', source: 1,
 }));
 const AXWRT = '3f2b8c1e-9a4d-4e6f-8b2a-1c3d5e7f9a0b';
+const AXWRT_SERVER = 'a1b2c3d4-e5f6-4a7b-9c8d-0e1f2a3b4c5d';
 
 describe('AppLovin aleid / alart URL click ids', () => {
   beforeEach(() => { clearAll(); setPage('', ''); });
@@ -194,16 +195,26 @@ describe('X / AppLovin / LinkedIn cookies under their own event_data keys', () =
 
   describe('AppLovin axwrt / _axwrt / _axart', () => {
     test('the server-mirrored axwrt wins over _axwrt, shipped as _axwrt', () => {
-      setRawCookie('axwrt', 'server-mirrored-uuid');
+      setRawCookie('axwrt', AXWRT_SERVER);
       setRawCookie('_axwrt', AXWRT);
       const data = new AttributionManager().getAttributionData() as any;
-      expect(data._axwrt).toBe('server-mirrored-uuid');
+      expect(data._axwrt).toBe(AXWRT_SERVER);
       expect(data.axwrt).toBeUndefined();
     });
 
+    test('only a UUID v4 is kept; an invalid axwrt falls back to a valid _axwrt', () => {
+      for (const bad of ['not-a-uuid', '3f2b8c1e-9a4d-1e6f-8b2a-1c3d5e7f9a0b', '3f2b8c1e-9a4d-4e6f-7b2a-1c3d5e7f9a0b', `${AXWRT}x`, ' ' + AXWRT]) {
+        setRawCookie('_axwrt', encodeURIComponent(bad));
+        expect((new AttributionManager().getAttributionData() as any)._axwrt).toBeUndefined();
+      }
+      setRawCookie('axwrt', 'garbage');
+      setRawCookie('_axwrt', AXWRT.toUpperCase());
+      expect((new AttributionManager().getAttributionData() as any)._axwrt).toBe(AXWRT.toUpperCase());
+    });
+
     test('axwrt alone, or _axwrt alone, fills _axwrt', () => {
-      setRawCookie('axwrt', 'only-server');
-      expect((new AttributionManager().getAttributionData() as any)._axwrt).toBe('only-server');
+      setRawCookie('axwrt', AXWRT_SERVER);
+      expect((new AttributionManager().getAttributionData() as any)._axwrt).toBe(AXWRT_SERVER);
       document.cookie = 'axwrt=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
       setRawCookie('_axwrt', AXWRT);
       expect((new AttributionManager().getAttributionData() as any)._axwrt).toBe(AXWRT);
@@ -218,7 +229,7 @@ describe('X / AppLovin / LinkedIn cookies under their own event_data keys', () =
     });
 
     test('marketing DECLINED strips the axwrt-sourced _axwrt and _axart', () => {
-      setRawCookie('axwrt', 'server-mirrored-uuid');
+      setRawCookie('axwrt', AXWRT_SERVER);
       setRawCookie('_axart', 'axart-raw.1');
       const data = new AttributionManager({ marketingAllowed: () => false }).getAttributionData() as any;
       expect(data._axwrt).toBeUndefined();
@@ -332,6 +343,90 @@ describe('twclid from document.referrer', () => {
     expect(a.twclid).toBe('ref_click');
   });
 
+  const lastTouch = () => storage.get('dl_last_touch');
+
+  test('BLOCKER regression: decided once per page, same answer on every call (same-site referrer + utm)', () => {
+    setPage('?utm_campaign=spring', 'http://localhost/?twclid=REF1');
+    const attr = new AttributionManager();
+    for (let i = 0; i < 4; i++) {
+      const d = attr.getAttributionData() as any;
+      expect([d.twclid, d.clickIdType, d.medium]).toEqual(['REF1', 'twclid', 'cpc']);
+      expect(lastTouch().twclid).toBe('REF1');
+    }
+  });
+
+  test('BLOCKER regression: decided once per page, same answer on every call (external referrer)', () => {
+    setPage('', 'https://lp.other-brand.com/?twclid=REF2');
+    const attr = new AttributionManager();
+    for (let i = 0; i < 4; i++) {
+      const d = attr.getAttributionData() as any;
+      expect([d.twclid, d.clickIdType, d.source, d.medium]).toEqual(['REF2', 'twclid', 'twitter', 'cpc']);
+    }
+  });
+
+  test('a recovered twclid survives an SPA route change in the same document without being re-recovered', () => {
+    // Same-site referrer (a landing that redirected): an external referrer host re-scores
+    // as `referral` on every SPA route for any click id, which is unrelated to recovery.
+    setPage('', 'http://localhost/landing?twclid=REF4');
+    const attr = new AttributionManager();
+    attr.getAttributionData();
+    const storedAt = lastTouch().captured_at;
+    attr.clearCache();
+    window.history.replaceState({}, '', '/next-route');
+    const d = attr.getAttributionData() as any;
+    expect(d.twclid).toBe('REF4'); // via the stored touch
+    expect(lastTouch().captured_at).toBe(storedAt);
+  });
+
+  test('SHOULD-FIX regression: a reload of a page whose referrer had twclid never overwrites a newer touch', () => {
+    setPage('', 'http://localhost/?twclid=REF3');
+    new AttributionManager().getAttributionData();
+    expect(lastTouch().twclid).toBe('REF3');
+
+    setPage('?utm_source=newsletter&utm_campaign=oct', 'http://localhost/b');
+    new AttributionManager().getAttributionData();
+    expect(lastTouch().source).toBe('newsletter');
+
+    // reload / back without bfcache / restored tab: a NEW document, same referrer
+    setPage('', 'http://localhost/?twclid=REF3');
+    const d = new AttributionManager().getAttributionData() as any;
+    expect(lastTouch().source).toBe('newsletter');
+    expect(d.source).toBe('newsletter');
+    expect(d.clickIdType).toBeUndefined();
+  });
+
+  test('a NEW twclid in the referrer is still recovered after an older one was seen', () => {
+    setPage('', 'https://lp.other-brand.com/?twclid=OLD');
+    new AttributionManager().getAttributionData();
+    setPage('', 'https://lp.other-brand.com/?twclid=NEW');
+    const d = new AttributionManager().getAttributionData() as any;
+    expect(d.twclid).toBe('NEW');
+    expect(storage.get(AttributionManager.SEEN_TWCLID_KEY)).toBe('NEW');
+  });
+
+  test('marketing DECLINED: nothing is remembered at rest', () => {
+    setPage('?twclid=URL1', 'https://lp.other-brand.com/?twclid=REF5');
+    new AttributionManager({ marketingAllowed: () => false }).getAttributionData();
+    setPage('', 'https://lp.other-brand.com/?twclid=REF5');
+    new AttributionManager({ marketingAllowed: () => false }).getAttributionData();
+    expect(storage.get(AttributionManager.SEEN_TWCLID_KEY)).toBeNull();
+  });
+
+  test('ignored on the next page (new document) after the landing that carried it in its URL', () => {
+    setPage('?twclid=landing_click');
+    new AttributionManager().getAttributionData();
+    const storedAt = lastTouch().captured_at;
+
+    setPage('', 'http://localhost/?twclid=landing_click');
+    const next = new AttributionManager();
+    const a = next.captureAttribution() as any;
+    expect(a.twclid).toBeUndefined();
+    expect(a.clickId).toBeUndefined();
+    const data = next.getAttributionData() as any;
+    expect(data.twclid).toBe('landing_click');
+    expect(lastTouch().captured_at).toBe(storedAt);
+  });
+
   test('ignored on the next internal page after the landing that carried it (already stored)', () => {
     const attr = new AttributionManager();
     setPage('?twclid=landing_click');
@@ -430,5 +525,45 @@ describe('referrer host matching for X and LinkedIn (exact host or subdomain)', 
     expect(isHostOrSubdomain('reddit.com', 't.co')).toBe(false);
     expect(isHostOrSubdomain('t.co.uk', 't.co')).toBe(false);
     expect(isHostOrSubdomain('', 'x.com')).toBe(false);
+  });
+});
+
+describe('SEEN_TWCLID_KEY is purged with the touches', () => {
+  type SdkModule = typeof import('./index');
+  const loadSdk = (): SdkModule => {
+    let sdk!: SdkModule;
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      sdk = require('./index') as SdkModule;
+    });
+    return sdk;
+  };
+  const baseConfig = {
+    enableContainer: false, enableFingerprinting: false, enablePerformanceTracking: false,
+    trackPageViews: false, trackSPA: false, stripePaymentLinks: false,
+  };
+  const clearState = () => {
+    localStorage.clear();
+    document.cookie = '__dl_opt_out=; path=/; max-age=0';
+    document.cookie = '__dl_visitor_id=; path=/; max-age=0';
+    delete (window as any).datalyr;
+  };
+  beforeEach(clearState);
+  afterEach(() => { clearState(); jest.restoreAllMocks(); });
+
+  test.each([
+    ['reset', (sdk: any) => sdk.reset()],
+    ['optOut', (sdk: any) => sdk.optOut()],
+    ['setConsent({ analytics: false })', (sdk: any) => sdk.setConsent({ analytics: false })],
+  ])('%s removes it', async (_name, purge) => {
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const instance = loadSdk().createDatalyrInstance();
+    instance.init({ workspaceId: 'workspace-twclid', ...baseConfig });
+    await instance.ready();
+    localStorage.setItem('dl_' + AttributionManager.SEEN_TWCLID_KEY, JSON.stringify('tw1'));
+    purge(instance);
+    expect(localStorage.getItem('dl_' + AttributionManager.SEEN_TWCLID_KEY)).toBeNull();
+    instance.destroy();
   });
 });
