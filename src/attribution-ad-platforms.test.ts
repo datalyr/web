@@ -1,6 +1,7 @@
 /**
  * LinkedIn / X / AppLovin capture (1.9.9):
  * - AppLovin `aleid` / `alart` URL click ids (verbatim, persisted, aleid → applovin).
+ *   `alart` is an app-user id, not click evidence: never primary, never a real signal alone.
  * - Platform cookies under their OWN event_data keys (never folded into click-id fields):
  *   `_twclid` (parsed twclid), `_twpid`, `_axeid`, `_axwrt`, and LinkedIn's `li_fat_id`
  *   cookie as `_li_fat_id`.
@@ -23,7 +24,7 @@ function setRawCookie(name: string, rawValue: string): void {
   document.cookie = `${name}=${rawValue}; path=/`;
 }
 
-const PLATFORM_COOKIES = ['_twclid', '_twpid', '_axeid', '_axwrt', 'li_fat_id'];
+const PLATFORM_COOKIES = ['_twclid', '_twpid', '_axeid', '_axwrt', 'axwrt', '_axart', 'li_fat_id'];
 
 function clearAll(): void {
   try { localStorage.clear(); } catch { /* memory fallback */ }
@@ -80,6 +81,78 @@ describe('AppLovin aleid / alart URL click ids', () => {
     expect(data.source).toBe('applovin');
   });
 
+  describe('alart is not click evidence', () => {
+    test('alone on the URL: captured, but no clickId/clickIdType and no paid source/medium', () => {
+      setPage('?alart=app_user_1');
+      const a = new AttributionManager().captureAttribution() as any;
+      expect(a.alart).toBe('app_user_1');
+      expect(a.clickId).toBeUndefined();
+      expect(a.clickIdType).toBeUndefined();
+      expect(a.source).toBe('direct');
+      expect(a.medium).toBe('none');
+    });
+
+    test('alone with a referrer: source comes from the referrer, never paid', () => {
+      setPage('?alart=app_user_1', 'https://www.google.com/');
+      const a = new AttributionManager().captureAttribution() as any;
+      expect(a.clickId).toBeUndefined();
+      expect(a.source).toBe('google');
+      expect(a.medium).toBe('organic');
+    });
+
+    test('alone never stores a touch, but still rides on the event', () => {
+      setPage('?alart=app_user_1');
+      const data = new AttributionManager().getAttributionData() as any;
+      expect(data.alart).toBe('app_user_1');
+      expect(data.clickId).toBeUndefined();
+      expect(storage.get('dl_first_touch')).toBeNull();
+      expect(storage.get('dl_last_touch')).toBeNull();
+    });
+
+    test('alone never overwrites or re-stamps a stored paid last touch', () => {
+      const attr = new AttributionManager();
+      setPage('?gclid=g_landing');
+      attr.getAttributionData();
+      const before = storage.get('dl_last_touch');
+
+      attr.clearCache();
+      setPage('?alart=app_user_1', 'http://localhost/landing');
+      const data = attr.getAttributionData() as any;
+      expect(data.clickId).toBe('g_landing');
+      expect(data.clickIdType).toBe('gclid');
+      expect(data.source).toBe('google');
+      expect(data.alart).toBe('app_user_1');
+      const after = storage.get('dl_last_touch');
+      expect(after.captured_at).toBe(before.captured_at);
+      expect(after.alart).toBeUndefined();
+    });
+
+    test('with aleid it is persisted in the touch; aleid is primary', () => {
+      setPage('?alart=u1&aleid=e1');
+      const data = new AttributionManager().getAttributionData() as any;
+      expect(data.clickIdType).toBe('aleid');
+      expect(storage.get('dl_last_touch').alart).toBe('u1');
+    });
+
+    test('with a real non-click signal (utm_source) it is persisted, still not primary', () => {
+      setPage('?alart=u1&utm_source=applovin&utm_campaign=c1');
+      const data = new AttributionManager().getAttributionData() as any;
+      expect(data.clickId).toBeUndefined();
+      expect(data.medium).not.toBe('cpc');
+      expect(storage.get('dl_last_touch').alart).toBe('u1');
+    });
+
+    test('marketing DECLINED strips an alart carried through the fallback', () => {
+      const attr = new AttributionManager({ marketingAllowed: () => false });
+      setPage('?utm_source=applovin');
+      attr.getAttributionData();
+      attr.clearCache();
+      setPage('?alart=u1', 'http://localhost/landing');
+      const data = attr.getAttributionData() as any;
+      expect(data.alart).toBeUndefined();
+    });
+  });
+
   test('marketing DECLINED strips aleid and alart', () => {
     setPage('?aleid=e1&alart=u1&utm_source=applovin');
     const data = new AttributionManager({ marketingAllowed: () => false }).getAttributionData() as any;
@@ -117,6 +190,41 @@ describe('X / AppLovin / LinkedIn cookies under their own event_data keys', () =
     expect(data.clickIdType).toBeUndefined();
     expect(data.source).toBe('direct');
     expect(storage.get('dl_last_touch')).toBeNull();
+  });
+
+  describe('AppLovin axwrt / _axwrt / _axart', () => {
+    test('the server-mirrored axwrt wins over _axwrt, shipped as _axwrt', () => {
+      setRawCookie('axwrt', 'server-mirrored-uuid');
+      setRawCookie('_axwrt', AXWRT);
+      const data = new AttributionManager().getAttributionData() as any;
+      expect(data._axwrt).toBe('server-mirrored-uuid');
+      expect(data.axwrt).toBeUndefined();
+    });
+
+    test('axwrt alone, or _axwrt alone, fills _axwrt', () => {
+      setRawCookie('axwrt', 'only-server');
+      expect((new AttributionManager().getAttributionData() as any)._axwrt).toBe('only-server');
+      document.cookie = 'axwrt=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+      setRawCookie('_axwrt', AXWRT);
+      expect((new AttributionManager().getAttributionData() as any)._axwrt).toBe(AXWRT);
+    });
+
+    test('_axart is read raw under _axart and never fills alart', () => {
+      setRawCookie('_axart', 'axart-raw.1');
+      const data = new AttributionManager().getAttributionData() as any;
+      expect(data._axart).toBe('axart-raw.1');
+      expect(data.alart).toBeUndefined();
+      expect(data.clickId).toBeUndefined();
+    });
+
+    test('marketing DECLINED strips the axwrt-sourced _axwrt and _axart', () => {
+      setRawCookie('axwrt', 'server-mirrored-uuid');
+      setRawCookie('_axart', 'axart-raw.1');
+      const data = new AttributionManager({ marketingAllowed: () => false }).getAttributionData() as any;
+      expect(data._axwrt).toBeUndefined();
+      expect(data.axwrt).toBeUndefined();
+      expect(data._axart).toBeUndefined();
+    });
   });
 
   test('a URL li_fat_id and the li_fat_id cookie travel side by side, URL value wins the field', () => {

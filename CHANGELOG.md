@@ -2,12 +2,12 @@
 
 ## 1.9.9
 
-- AppLovin click ids: `aleid` and `alart` are captured from the URL (verbatim, no format check), persisted in first and last touch like every other click id, and stripped on a marketing decline. They come last in click-id precedence, so they never outrank an id already on the URL. `aleid` resolves `source` to `applovin`; `alart` (AppLovin's app-user id, sent with `aleid`) maps to no source.
+- AppLovin click ids: `aleid` and `alart` are captured from the URL (verbatim, no format check), persisted in first and last touch like every other click id, and stripped on a marketing decline. `aleid` comes last in click-id precedence, so it never outranks an id already on the URL, and resolves `source` to `applovin`. `alart` (AppLovin's app-user id, sent with `aleid`) is not click evidence: it never becomes `clickId` / `clickIdType` (so never a paid source or `cpc`), and on its own it never stores or replaces a touch; it is still sent on the event and kept in a touch stored for another reason.
 - New ad-platform cookies, read on every event like `_ttp` / `_scid` and shipped under their own keys, never written and never folded into a click-id field (that would make every pageview look like a fresh ad click):
   - X: `_twclid` (the cookie holds URI-encoded JSON; the event carries the `twclid` inside it, and nothing when the value does not parse) and `_twpid` (raw).
-  - AppLovin: `_axeid` and `_axwrt` (raw).
+  - AppLovin: `_axeid`, `_axart` and the browser id as `_axwrt` (raw), taken from the server-mirrored `axwrt` cookie when present (the AppLovin pixel reads it first), else from `_axwrt`.
   - LinkedIn: the Insight Tag's first-party `li_fat_id` cookie, shipped as `_li_fat_id` because its name is the URL parameter's.
-  - All five are marketing-scoped: stripped on a marketing decline, restored by a later grant.
+  - All of them are marketing-scoped: stripped on a marketing decline, restored by a later grant.
 - X: `twclid` is also read from `document.referrer`'s query string when the page URL has none (X's own pixel order: URL, referrer, cookie). It never outranks a click id on the URL, and is skipped when the stored last touch already carries the same value (the next internal page after the landing).
 - Referrer source fix: X and LinkedIn referrers are matched on the exact host or a subdomain (`t.co`, `x.com`, `twitter.com`, `linkedin.com`, `lnkd.in`). A substring test labelled reddit.com, pinterest.com and microsoft.com (`t.co`) and xbox.com, netflix.com, box.com, dropbox.com, fedex.com (`x.com`) as `twitter`, in both `source` and `referrer_source`. **Behaviour change:** those referrers now resolve to `reddit`, `pinterest`, or `referral` / `other`.
 - Session replay and heatmaps: the landing-attribution marker's `click` can also name `twclid`, `li_fat_id` and `aleid` (the kind only, never the value).

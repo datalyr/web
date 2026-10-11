@@ -41,10 +41,15 @@ export class AttributionManager {
     'ko_click_id', // Klaviyo
     // AppLovin Axon appends BOTH to every ad click. Kept verbatim (AppLovin documents
     // no format). Last, so they never outrank an existing click id on the same URL.
-    // `alart` is AppLovin's app-user id and rides with `aleid`; it maps to no source.
+    // `alart` is AppLovin's app-user id and rides with `aleid`: see NON_CLICK_EVIDENCE_IDS.
     'aleid',      // AppLovin
     'alart'       // AppLovin (app users)
   ];
+  // Captured, persisted and consent-stripped like every CLICK_IDS entry, but NOT click
+  // evidence: never the primary clickId/clickIdType (so never source/medium paid), and on
+  // its own never a "real signal" that replaces the stored touch. Same as the workers
+  // (infra/cloudflare/lib/click-ids.js CLICK_SIGNAL_FIELDS excludes it).
+  private NON_CLICK_EVIDENCE_IDS = new Set(['alart']);
   // Real ad-platform URL params whose value we store under a canonical internal
   // name. Snapchat appends &ScCid= (alias `sccid`) to the landing URL — it does
   // NOT use `sclid`. Query-param lookup is case-sensitive, so capture the real
@@ -90,9 +95,11 @@ export class AttributionManager {
   // Analytics cookies (_ga/_gid) and utm_* stay — they're analytics-scoped.
   // These are the event_data KEYS captureAdCookies() emits, which for LinkedIn is the
   // renamed `_li_fat_id` (the cookie itself is `li_fat_id`, the URL param's name).
+  // AppLovin's server-mirrored `axwrt` cookie ships under `_axwrt`; `axwrt` is listed too
+  // so the bare name can never reach a declined payload either.
   private MARKETING_COOKIES = [
     '_fbp', '_fbc', '_gcl_aw', '_gcl_dc', '_gcl_gb', '_gcl_ha', '_gac', '_ttp', '_ttc', '_scid',
-    '_twclid', '_twpid', '_axeid', '_axwrt', '_li_fat_id',
+    '_twclid', '_twpid', '_axeid', '_axwrt', 'axwrt', '_axart', '_li_fat_id',
   ];
   // TR-03: live marketing-consent predicate. Absent = allowed (preserves today's behavior);
   // returns false ONLY on an explicit decline (Shopify marketing:false / setConsent
@@ -266,7 +273,7 @@ export class AttributionManager {
     for (const clickId of this.CLICK_IDS) {
       const value = params[clickId];
       if (value) {
-        if (!attribution.clickId) {
+        if (!attribution.clickId && !this.NON_CLICK_EVIDENCE_IDS.has(clickId)) {
           attribution.clickId = value;
           attribution.clickIdType = clickId;
         }
@@ -479,9 +486,12 @@ export class AttributionManager {
     adCookies._twclid = this.parseTwclidCookie(cookies.get('_twclid'));
     adCookies._twpid = cookies.get('_twpid');
 
-    // AppLovin pixel: _axeid (its copy of aleid) and _axwrt (browser id, UUID v4), raw.
+    // AppLovin pixel: _axeid (its copy of aleid), the browser id (UUID v4) and _axart (its
+    // copy of alart), raw. The browser id prefers the server-mirrored `axwrt` cookie over
+    // the pixel's `_axwrt`, as the AppLovin pixel does; either ships as `_axwrt`.
     adCookies._axeid = cookies.get('_axeid');
-    adCookies._axwrt = cookies.get('_axwrt');
+    adCookies._axwrt = cookies.get('axwrt') || cookies.get('_axwrt');
+    adCookies._axart = cookies.get('_axart');
 
     // LinkedIn Insight Tag's first-party cookie. Its name is the URL param's, so it ships
     // as `_li_fat_id` and never overwrites (or poses as) a URL-captured li_fat_id.
@@ -585,6 +595,12 @@ export class AttributionManager {
     return parts.slice(3).join('.') || null;
   }
 
+  private nonEvidenceIds(a: Attribution): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const k of this.NON_CLICK_EVIDENCE_IDS) if (a[k]) out[k] = a[k];
+    return out;
+  }
+
   /**
    * Get attribution data for event
    */
@@ -632,6 +648,9 @@ export class AttributionManager {
       if (fallback) {
         current = {
           ...fallback,
+          // A non-evidence id on this URL (alart alone) still rides on the event; it
+          // just never replaces or re-stamps the stored touch.
+          ...this.nonEvidenceIds(current),
           referrer: current.referrer,
           referrerHost: current.referrerHost,
           landingPage: current.landingPage,
