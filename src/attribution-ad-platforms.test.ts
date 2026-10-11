@@ -1,0 +1,667 @@
+/**
+ * LinkedIn / X / AppLovin capture (1.9.9):
+ * - AppLovin `aleid` / `alart` URL click ids (verbatim, persisted, aleid → applovin).
+ *   `alart` is an app-user id, not click evidence: never primary, never a real signal alone.
+ * - Platform cookies under their OWN event_data keys (never folded into click-id fields):
+ *   `_twclid` (parsed twclid), `_twpid`, `_axeid`, `_axwrt`, and LinkedIn's `li_fat_id`
+ *   cookie as `_li_fat_id`.
+ * - All of the above stripped on a marketing decline.
+ * - `twclid` recovered from document.referrer when the URL has none.
+ * - Exact-host referrer matching for X and LinkedIn (no more reddit.com → twitter).
+ */
+
+import { AttributionManager } from './attribution';
+import { storage, cookies } from './storage';
+import { getReferrerData, isHostOrSubdomain } from './utils';
+
+function setPage(search: string, referrer = ''): void {
+  window.history.replaceState({}, '', '/' + (search || ''));
+  Object.defineProperty(document, 'referrer', { configurable: true, value: referrer });
+}
+
+// Raw document.cookie write so values keep the exact encoding the platform pixels use.
+function setRawCookie(name: string, rawValue: string): void {
+  document.cookie = `${name}=${rawValue}; path=/`;
+}
+
+const PLATFORM_COOKIES = ['_twclid', '_twpid', '_axeid', '_axwrt', 'axwrt', '_axart', 'li_fat_id'];
+
+function clearAll(): void {
+  try { localStorage.clear(); } catch { /* memory fallback */ }
+  for (const k of ['_fbp', '_fbc', '_dl_fbclid_at', '_dl_gclid_at', ...PLATFORM_COOKIES]) {
+    document.cookie = `${k}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+    cookies.remove(k);
+  }
+}
+
+// What X's pixel writes: encodeURIComponent(JSON.stringify({...})).
+const X_PIXEL_TWCLID = encodeURIComponent(JSON.stringify({
+  twclid: '26l6412g5p4iyj65a2oic2ayg2', pixelVersion: '2.4.11', timestamp: '1760000000000', source: 1,
+}));
+const AXWRT = '3f2b8c1e-9a4d-4e6f-8b2a-1c3d5e7f9a0b';
+const AXWRT_SERVER = 'a1b2c3d4-e5f6-4a7b-9c8d-0e1f2a3b4c5d';
+
+describe('AppLovin aleid / alart URL click ids', () => {
+  beforeEach(() => { clearAll(); setPage('', ''); });
+  afterEach(() => { clearAll(); });
+
+  test('aleid is the primary click id, resolves source=applovin/cpc, alart captured alongside', () => {
+    setPage('?aleid=AbC.123-xyz_%2B%3D&alart=app_user_9');
+    const a = new AttributionManager().captureAttribution() as any;
+    expect(a.clickId).toBe('AbC.123-xyz_+=');
+    expect(a.clickIdType).toBe('aleid');
+    expect(a.aleid).toBe('AbC.123-xyz_+='); // verbatim, no format validation
+    expect(a.alart).toBe('app_user_9');
+    expect(a.source).toBe('applovin');
+    expect(a.medium).toBe('cpc');
+  });
+
+  test('aleid / alart never outrank an existing click id on the same URL', () => {
+    setPage('?alart=u1&aleid=e1&ttclid=tt1');
+    const a = new AttributionManager().captureAttribution() as any;
+    expect(a.clickIdType).toBe('ttclid');
+    expect(a.source).toBe('tiktok');
+    expect(a.aleid).toBe('e1');
+    expect(a.alart).toBe('u1');
+  });
+
+  test('aleid / alart persist into first and last touch and replay on internal navigation', () => {
+    const attr = new AttributionManager();
+    setPage('?aleid=e_landing&alart=u_landing');
+    attr.getAttributionData();
+    expect(storage.get('dl_first_touch').aleid).toBe('e_landing');
+    expect(storage.get('dl_first_touch').alart).toBe('u_landing');
+    expect(storage.get('dl_last_touch').aleid).toBe('e_landing');
+
+    attr.clearCache();
+    setPage('', 'http://localhost/landing');
+    const data = attr.getAttributionData() as any;
+    expect(data.aleid).toBe('e_landing');
+    expect(data.alart).toBe('u_landing');
+    expect(data.clickIdType).toBe('aleid');
+    expect(data.source).toBe('applovin');
+  });
+
+  describe('alart is not click evidence', () => {
+    test('alone on the URL: captured, but no clickId/clickIdType and no paid source/medium', () => {
+      setPage('?alart=app_user_1');
+      const a = new AttributionManager().captureAttribution() as any;
+      expect(a.alart).toBe('app_user_1');
+      expect(a.clickId).toBeUndefined();
+      expect(a.clickIdType).toBeUndefined();
+      expect(a.source).toBe('direct');
+      expect(a.medium).toBe('none');
+    });
+
+    test('alone with a referrer: source comes from the referrer, never paid', () => {
+      setPage('?alart=app_user_1', 'https://www.google.com/');
+      const a = new AttributionManager().captureAttribution() as any;
+      expect(a.clickId).toBeUndefined();
+      expect(a.source).toBe('google');
+      expect(a.medium).toBe('organic');
+    });
+
+    test('alone never stores a touch, but still rides on the event', () => {
+      setPage('?alart=app_user_1');
+      const data = new AttributionManager().getAttributionData() as any;
+      expect(data.alart).toBe('app_user_1');
+      expect(data.clickId).toBeUndefined();
+      expect(storage.get('dl_first_touch')).toBeNull();
+      expect(storage.get('dl_last_touch')).toBeNull();
+    });
+
+    test('alone never overwrites or re-stamps a stored paid last touch', () => {
+      const attr = new AttributionManager();
+      setPage('?gclid=g_landing');
+      attr.getAttributionData();
+      const before = storage.get('dl_last_touch');
+
+      attr.clearCache();
+      setPage('?alart=app_user_1', 'http://localhost/landing');
+      const data = attr.getAttributionData() as any;
+      expect(data.clickId).toBe('g_landing');
+      expect(data.clickIdType).toBe('gclid');
+      expect(data.source).toBe('google');
+      expect(data.alart).toBe('app_user_1');
+      const after = storage.get('dl_last_touch');
+      expect(after.captured_at).toBe(before.captured_at);
+      expect(after.alart).toBeUndefined();
+    });
+
+    test('with aleid it is persisted in the touch; aleid is primary', () => {
+      setPage('?alart=u1&aleid=e1');
+      const data = new AttributionManager().getAttributionData() as any;
+      expect(data.clickIdType).toBe('aleid');
+      expect(storage.get('dl_last_touch').alart).toBe('u1');
+    });
+
+    test('with a real non-click signal (utm_source) it is persisted, still not primary', () => {
+      setPage('?alart=u1&utm_source=applovin&utm_campaign=c1');
+      const data = new AttributionManager().getAttributionData() as any;
+      expect(data.clickId).toBeUndefined();
+      expect(data.medium).not.toBe('cpc');
+      expect(storage.get('dl_last_touch').alart).toBe('u1');
+    });
+
+    test('marketing DECLINED strips an alart carried through the fallback', () => {
+      const attr = new AttributionManager({ marketingAllowed: () => false });
+      setPage('?utm_source=applovin');
+      attr.getAttributionData();
+      attr.clearCache();
+      setPage('?alart=u1', 'http://localhost/landing');
+      const data = attr.getAttributionData() as any;
+      expect(data.alart).toBeUndefined();
+    });
+  });
+
+  test('marketing DECLINED strips aleid and alart', () => {
+    setPage('?aleid=e1&alart=u1&utm_source=applovin');
+    const data = new AttributionManager({ marketingAllowed: () => false }).getAttributionData() as any;
+    expect(data.aleid).toBeUndefined();
+    expect(data.alart).toBeUndefined();
+    expect(data.clickId).toBeUndefined();
+    expect(data.clickIdType).toBeUndefined();
+    expect(data.utm_source).toBe('applovin');
+  });
+});
+
+describe('X / AppLovin / LinkedIn cookies under their own event_data keys', () => {
+  beforeEach(() => { clearAll(); setPage('', ''); });
+  afterEach(() => { clearAll(); });
+
+  test('reads every cookie on a plain pageview, without inventing a click', () => {
+    setRawCookie('_twclid', X_PIXEL_TWCLID);
+    setRawCookie('_twpid', 'tw.1760000000000.123456789012345678');
+    setRawCookie('_axeid', 'axeid_value.1');
+    setRawCookie('_axwrt', AXWRT);
+    setRawCookie('li_fat_id', 'li-fat-cookie-1');
+
+    const data = new AttributionManager().getAttributionData() as any;
+    expect(data._twclid).toBe('26l6412g5p4iyj65a2oic2ayg2');
+    expect(data._twpid).toBe('tw.1760000000000.123456789012345678');
+    expect(data._axeid).toBe('axeid_value.1');
+    expect(data._axwrt).toBe(AXWRT);
+    expect(data._li_fat_id).toBe('li-fat-cookie-1');
+
+    // Never folded into the click-id fields: this pageview is not a paid click.
+    expect(data.twclid).toBeUndefined();
+    expect(data.aleid).toBeUndefined();
+    expect(data.li_fat_id).toBeUndefined();
+    expect(data.clickId).toBeUndefined();
+    expect(data.clickIdType).toBeUndefined();
+    expect(data.source).toBe('direct');
+    expect(storage.get('dl_last_touch')).toBeNull();
+  });
+
+  describe('AppLovin axwrt / _axwrt / _axart', () => {
+    test('the server-mirrored axwrt wins over _axwrt, shipped as _axwrt', () => {
+      setRawCookie('axwrt', AXWRT_SERVER);
+      setRawCookie('_axwrt', AXWRT);
+      const data = new AttributionManager().getAttributionData() as any;
+      expect(data._axwrt).toBe(AXWRT_SERVER);
+      expect(data.axwrt).toBeUndefined();
+    });
+
+    test('only a UUID v4 is kept; an invalid axwrt falls back to a valid _axwrt', () => {
+      for (const bad of ['not-a-uuid', '3f2b8c1e-9a4d-1e6f-8b2a-1c3d5e7f9a0b', '3f2b8c1e-9a4d-4e6f-7b2a-1c3d5e7f9a0b', `${AXWRT}x`, ' ' + AXWRT]) {
+        setRawCookie('_axwrt', encodeURIComponent(bad));
+        expect((new AttributionManager().getAttributionData() as any)._axwrt).toBeUndefined();
+      }
+      setRawCookie('axwrt', 'garbage');
+      setRawCookie('_axwrt', AXWRT.toUpperCase());
+      expect((new AttributionManager().getAttributionData() as any)._axwrt).toBe(AXWRT.toUpperCase());
+    });
+
+    test('axwrt alone, or _axwrt alone, fills _axwrt', () => {
+      setRawCookie('axwrt', AXWRT_SERVER);
+      expect((new AttributionManager().getAttributionData() as any)._axwrt).toBe(AXWRT_SERVER);
+      document.cookie = 'axwrt=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+      setRawCookie('_axwrt', AXWRT);
+      expect((new AttributionManager().getAttributionData() as any)._axwrt).toBe(AXWRT);
+    });
+
+    test('_axart is read raw under _axart and never fills alart', () => {
+      setRawCookie('_axart', 'axart-raw.1');
+      const data = new AttributionManager().getAttributionData() as any;
+      expect(data._axart).toBe('axart-raw.1');
+      expect(data.alart).toBeUndefined();
+      expect(data.clickId).toBeUndefined();
+    });
+
+    test('marketing DECLINED strips the axwrt-sourced _axwrt and _axart', () => {
+      setRawCookie('axwrt', AXWRT_SERVER);
+      setRawCookie('_axart', 'axart-raw.1');
+      const data = new AttributionManager({ marketingAllowed: () => false }).getAttributionData() as any;
+      expect(data._axwrt).toBeUndefined();
+      expect(data.axwrt).toBeUndefined();
+      expect(data._axart).toBeUndefined();
+    });
+  });
+
+  test('a URL li_fat_id and the li_fat_id cookie travel side by side, URL value wins the field', () => {
+    setRawCookie('li_fat_id', 'from-cookie');
+    setPage('?li_fat_id=from-url');
+    const data = new AttributionManager().getAttributionData() as any;
+    expect(data.li_fat_id).toBe('from-url');
+    expect(data.clickIdType).toBe('li_fat_id');
+    expect(data._li_fat_id).toBe('from-cookie');
+  });
+
+  test('cookies are only read, never written', () => {
+    setPage('?twclid=tw1&aleid=e1&li_fat_id=l1');
+    new AttributionManager().getAttributionData();
+    for (const name of PLATFORM_COOKIES) expect(cookies.get(name)).toBeNull();
+    expect(cookies.get('_li_fat_id')).toBeNull();
+  });
+
+  describe('_twclid parsing', () => {
+    test('raw (unencoded) JSON is accepted too, as X\'s GTM template does', () => {
+      setRawCookie('_twclid', '{"twclid":"raw_json_click","pixelVersion":"gtm_s2s_1_0","source":1}');
+      const data = new AttributionManager().getAttributionData() as any;
+      expect(data._twclid).toBe('raw_json_click');
+    });
+
+    test.each([
+      ['a bare non-JSON value', 'not-json'],
+      ['truncated JSON', encodeURIComponent('{"twclid":"abc"')],
+      ['a JSON string, not an object', encodeURIComponent('"abc"')],
+      ['an object without twclid', encodeURIComponent('{"pixelVersion":"2.4.11"}')],
+      ['an empty twclid', encodeURIComponent('{"twclid":""}')],
+      ['a non-string twclid', encodeURIComponent('{"twclid":12345}')],
+      ['JSON null', 'null'],
+      ['a malformed percent-encoding', '%7B%22twclid%22%3A%E0%A4%A'],
+    ])('skips %s', (_label, raw) => {
+      setRawCookie('_twclid', raw);
+      setRawCookie('_twpid', 'tw.1.2');
+      let data: any;
+      expect(() => { data = new AttributionManager().getAttributionData(); }).not.toThrow();
+      expect(data._twclid).toBeUndefined();
+      expect(Object.prototype.hasOwnProperty.call(data, '_twclid')).toBe(false);
+      expect(data._twpid).toBe('tw.1.2'); // other cookies unaffected
+    });
+  });
+
+  test('marketing DECLINED strips all five cookie keys, keeps analytics', () => {
+    setRawCookie('_twclid', X_PIXEL_TWCLID);
+    setRawCookie('_twpid', 'tw.1.2');
+    setRawCookie('_axeid', 'ax1');
+    setRawCookie('_axwrt', AXWRT);
+    setRawCookie('li_fat_id', 'li1');
+    setRawCookie('_ga', 'GA1.1.1.1');
+    setPage('?twclid=tw_url&li_fat_id=li_url&utm_source=x');
+
+    const data = new AttributionManager({ marketingAllowed: () => false }).getAttributionData() as any;
+    for (const k of ['_twclid', '_twpid', '_axeid', '_axwrt', '_li_fat_id', 'twclid', 'li_fat_id', 'clickId', 'clickIdType']) {
+      expect(data[k]).toBeUndefined();
+    }
+    expect(data._ga).toBe('GA1.1.1.1');
+    expect(data.utm_source).toBe('x');
+    document.cookie = '_ga=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+  });
+
+  test('a later marketing grant restores them on the next event (live predicate)', () => {
+    setRawCookie('_axwrt', AXWRT);
+    let allowed = false;
+    const attr = new AttributionManager({ marketingAllowed: () => allowed });
+    expect((attr.getAttributionData() as any)._axwrt).toBeUndefined();
+    allowed = true;
+    expect((attr.getAttributionData() as any)._axwrt).toBe(AXWRT);
+  });
+});
+
+describe('twclid from document.referrer', () => {
+  beforeEach(() => { clearAll(); setPage('', ''); });
+  afterEach(() => { clearAll(); });
+
+  test('recovered from the referrer\'s query string when the URL has none', () => {
+    setPage('?utm_source=x', 'https://shop.example.com/landing?twclid=ref_click_1&utm_source=x');
+    const a = new AttributionManager().captureAttribution() as any;
+    expect(a.twclid).toBe('ref_click_1');
+    expect(a.clickId).toBe('ref_click_1');
+    expect(a.clickIdType).toBe('twclid');
+    expect(a.medium).toBe('cpc');
+  });
+
+  test('source is twitter when nothing else names it', () => {
+    setPage('', 'https://t.co/abc?twclid=ref_click_2');
+    const a = new AttributionManager().captureAttribution() as any;
+    expect(a.twclid).toBe('ref_click_2');
+    expect(a.source).toBe('twitter');
+  });
+
+  test('the URL value wins over the referrer\'s', () => {
+    setPage('?twclid=url_click', 'https://shop.example.com/?twclid=ref_click');
+    const a = new AttributionManager().captureAttribution() as any;
+    expect(a.twclid).toBe('url_click');
+    expect(a.clickId).toBe('url_click');
+  });
+
+  test('a referrer twclid never outranks a click id in the URL, but is still kept', () => {
+    setPage('?gclid=g1', 'https://shop.example.com/?twclid=ref_click');
+    const a = new AttributionManager().captureAttribution() as any;
+    expect(a.clickIdType).toBe('gclid');
+    expect(a.twclid).toBe('ref_click');
+  });
+
+  const lastTouch = () => storage.get('dl_last_touch');
+
+  test('BLOCKER regression: decided once per page, same answer on every call (same-site referrer + utm)', () => {
+    setPage('?utm_campaign=spring', 'http://localhost/?twclid=REF1');
+    const attr = new AttributionManager();
+    for (let i = 0; i < 4; i++) {
+      const d = attr.getAttributionData() as any;
+      expect([d.twclid, d.clickIdType, d.medium]).toEqual(['REF1', 'twclid', 'cpc']);
+      expect(lastTouch().twclid).toBe('REF1');
+    }
+  });
+
+  test('BLOCKER regression: decided once per page, same answer on every call (external referrer)', () => {
+    setPage('', 'https://lp.other-brand.com/?twclid=REF2');
+    const attr = new AttributionManager();
+    for (let i = 0; i < 4; i++) {
+      const d = attr.getAttributionData() as any;
+      expect([d.twclid, d.clickIdType, d.source, d.medium]).toEqual(['REF2', 'twclid', 'twitter', 'cpc']);
+    }
+  });
+
+  test('a recovered twclid survives an SPA route change in the same document without being re-recovered', () => {
+    // Same-site referrer (a landing that redirected): an external referrer host re-scores
+    // as `referral` on every SPA route for any click id, which is unrelated to recovery.
+    setPage('', 'http://localhost/landing?twclid=REF4');
+    const attr = new AttributionManager();
+    attr.getAttributionData();
+    const storedAt = lastTouch().captured_at;
+    attr.clearCache();
+    window.history.replaceState({}, '', '/next-route');
+    const d = attr.getAttributionData() as any;
+    expect(d.twclid).toBe('REF4'); // via the stored touch
+    expect(lastTouch().captured_at).toBe(storedAt);
+  });
+
+  test('SHOULD-FIX regression: a reload of a page whose referrer had twclid never overwrites a newer touch', () => {
+    setPage('', 'http://localhost/?twclid=REF3');
+    new AttributionManager().getAttributionData();
+    expect(lastTouch().twclid).toBe('REF3');
+
+    setPage('?utm_source=newsletter&utm_campaign=oct', 'http://localhost/b');
+    new AttributionManager().getAttributionData();
+    expect(lastTouch().source).toBe('newsletter');
+
+    // reload / back without bfcache / restored tab: a NEW document, same referrer
+    setPage('', 'http://localhost/?twclid=REF3');
+    const d = new AttributionManager().getAttributionData() as any;
+    expect(lastTouch().source).toBe('newsletter');
+    expect(d.source).toBe('newsletter');
+    expect(d.clickIdType).toBeUndefined();
+  });
+
+  test('a NEW twclid in the referrer is still recovered after an older one was seen', () => {
+    setPage('', 'https://lp.other-brand.com/?twclid=OLD');
+    new AttributionManager().getAttributionData();
+    setPage('', 'https://lp.other-brand.com/?twclid=NEW');
+    const d = new AttributionManager().getAttributionData() as any;
+    expect(d.twclid).toBe('NEW');
+    expect(storage.get(AttributionManager.SEEN_TWCLID_KEY).v).toBe('NEW');
+  });
+
+  test('marketing DECLINED: nothing is remembered at rest', () => {
+    setPage('?twclid=URL1', 'https://lp.other-brand.com/?twclid=REF5');
+    new AttributionManager({ marketingAllowed: () => false }).getAttributionData();
+    setPage('', 'https://lp.other-brand.com/?twclid=REF5');
+    new AttributionManager({ marketingAllowed: () => false }).getAttributionData();
+    expect(storage.get(AttributionManager.SEEN_TWCLID_KEY)).toBeNull();
+  });
+
+  describe('privacy (P1 / P3)', () => {
+    const DAY = 86400000;
+
+    test('marketing DECLINED: a referrer twclid is never applied: not in the payload, the touches or storage', () => {
+      setPage('?utm_source=newsletter&utm_campaign=oct', 'https://lp.other-brand.com/?twclid=REFD');
+      const attr = new AttributionManager({ marketingAllowed: () => false });
+      for (let i = 0; i < 3; i++) {
+        const d = attr.getAttributionData() as any;
+        expect(d.twclid).toBeUndefined();
+        expect(d.clickId).toBeUndefined();
+        expect(d.source).toBe('newsletter');
+        expect(d.medium).not.toBe('cpc');
+      }
+      expect(storage.get('dl_first_touch').twclid).toBeUndefined();
+      expect(storage.get('dl_first_touch').clickId).toBeUndefined();
+      expect(storage.get('dl_last_touch').twclid).toBeUndefined();
+      expect(storage.get('dl_last_touch').clickIdType).toBeUndefined();
+      expect(storage.get(AttributionManager.SEEN_TWCLID_KEY)).toBeNull();
+    });
+
+    test('marketing DECLINED with only the referrer: same source as without recovery (referral), no touch with twclid', () => {
+      setPage('', 'https://lp.other-brand.com/?twclid=REFD');
+      const d = new AttributionManager({ marketingAllowed: () => false }).getAttributionData() as any;
+      expect(d.source).toBe('referral');
+      expect(storage.get('dl_last_touch').twclid).toBeUndefined();
+    });
+
+    test('marketing DECLINED: alart is not stored in touches; existing click ids keep TR-03 behaviour (stored, stripped)', () => {
+      setPage('?alart=u1&aleid=e1&fbclid=fb1&utm_source=applovin');
+      const d = new AttributionManager({ marketingAllowed: () => false }).getAttributionData() as any;
+      for (const k of ['alart', 'aleid', 'fbclid', 'clickId']) expect(d[k]).toBeUndefined();
+      for (const key of ['dl_first_touch', 'dl_last_touch']) {
+        const touch = storage.get(key);
+        expect(touch.alart).toBeUndefined();
+        expect('alart' in touch).toBe(false);
+        // unchanged TR-03: click ids stay in the touch, only stripped from payloads
+        expect(touch.fbclid).toBe('fb1');
+        expect(touch.aleid).toBe('e1');
+        expect(touch.clickIdType).toBe('fbclid');
+        expect(touch.utm_source).toBe('applovin');
+      }
+    });
+
+    test('marketing ALLOWED: alart is stored in the touch as before', () => {
+      setPage('?alart=u1&aleid=e1');
+      new AttributionManager({ marketingAllowed: () => true }).getAttributionData();
+      expect(storage.get('dl_last_touch').alart).toBe('u1');
+    });
+
+    test('decline mid-page after a recovery: the next touch carries no twclid and the seen record is gone', () => {
+      let allowed = true;
+      setPage('?utm_campaign=spring', 'https://lp.other-brand.com/?twclid=REFM');
+      const attr = new AttributionManager({ marketingAllowed: () => allowed });
+      expect((attr.getAttributionData() as any).twclid).toBe('REFM');
+      expect(storage.get(AttributionManager.SEEN_TWCLID_KEY).v).toBe('REFM');
+      allowed = false;
+      const d = attr.getAttributionData() as any;
+      expect(d.twclid).toBeUndefined();
+      expect(storage.get('dl_last_touch').twclid).toBeUndefined();
+      expect(storage.get(AttributionManager.SEEN_TWCLID_KEY)).toBeNull();
+      // a grant later on the same page applies it again (same decision, in memory)
+      allowed = true;
+      expect((attr.getAttributionData() as any).twclid).toBe('REFM');
+    });
+
+    test('the seen record expires with the attribution window (90 days by default)', () => {
+      const before = Date.now();
+      setPage('?twclid=URLX');
+      new AttributionManager().getAttributionData();
+      const rec = storage.get(AttributionManager.SEEN_TWCLID_KEY);
+      expect(rec.v).toBe('URLX');
+      expect(rec.expires_at).toBeGreaterThanOrEqual(before + 90 * DAY);
+      expect(rec.expires_at).toBeLessThanOrEqual(Date.now() + 90 * DAY);
+    });
+
+    test('an expired (or malformed) seen record no longer blocks recovery, and is removed', () => {
+      for (const stale of [{ v: 'REFE', expires_at: Date.now() - 1 }, 'REFE', { v: 'REFE' }]) {
+        storage.set(AttributionManager.SEEN_TWCLID_KEY, stale);
+        setPage('', 'https://lp.other-brand.com/?twclid=REFE');
+        const d = new AttributionManager().getAttributionData() as any;
+        expect(d.twclid).toBe('REFE');
+        const rec = storage.get(AttributionManager.SEEN_TWCLID_KEY);
+        expect(rec.v).toBe('REFE');
+        expect(rec.expires_at).toBeGreaterThan(Date.now());
+        localStorage.clear();
+      }
+    });
+
+    test('any event under a marketing decline removes a seen record left from before', () => {
+      storage.set(AttributionManager.SEEN_TWCLID_KEY, { v: 'tw', expires_at: Date.now() + DAY });
+      setPage('');
+      new AttributionManager({ marketingAllowed: () => false }).getAttributionData();
+      expect(storage.get(AttributionManager.SEEN_TWCLID_KEY)).toBeNull();
+    });
+  });
+
+  test('ignored on the next page (new document) after the landing that carried it in its URL', () => {
+    setPage('?twclid=landing_click');
+    new AttributionManager().getAttributionData();
+    const storedAt = lastTouch().captured_at;
+
+    setPage('', 'http://localhost/?twclid=landing_click');
+    const next = new AttributionManager();
+    const a = next.captureAttribution() as any;
+    expect(a.twclid).toBeUndefined();
+    expect(a.clickId).toBeUndefined();
+    const data = next.getAttributionData() as any;
+    expect(data.twclid).toBe('landing_click');
+    expect(lastTouch().captured_at).toBe(storedAt);
+  });
+
+  test('ignored on the next internal page after the landing that carried it (already stored)', () => {
+    const attr = new AttributionManager();
+    setPage('?twclid=landing_click');
+    attr.getAttributionData();
+    const storedAt = storage.get('dl_last_touch').captured_at;
+
+    attr.clearCache();
+    setPage('', 'http://localhost/?twclid=landing_click');
+    const a = attr.captureAttribution() as any;
+    expect(a.twclid).toBeUndefined();
+    expect(a.clickId).toBeUndefined();
+    // The event still carries it through the persisted touch, which is not re-stamped.
+    const data = attr.getAttributionData() as any;
+    expect(data.twclid).toBe('landing_click');
+    expect(storage.get('dl_last_touch').captured_at).toBe(storedAt);
+  });
+
+  test('no twclid in the referrer, an empty one, or an unparseable referrer: nothing', () => {
+    for (const ref of ['https://shop.example.com/?utm_source=x', 'https://shop.example.com/?twclid=', 'not a url twclid=abc']) {
+      setPage('', ref);
+      const a = new AttributionManager().captureAttribution() as any;
+      expect(a.twclid).toBeUndefined();
+      expect(a.clickId).toBeUndefined();
+    }
+  });
+
+  test('marketing DECLINED strips the recovered twclid', () => {
+    setPage('', 'https://shop.example.com/?twclid=ref_click');
+    const data = new AttributionManager({ marketingAllowed: () => false }).getAttributionData() as any;
+    expect(data.twclid).toBeUndefined();
+    expect(data.clickId).toBeUndefined();
+  });
+});
+
+describe('referrer host matching for X and LinkedIn (exact host or subdomain)', () => {
+  beforeEach(() => { clearAll(); setPage('', ''); });
+  afterEach(() => { clearAll(); });
+
+  const sourceFor = (referrer: string): string => {
+    setPage('', referrer);
+    return new AttributionManager().captureAttribution().source as string;
+  };
+
+  test.each([
+    ['https://t.co/abc', 'twitter'],
+    ['https://x.com/someone/status/1', 'twitter'],
+    ['https://twitter.com/someone', 'twitter'],
+    ['https://mobile.twitter.com/someone', 'twitter'],
+    ['https://mobile.x.com/someone', 'twitter'],
+    ['https://www.linkedin.com/feed/', 'linkedin'],
+    ['https://linkedin.com/in/someone', 'linkedin'],
+    ['https://lnkd.in/abc', 'linkedin'],
+    // Former false positives
+    ['https://www.reddit.com/r/foo', 'reddit'],
+    ['https://www.pinterest.com/pin/1', 'pinterest'],
+    ['https://www.xbox.com/en-US', 'referral'],
+    ['https://www.netflix.com/', 'referral'],
+    ['https://www.box.com/', 'referral'],
+    ['https://www.dropbox.com/s/abc', 'referral'],
+    ['https://www.microsoft.com/', 'referral'],
+    ['https://www.fedex.com/', 'referral'],
+    ['https://notlinkedin.com/', 'referral'],
+    ['https://linkedin.com.evil.test/', 'referral'],
+    ['https://xlnkd.in/', 'referral'],
+    ['https://twitter.co/', 'referral'],
+  ])('determineSource: %s → %s', (referrer, source) => {
+    expect(sourceFor(referrer)).toBe(source);
+  });
+
+  test.each([
+    ['t.co', 'twitter'],
+    ['x.com', 'twitter'],
+    ['twitter.com', 'twitter'],
+    ['mobile.twitter.com', 'twitter'],
+    ['www.linkedin.com', 'linkedin'],
+    ['lnkd.in', 'linkedin'],
+    ['www.reddit.com', 'reddit'],
+    ['www.pinterest.com', 'pinterest'],
+    ['www.xbox.com', 'other'],
+    ['www.netflix.com', 'other'],
+    ['www.box.com', 'other'],
+    ['www.dropbox.com', 'other'],
+    ['www.microsoft.com', 'other'],
+    ['notlinkedin.com', 'other'],
+    ['linkedin.com.evil.test', 'other'],
+  ])('getReferrerData referrer_source: %s → %s', (host, source) => {
+    setPage('', `https://${host}/path`);
+    expect(getReferrerData().referrer_source).toBe(source);
+  });
+
+  test('isHostOrSubdomain', () => {
+    expect(isHostOrSubdomain('x.com', 'x.com')).toBe(true);
+    expect(isHostOrSubdomain('MOBILE.Twitter.com', 'twitter.com')).toBe(true);
+    expect(isHostOrSubdomain('x.com.', 'x.com')).toBe(true);
+    expect(isHostOrSubdomain('xbox.com', 'x.com')).toBe(false);
+    expect(isHostOrSubdomain('reddit.com', 't.co')).toBe(false);
+    expect(isHostOrSubdomain('t.co.uk', 't.co')).toBe(false);
+    expect(isHostOrSubdomain('', 'x.com')).toBe(false);
+  });
+});
+
+describe('SEEN_TWCLID_KEY is purged with the touches', () => {
+  type SdkModule = typeof import('./index');
+  const loadSdk = (): SdkModule => {
+    let sdk!: SdkModule;
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      sdk = require('./index') as SdkModule;
+    });
+    return sdk;
+  };
+  const baseConfig = {
+    enableContainer: false, enableFingerprinting: false, enablePerformanceTracking: false,
+    trackPageViews: false, trackSPA: false, stripePaymentLinks: false,
+  };
+  const clearState = () => {
+    localStorage.clear();
+    document.cookie = '__dl_opt_out=; path=/; max-age=0';
+    document.cookie = '__dl_visitor_id=; path=/; max-age=0';
+    delete (window as any).datalyr;
+  };
+  beforeEach(clearState);
+  afterEach(() => { clearState(); jest.restoreAllMocks(); });
+
+  test.each([
+    ['reset', (sdk: any) => sdk.reset()],
+    ['optOut', (sdk: any) => sdk.optOut()],
+    ['setConsent({ analytics: false })', (sdk: any) => sdk.setConsent({ analytics: false })],
+    ['setConsent({ marketing: false })', (sdk: any) => sdk.setConsent({ marketing: false })],
+    ['setConsent({ sale: false })', (sdk: any) => sdk.setConsent({ sale: false })],
+  ])('%s removes it', async (_name, purge) => {
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const instance = loadSdk().createDatalyrInstance();
+    instance.init({ workspaceId: 'workspace-twclid', ...baseConfig });
+    await instance.ready();
+    localStorage.setItem('dl_' + AttributionManager.SEEN_TWCLID_KEY, JSON.stringify('tw1'));
+    purge(instance);
+    expect(localStorage.getItem('dl_' + AttributionManager.SEEN_TWCLID_KEY)).toBeNull();
+    instance.destroy();
+  });
+});

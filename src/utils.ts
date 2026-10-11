@@ -498,9 +498,24 @@ export function getReferrerData(): Record<string, any> {
 }
 
 /**
+ * True when `host` is `domain` or one of its subdomains (case-insensitive).
+ * `isHostOrSubdomain('mobile.twitter.com', 'twitter.com')` is true;
+ * `isHostOrSubdomain('xbox.com', 'x.com')` is false.
+ */
+export function isHostOrSubdomain(host: string, domain: string): boolean {
+  const h = (host || '').toLowerCase().replace(/\.$/, '');
+  const d = domain.toLowerCase();
+  return h === d || h.endsWith('.' + d);
+}
+
+// Sources whose domains are matched as exact host or subdomain. Their short domains
+// (`t.co`, `x.com`) are substrings of unrelated hosts (reddit.com, pinterest.com, xbox.com).
+const EXACT_HOST_REFERRER_SOURCES = new Set(['twitter', 'linkedin']);
+
+/**
  * Detect referrer source
  */
-function detectReferrerSource(hostname: string): string {
+export function detectReferrerSource(hostname: string): string {
   const sources: Record<string, string[]> = {
     google: ['google.com', 'google.'],
     facebook: ['facebook.com', 'fb.com'],
@@ -518,7 +533,8 @@ function detectReferrerSource(hostname: string): string {
   };
   
   for (const [source, domains] of Object.entries(sources)) {
-    if (domains.some(domain => hostname.includes(domain))) {
+    const exact = EXACT_HOST_REFERRER_SOURCES.has(source);
+    if (domains.some(domain => exact ? isHostOrSubdomain(hostname, domain) : hostname.includes(domain))) {
       return source;
     }
   }

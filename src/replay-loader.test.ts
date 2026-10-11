@@ -17,6 +17,8 @@ import {
   HEAT_SAMPLE_SALT,
   replayTrackPayload,
   resolveReplayPrivacy,
+  replayAttribution,
+  REPLAY_CLICK_KINDS,
   type ReplayGateInputs,
   type ReplayRecorder,
 } from './replay-loader';
@@ -342,5 +344,20 @@ describe('privacy settings (resolveReplayPrivacy)', () => {
   test('only a literal true relaxes attributes / urlQuery', () => {
     expect(resolveReplayPrivacy({ attributes: true, urlQuery: true })).toEqual({ textMode: 'interactive', attributes: true, urlQuery: true });
     expect(resolveReplayPrivacy({ attributes: 'true', urlQuery: 1 })).toEqual({ textMode: 'interactive', attributes: false, urlQuery: false });
+  });
+});
+
+describe('replay attr marker click kinds (1.9.9)', () => {
+  test('X, LinkedIn and AppLovin click ids are named; the value never is', () => {
+    for (const kind of ['twclid', 'li_fat_id', 'aleid'] as const) {
+      const a = replayAttribution({ clickIdType: kind, clickId: 'SECRET', source: 'x' });
+      expect(a.click).toBe(kind);
+      expect(JSON.stringify(a)).not.toContain('SECRET');
+    }
+    expect(REPLAY_CLICK_KINDS).toEqual(['fbclid', 'gclid', 'gbraid', 'wbraid', 'ttclid', 'sclid', 'twclid', 'li_fat_id', 'aleid']);
+  });
+
+  test('alart (an app-user id, not a click) is not a click kind', () => {
+    expect(replayAttribution({ clickIdType: 'alart' }).click).toBeNull();
   });
 });

@@ -56,7 +56,7 @@ export type ReplayMode = 'replay' | 'heat';
 export type ReplayEventKind = 'track' | 'url' | 'vis' | 'ph' | 'err' | 'attr';
 
 /** Click-id kinds the attr marker may name. The click id VALUE is never recorded. */
-export const REPLAY_CLICK_KINDS = ['fbclid', 'gclid', 'gbraid', 'wbraid', 'ttclid', 'sclid'] as const;
+export const REPLAY_CLICK_KINDS = ['fbclid', 'gclid', 'gbraid', 'wbraid', 'ttclid', 'sclid', 'twclid', 'li_fat_id', 'aleid'] as const;
 export type ReplayClickKind = typeof REPLAY_CLICK_KINDS[number];
 export const REPLAY_ATTR_MAX_CHARS = 100;
 

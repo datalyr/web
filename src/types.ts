@@ -182,6 +182,9 @@ export interface EventProperties {
   msclkid?: string;
   twclid?: string;
   li_fat_id?: string;
+  sclid?: string;
+  aleid?: string;
+  alart?: string;
 }
 
 export interface UserTraits {

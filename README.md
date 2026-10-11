@@ -519,19 +519,20 @@ journey keeps the last 30 touchpoints.
 
 ### Click IDs captured
 
-The SDK reads these 16 parameters from the URL. Matching is **case-sensitive**.
+The SDK reads these 18 parameters from the URL. Matching is **case-sensitive**.
 They are listed in precedence order, down the left column then down the right.
 
 | Parameter | Platform | Parameter | Platform |
 | --- | --- | --- | --- |
-| `fbclid` | Meta | `li_fat_id` | LinkedIn |
-| `gclid` | Google Ads | `sclid` | Snapchat |
-| `gbraid` | Google Ads, iOS | `dclid` | Google Display |
-| `wbraid` | Google Ads, web | `epik` | Pinterest |
-| `ttclid` | TikTok | `rdt_cid` | Reddit |
-| `oppref` | OpenAI Ads | `obclid` | Outbrain |
-| `msclkid` | Microsoft | `irclid` | Impact |
-| `twclid` | X | `ko_click_id` | Klaviyo |
+| `fbclid` | Meta | `sclid` | Snapchat |
+| `gclid` | Google Ads | `dclid` | Google Display |
+| `gbraid` | Google Ads, iOS | `epik` | Pinterest |
+| `wbraid` | Google Ads, web | `rdt_cid` | Reddit |
+| `ttclid` | TikTok | `obclid` | Outbrain |
+| `oppref` | OpenAI Ads | `irclid` | Impact |
+| `msclkid` | Microsoft | `ko_click_id` | Klaviyo |
+| `twclid` | X | `aleid` | AppLovin |
+| `li_fat_id` | LinkedIn | `alart` | AppLovin, app users (never primary) |
 
 Two parameters are normalized to a canonical name:
 
@@ -542,6 +543,14 @@ Two parameters are normalized to a canonical name:
 
 A URL carrying several click IDs sends all of them. `clickIdType` takes the first match in
 the order of the table above. Any click ID forces `medium` to `cpc`.
+
+When the page URL has no `twclid`, the SDK takes it from the query string of
+`document.referrer`, as X's own pixel does, once per page load; a referrer `twclid` the
+browser has already seen (kept 90 days, only while marketing is allowed) is not taken again,
+and none is taken while marketing is declined. `aleid` and `alart` are captured **as of 1.9.9**;
+`alart` is not stored in first / last touch while marketing is declined.
+`alart` is an app-user id, not a click: it never becomes `clickIdType`, never makes the
+visit paid, and on its own never replaces the stored touch.
 
 `oppref` (OpenAI Ads) is captured **as of 1.7.8**. Earlier versions did not, so OpenAI Ads
 web conversions from 1.7.7 and below delivered with `attribution_type: none` unless the
@@ -568,6 +577,13 @@ arrives as `source`.
 | Google Analytics | `_ga`, `_gid` | Yes |
 | TikTok | `_ttp`, `_ttc` | No |
 | Snapchat | `_scid` | No |
+| X | `_twclid`, `_twpid` | No |
+| AppLovin | `_axeid`, `_axart`, `axwrt` or `_axwrt` (sent as `_axwrt`, `axwrt` first, UUID v4 only) | No |
+| LinkedIn | `li_fat_id`, sent as `_li_fat_id` | No |
+
+Cookies are sent under their own names and never fill a click-ID field. `_twclid` holds
+URI-encoded JSON; the event carries the `twclid` inside it, or nothing when it does not parse.
+The X, AppLovin and LinkedIn cookies are read as of 1.9.9.
 
 Campaign parameters survive a marketing decline.
 

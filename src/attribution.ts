@@ -4,11 +4,20 @@
  */
 
 import { storage, cookies } from './storage';
-import { getAllQueryParams, getRegistrableDomain, redactUrl } from './utils';
+import { getAllQueryParams, getRegistrableDomain, isHostOrSubdomain, redactUrl } from './utils';
 import type { Attribution, TouchPoint } from './types';
 
 export class AttributionManager {
   private static readonly KLAVIYO_BINDING_KEY = 'dl_klaviyo_profile_binding';
+  /** Last twclid this browser took from a URL or a referrer (see recoverReferrerTwclid):
+   * `{ v, expires_at }`, kept for the attribution window and only while marketing is allowed. */
+  static readonly SEEN_TWCLID_KEY = 'dl_seen_twclid';
+  // AppLovin's pixel accepts only a UUID v4 browser id; anything else is dropped.
+  private static readonly AXWRT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  private referrerTwclidChecked = false;
+  // The twclid recovered from document.referrer for the current URL (in memory only; reset
+  // with the params cache on SPA navigation). Applied only while marketing is allowed.
+  private referrerTwclid: string | null = null;
   private static readonly KLAVIYO_BINDING_TTL_MS = 10 * 60 * 1000;
   private attributionWindow: number;
   private trackedParams: string[];
@@ -38,8 +47,18 @@ export class AttributionManager {
     'rdt_cid',    // Reddit
     'obclid',     // Outbrain
     'irclid',     // Impact Radius
-    'ko_click_id' // Klaviyo
+    'ko_click_id', // Klaviyo
+    // AppLovin Axon appends BOTH to every ad click. Kept verbatim (AppLovin documents
+    // no format). Last, so they never outrank an existing click id on the same URL.
+    // `alart` is AppLovin's app-user id and rides with `aleid`: see NON_CLICK_EVIDENCE_IDS.
+    'aleid',      // AppLovin
+    'alart'       // AppLovin (app users)
   ];
+  // Captured, persisted and consent-stripped like every CLICK_IDS entry, but NOT click
+  // evidence: never the primary clickId/clickIdType (so never source/medium paid), and on
+  // its own never a "real signal" that replaces the stored touch. Same as the workers
+  // (infra/cloudflare/lib/click-ids.js CLICK_SIGNAL_FIELDS excludes it).
+  private NON_CLICK_EVIDENCE_IDS = new Set(['alart']);
   // Real ad-platform URL params whose value we store under a canonical internal
   // name. Snapchat appends &ScCid= (alias `sccid`) to the landing URL — it does
   // NOT use `sclid`. Query-param lookup is case-sensitive, so capture the real
@@ -83,7 +102,14 @@ export class AttributionManager {
   // TR-03: ad-cookie fields (Meta/Google Ads/TikTok/Snap) that are MARKETING-scoped. When
   // marketing consent is declined these are neither synthesized/written nor shipped. Google
   // Analytics cookies (_ga/_gid) and utm_* stay — they're analytics-scoped.
-  private MARKETING_COOKIES = ['_fbp', '_fbc', '_gcl_aw', '_gcl_dc', '_gcl_gb', '_gcl_ha', '_gac', '_ttp', '_ttc', '_scid'];
+  // These are the event_data KEYS captureAdCookies() emits, which for LinkedIn is the
+  // renamed `_li_fat_id` (the cookie itself is `li_fat_id`, the URL param's name).
+  // AppLovin's server-mirrored `axwrt` cookie ships under `_axwrt`; `axwrt` is listed too
+  // so the bare name can never reach a declined payload either.
+  private MARKETING_COOKIES = [
+    '_fbp', '_fbc', '_gcl_aw', '_gcl_dc', '_gcl_gb', '_gcl_ha', '_gac', '_ttp', '_ttc', '_scid',
+    '_twclid', '_twpid', '_axeid', '_axwrt', 'axwrt', '_axart', '_li_fat_id',
+  ];
   // TR-03: live marketing-consent predicate. Absent = allowed (preserves today's behavior);
   // returns false ONLY on an explicit decline (Shopify marketing:false / setConsent
   // marketing|sale=false), and is re-evaluated per event so a later grant restores capture.
@@ -170,6 +196,79 @@ export class AttributionManager {
    */
   clearCache(): void {
     this.queryParamsCache = null;
+    this.referrerTwclid = null;
+  }
+
+  /**
+   * X's pixel takes twclid from the URL, then from document.referrer's query string (then
+   * its _twclid cookie, read in captureAdCookies under its own key). The referrer case is a
+   * landing page that redirected, or was left, before dl.js read its URL.
+   *
+   * Decided ONCE per document, when the params cache is first filled, and held in memory
+   * for the current URL: every getAttributionData() call on the page then gets the same
+   * answer (no flip-flopping between calls). captureAttribution applies it exactly like a
+   * URL twclid, but only while marketing is allowed: under a marketing decline it is never
+   * applied, so it never reaches a touch, the payload or storage (as before 1.9.9).
+   * Every twclid taken from a URL or a referrer is recorded under SEEN_TWCLID_KEY, and a
+   * referrer value equal to it is never recovered again: that covers the next internal page
+   * after a landing that carried it, and a reload / back / restored tab of a page whose
+   * referrer had it, which must not overwrite a newer touch.
+   */
+  private recoverReferrerTwclid(params: Record<string, string>): void {
+    if (params.twclid) {
+      this.rememberTwclid(params.twclid);
+      return;
+    }
+    if (this.referrerTwclidChecked) return;
+    this.referrerTwclidChecked = true;
+    const referrer = typeof document !== 'undefined' ? document.referrer : '';
+    if (!referrer || referrer.indexOf('twclid=') === -1) return;
+    let value: string | undefined;
+    try {
+      value = getAllQueryParams(new URL(referrer).search).twclid;
+    } catch {
+      return;
+    }
+    if (!value || this.seenTwclid() === value) return;
+    this.referrerTwclid = value;
+  }
+
+  /** Record a twclid as seen, for the attribution window. Never while marketing is declined. */
+  private rememberTwclid(value: string): void {
+    if (!this.isMarketingAllowed()) return;
+    storage.set(AttributionManager.SEEN_TWCLID_KEY, { v: value, expires_at: Date.now() + this.attributionWindow });
+  }
+
+  private seenTwclid(): string | null {
+    const data = storage.get(AttributionManager.SEEN_TWCLID_KEY);
+    if (data == null) return null;
+    if (typeof data !== 'object' || typeof data.v !== 'string' || !(Number(data.expires_at) > Date.now())) {
+      this.forgetSeenTwclid();
+      return null;
+    }
+    return data.v;
+  }
+
+  /** Drop the seen-twclid record (marketing withdrawal, reset, opt-out, analytics withdrawal). */
+  forgetSeenTwclid(): void {
+    storage.remove(AttributionManager.SEEN_TWCLID_KEY);
+  }
+
+  /**
+   * X's `_twclid` cookie is `encodeURIComponent(JSON.stringify({ twclid, ... }))`. Return the
+   * twclid inside it, or null for anything else (raw JSON parses too). Never throws.
+   */
+  private parseTwclidCookie(value: string | null): string | null {
+    if (!value) return null;
+    try {
+      let decoded = value;
+      try { decoded = decodeURIComponent(value); } catch { /* cookies.get already decoded */ }
+      const parsed = JSON.parse(decoded);
+      const twclid = parsed && typeof parsed === 'object' ? parsed.twclid : null;
+      return typeof twclid === 'string' && twclid ? twclid : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -181,6 +280,7 @@ export class AttributionManager {
     const params = this.queryParamsCache || getAllQueryParams();
     if (!this.queryParamsCache) {
       this.queryParamsCache = params;
+      this.recoverReferrerTwclid(params);
     }
 
     this.captureKlaviyoProfileBinding(params);
@@ -218,7 +318,7 @@ export class AttributionManager {
     for (const clickId of this.CLICK_IDS) {
       const value = params[clickId];
       if (value) {
-        if (!attribution.clickId) {
+        if (!attribution.clickId && !this.NON_CLICK_EVIDENCE_IDS.has(clickId)) {
           attribution.clickId = value;
           attribution.clickIdType = clickId;
         }
@@ -237,6 +337,17 @@ export class AttributionManager {
         }
         attribution[canonical] = value;
       }
+    }
+
+    // twclid recovered from the referrer (see recoverReferrerTwclid): like a URL twclid,
+    // after every URL click id, and only while marketing is allowed.
+    if (!attribution.twclid && this.referrerTwclid && this.isMarketingAllowed()) {
+      if (!attribution.clickId) {
+        attribution.clickId = this.referrerTwclid;
+        attribution.clickIdType = 'twclid';
+      }
+      attribution.twclid = this.referrerTwclid;
+      this.rememberTwclid(this.referrerTwclid);
     }
 
     // Capture custom tracked parameters
@@ -409,6 +520,25 @@ export class AttributionManager {
     // Snapchat first-party cookie (Snap Pixel sets _scid). Flows to the server as
     // cookies._scid and is sent on the Snap CAPI event as sc_cookie1 (raw).
     adCookies._scid = cookies.get('_scid');
+
+    // X: _twclid holds the click id as URI-encoded JSON; ship the parsed twclid (null when
+    // malformed). _twpid is the X Pixel's browser id, raw. Both stay under their cookie
+    // names: writing them into `twclid` would make every pageview look like a fresh click.
+    adCookies._twclid = this.parseTwclidCookie(cookies.get('_twclid'));
+    adCookies._twpid = cookies.get('_twpid');
+
+    // AppLovin pixel: _axeid (its copy of aleid), the browser id (UUID v4) and _axart (its
+    // copy of alart), raw. The browser id prefers the server-mirrored `axwrt` cookie over
+    // the pixel's `_axwrt`, as the AppLovin pixel does; either ships as `_axwrt`, and only
+    // when it is a UUID v4 (the pixel's own check).
+    adCookies._axeid = cookies.get('_axeid');
+    adCookies._axwrt = [cookies.get('axwrt'), cookies.get('_axwrt')]
+      .find((v): v is string => !!v && AttributionManager.AXWRT_RE.test(v)) ?? null;
+    adCookies._axart = cookies.get('_axart');
+
+    // LinkedIn Insight Tag's first-party cookie. Its name is the URL param's, so it ships
+    // as `_li_fat_id` and never overwrites (or poses as) a URL-captured li_fat_id.
+    adCookies._li_fat_id = cookies.get('li_fat_id');
     
     // Generate _fbp if missing (Facebook browser ID). TR-03: only when marketing is allowed.
     if (marketingAllowed && !adCookies._fbp && (this.hasClickId('fbclid') || adCookies._fbc)) {
@@ -509,9 +639,30 @@ export class AttributionManager {
   }
 
   /**
+   * What a touch may keep at rest. Under a marketing decline the touch is stored exactly as
+   * before 1.9.9 (TR-03: existing click ids stay in touches, stripped from payloads), except
+   * `alart`, a persistent AppLovin user id, which is not stored at all. (A referrer-recovered
+   * twclid never gets here under a decline: captureAttribution does not apply it.)
+   */
+  private touchForStorage(a: Attribution): Attribution {
+    if (this.isMarketingAllowed() || !('alart' in a)) return a;
+    const { alart: _alart, ...rest } = a;
+    return rest;
+  }
+
+  private nonEvidenceIds(a: Attribution): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const k of this.NON_CLICK_EVIDENCE_IDS) if (a[k]) out[k] = a[k];
+    return out;
+  }
+
+  /**
    * Get attribution data for event
    */
   getAttributionData(): Record<string, any> {
+    // A marketing decline (Shopify, setConsent, or one already in force at load) must not
+    // leave the seen-twclid record at rest.
+    if (!this.isMarketingAllowed()) this.forgetSeenTwclid();
     const firstTouch = this.getFirstTouch();
     const lastTouch = this.getLastTouch();
     const journey = this.getJourney();
@@ -555,6 +706,9 @@ export class AttributionManager {
       if (fallback) {
         current = {
           ...fallback,
+          // A non-evidence id on this URL (alart alone) still rides on the event; it
+          // just never replaces or re-stamps the stored touch.
+          ...this.nonEvidenceIds(current),
           referrer: current.referrer,
           referrerHost: current.referrerHost,
           landingPage: current.landingPage,
@@ -584,10 +738,10 @@ export class AttributionManager {
     // Only (re)write first/last touch when this pageview carried a REAL signal — never
     // overwrite stored attribution with the 'direct'/'none' floor of an internal nav.
     if (!firstTouch && hasRealAttribution) {
-      this.storeFirstTouch(current);
+      this.storeFirstTouch(this.touchForStorage(current));
     }
     if (hasRealAttribution) {
-      this.storeLastTouch(current);
+      this.storeLastTouch(this.touchForStorage(current));
     }
 
     const result: Record<string, any> = {
@@ -666,7 +820,8 @@ export class AttributionManager {
         rdt_cid: 'reddit',      // 9.A.6
         obclid: 'outbrain',     // 9.A.6
         irclid: 'impact',       // 9.A.6: Impact Radius
-        ko_click_id: 'klaviyo'  // 9.A.6
+        ko_click_id: 'klaviyo', // 9.A.6
+        aleid: 'applovin'
       };
       
       return clickIdSources[attribution.clickIdType] || 'paid';
@@ -688,8 +843,10 @@ export class AttributionManager {
 
       // Social sources
       if (host.includes('facebook.com') || host.includes('fb.com')) return 'facebook';
-      if (host.includes('twitter.com') || host.includes('t.co') || host.includes('x.com')) return 'twitter';
-      if (host.includes('linkedin.com') || host.includes('lnkd.in')) return 'linkedin';
+      // Exact host or subdomain only: a substring test tagged reddit.com, pinterest.com
+      // and microsoft.com (`t.co`) and netflix.com, box.com, xbox.com (`x.com`) as twitter.
+      if (['twitter.com', 't.co', 'x.com'].some(d => isHostOrSubdomain(host, d))) return 'twitter';
+      if (['linkedin.com', 'lnkd.in'].some(d => isHostOrSubdomain(host, d))) return 'linkedin';
       if (host.includes('instagram.com')) return 'instagram';
       if (host.includes('youtube.com') || host.includes('youtu.be')) return 'youtube';
       if (host.includes('tiktok.com')) return 'tiktok';
