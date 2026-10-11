@@ -1118,7 +1118,7 @@ class Datalyr {
     // already de-links the visitor server-side.)
     storage.remove('dl_first_touch');
     storage.remove('dl_last_touch');
-    storage.remove(AttributionManager.SEEN_TWCLID_KEY);
+    this.attribution?.forgetSeenTwclid();
     this.session.createNewSession();
     this.syncReplay();
     this.log('User reset');
@@ -1322,7 +1322,7 @@ class Datalyr {
     // directly above.
     storage.remove('dl_first_touch');
     storage.remove('dl_last_touch');
-    storage.remove(AttributionManager.SEEN_TWCLID_KEY);
+    this.attribution?.forgetSeenTwclid();
     this.log('User opted out');
   }
 
@@ -1405,7 +1405,7 @@ class Datalyr {
       // marketing attribution at rest either.
       storage.remove('dl_first_touch');
       storage.remove('dl_last_touch');
-      storage.remove(AttributionManager.SEEN_TWCLID_KEY);
+      this.attribution?.forgetSeenTwclid();
     } else {
       // TR-15 (P3): grant → persist the in-memory anon id now (see onShopifyConsentChanged).
       this.identity.enablePersistence();
@@ -1427,6 +1427,7 @@ class Datalyr {
     // after withdrawal, and the server still reads the stamped client_reference_id).
     if (!this.consentAllowsMarketing()) {
       this.disposeMarketingLinkDecorators();
+      this.attribution?.forgetSeenTwclid();
     }
 
     this.log('Consent updated:', consent);
@@ -2585,6 +2586,7 @@ class Datalyr {
     // X-1: marketing withdrawn (Shopify decline) → stop stamping Stripe/CC outbound links.
     if (!this.consentAllowsMarketing()) {
       this.disposeMarketingLinkDecorators();
+      this.attribution?.forgetSeenTwclid();
     }
 
     // Grant direction: cart-attribute stamping is cheap and idempotent (merges via

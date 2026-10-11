@@ -546,7 +546,9 @@ the order of the table above. Any click ID forces `medium` to `cpc`.
 
 When the page URL has no `twclid`, the SDK takes it from the query string of
 `document.referrer`, as X's own pixel does, once per page load; a referrer `twclid` the
-browser has already seen is not taken again. `aleid` and `alart` are captured **as of 1.9.9**.
+browser has already seen (kept 90 days, only while marketing is allowed) is not taken again,
+and none is taken while marketing is declined. `aleid` and `alart` are captured **as of 1.9.9**;
+`alart` is not stored in first / last touch while marketing is declined.
 `alart` is an app-user id, not a click: it never becomes `clickIdType`, never makes the
 visit paid, and on its own never replaces the stored touch.
 

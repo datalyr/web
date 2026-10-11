@@ -401,7 +401,7 @@ describe('twclid from document.referrer', () => {
     setPage('', 'https://lp.other-brand.com/?twclid=NEW');
     const d = new AttributionManager().getAttributionData() as any;
     expect(d.twclid).toBe('NEW');
-    expect(storage.get(AttributionManager.SEEN_TWCLID_KEY)).toBe('NEW');
+    expect(storage.get(AttributionManager.SEEN_TWCLID_KEY).v).toBe('NEW');
   });
 
   test('marketing DECLINED: nothing is remembered at rest', () => {
@@ -410,6 +410,102 @@ describe('twclid from document.referrer', () => {
     setPage('', 'https://lp.other-brand.com/?twclid=REF5');
     new AttributionManager({ marketingAllowed: () => false }).getAttributionData();
     expect(storage.get(AttributionManager.SEEN_TWCLID_KEY)).toBeNull();
+  });
+
+  describe('privacy (P1 / P3)', () => {
+    const DAY = 86400000;
+
+    test('marketing DECLINED: a referrer twclid is never applied: not in the payload, the touches or storage', () => {
+      setPage('?utm_source=newsletter&utm_campaign=oct', 'https://lp.other-brand.com/?twclid=REFD');
+      const attr = new AttributionManager({ marketingAllowed: () => false });
+      for (let i = 0; i < 3; i++) {
+        const d = attr.getAttributionData() as any;
+        expect(d.twclid).toBeUndefined();
+        expect(d.clickId).toBeUndefined();
+        expect(d.source).toBe('newsletter');
+        expect(d.medium).not.toBe('cpc');
+      }
+      expect(storage.get('dl_first_touch').twclid).toBeUndefined();
+      expect(storage.get('dl_first_touch').clickId).toBeUndefined();
+      expect(storage.get('dl_last_touch').twclid).toBeUndefined();
+      expect(storage.get('dl_last_touch').clickIdType).toBeUndefined();
+      expect(storage.get(AttributionManager.SEEN_TWCLID_KEY)).toBeNull();
+    });
+
+    test('marketing DECLINED with only the referrer: same source as without recovery (referral), no touch with twclid', () => {
+      setPage('', 'https://lp.other-brand.com/?twclid=REFD');
+      const d = new AttributionManager({ marketingAllowed: () => false }).getAttributionData() as any;
+      expect(d.source).toBe('referral');
+      expect(storage.get('dl_last_touch').twclid).toBeUndefined();
+    });
+
+    test('marketing DECLINED: alart is not stored in touches; existing click ids keep TR-03 behaviour (stored, stripped)', () => {
+      setPage('?alart=u1&aleid=e1&fbclid=fb1&utm_source=applovin');
+      const d = new AttributionManager({ marketingAllowed: () => false }).getAttributionData() as any;
+      for (const k of ['alart', 'aleid', 'fbclid', 'clickId']) expect(d[k]).toBeUndefined();
+      for (const key of ['dl_first_touch', 'dl_last_touch']) {
+        const touch = storage.get(key);
+        expect(touch.alart).toBeUndefined();
+        expect('alart' in touch).toBe(false);
+        // unchanged TR-03: click ids stay in the touch, only stripped from payloads
+        expect(touch.fbclid).toBe('fb1');
+        expect(touch.aleid).toBe('e1');
+        expect(touch.clickIdType).toBe('fbclid');
+        expect(touch.utm_source).toBe('applovin');
+      }
+    });
+
+    test('marketing ALLOWED: alart is stored in the touch as before', () => {
+      setPage('?alart=u1&aleid=e1');
+      new AttributionManager({ marketingAllowed: () => true }).getAttributionData();
+      expect(storage.get('dl_last_touch').alart).toBe('u1');
+    });
+
+    test('decline mid-page after a recovery: the next touch carries no twclid and the seen record is gone', () => {
+      let allowed = true;
+      setPage('?utm_campaign=spring', 'https://lp.other-brand.com/?twclid=REFM');
+      const attr = new AttributionManager({ marketingAllowed: () => allowed });
+      expect((attr.getAttributionData() as any).twclid).toBe('REFM');
+      expect(storage.get(AttributionManager.SEEN_TWCLID_KEY).v).toBe('REFM');
+      allowed = false;
+      const d = attr.getAttributionData() as any;
+      expect(d.twclid).toBeUndefined();
+      expect(storage.get('dl_last_touch').twclid).toBeUndefined();
+      expect(storage.get(AttributionManager.SEEN_TWCLID_KEY)).toBeNull();
+      // a grant later on the same page applies it again (same decision, in memory)
+      allowed = true;
+      expect((attr.getAttributionData() as any).twclid).toBe('REFM');
+    });
+
+    test('the seen record expires with the attribution window (90 days by default)', () => {
+      const before = Date.now();
+      setPage('?twclid=URLX');
+      new AttributionManager().getAttributionData();
+      const rec = storage.get(AttributionManager.SEEN_TWCLID_KEY);
+      expect(rec.v).toBe('URLX');
+      expect(rec.expires_at).toBeGreaterThanOrEqual(before + 90 * DAY);
+      expect(rec.expires_at).toBeLessThanOrEqual(Date.now() + 90 * DAY);
+    });
+
+    test('an expired (or malformed) seen record no longer blocks recovery, and is removed', () => {
+      for (const stale of [{ v: 'REFE', expires_at: Date.now() - 1 }, 'REFE', { v: 'REFE' }]) {
+        storage.set(AttributionManager.SEEN_TWCLID_KEY, stale);
+        setPage('', 'https://lp.other-brand.com/?twclid=REFE');
+        const d = new AttributionManager().getAttributionData() as any;
+        expect(d.twclid).toBe('REFE');
+        const rec = storage.get(AttributionManager.SEEN_TWCLID_KEY);
+        expect(rec.v).toBe('REFE');
+        expect(rec.expires_at).toBeGreaterThan(Date.now());
+        localStorage.clear();
+      }
+    });
+
+    test('any event under a marketing decline removes a seen record left from before', () => {
+      storage.set(AttributionManager.SEEN_TWCLID_KEY, { v: 'tw', expires_at: Date.now() + DAY });
+      setPage('');
+      new AttributionManager({ marketingAllowed: () => false }).getAttributionData();
+      expect(storage.get(AttributionManager.SEEN_TWCLID_KEY)).toBeNull();
+    });
   });
 
   test('ignored on the next page (new document) after the landing that carried it in its URL', () => {
@@ -555,6 +651,8 @@ describe('SEEN_TWCLID_KEY is purged with the touches', () => {
     ['reset', (sdk: any) => sdk.reset()],
     ['optOut', (sdk: any) => sdk.optOut()],
     ['setConsent({ analytics: false })', (sdk: any) => sdk.setConsent({ analytics: false })],
+    ['setConsent({ marketing: false })', (sdk: any) => sdk.setConsent({ marketing: false })],
+    ['setConsent({ sale: false })', (sdk: any) => sdk.setConsent({ sale: false })],
   ])('%s removes it', async (_name, purge) => {
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
     jest.spyOn(console, 'warn').mockImplementation(() => undefined);

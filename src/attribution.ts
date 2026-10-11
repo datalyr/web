@@ -9,11 +9,15 @@ import type { Attribution, TouchPoint } from './types';
 
 export class AttributionManager {
   private static readonly KLAVIYO_BINDING_KEY = 'dl_klaviyo_profile_binding';
-  /** Last twclid this browser took from a URL or a referrer (see recoverReferrerTwclid). */
+  /** Last twclid this browser took from a URL or a referrer (see recoverReferrerTwclid):
+   * `{ v, expires_at }`, kept for the attribution window and only while marketing is allowed. */
   static readonly SEEN_TWCLID_KEY = 'dl_seen_twclid';
   // AppLovin's pixel accepts only a UUID v4 browser id; anything else is dropped.
   private static readonly AXWRT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   private referrerTwclidChecked = false;
+  // The twclid recovered from document.referrer for the current URL (in memory only; reset
+  // with the params cache on SPA navigation). Applied only while marketing is allowed.
+  private referrerTwclid: string | null = null;
   private static readonly KLAVIYO_BINDING_TTL_MS = 10 * 60 * 1000;
   private attributionWindow: number;
   private trackedParams: string[];
@@ -192,6 +196,7 @@ export class AttributionManager {
    */
   clearCache(): void {
     this.queryParamsCache = null;
+    this.referrerTwclid = null;
   }
 
   /**
@@ -199,20 +204,19 @@ export class AttributionManager {
    * its _twclid cookie, read in captureAdCookies under its own key). The referrer case is a
    * landing page that redirected, or was left, before dl.js read its URL.
    *
-   * Decided ONCE per document, when the params cache is first filled: a recovered value is
-   * injected into the params so it behaves exactly like a URL twclid for every later
-   * getAttributionData() call on this page (no flip-flopping between calls). Every twclid
-   * taken from a URL or a referrer is recorded under SEEN_TWCLID_KEY, and a referrer value
-   * equal to it is never recovered again: that covers the next internal page after a landing
-   * that carried it, and a reload / back / restored tab of a page whose referrer had it,
-   * which must not overwrite a newer touch.
+   * Decided ONCE per document, when the params cache is first filled, and held in memory
+   * for the current URL: every getAttributionData() call on the page then gets the same
+   * answer (no flip-flopping between calls). captureAttribution applies it exactly like a
+   * URL twclid, but only while marketing is allowed: under a marketing decline it is never
+   * applied, so it never reaches a touch, the payload or storage (as before 1.9.9).
+   * Every twclid taken from a URL or a referrer is recorded under SEEN_TWCLID_KEY, and a
+   * referrer value equal to it is never recovered again: that covers the next internal page
+   * after a landing that carried it, and a reload / back / restored tab of a page whose
+   * referrer had it, which must not overwrite a newer touch.
    */
   private recoverReferrerTwclid(params: Record<string, string>): void {
-    const remember = (value: string) => {
-      if (this.isMarketingAllowed()) storage.set(AttributionManager.SEEN_TWCLID_KEY, value);
-    };
     if (params.twclid) {
-      remember(params.twclid);
+      this.rememberTwclid(params.twclid);
       return;
     }
     if (this.referrerTwclidChecked) return;
@@ -225,9 +229,29 @@ export class AttributionManager {
     } catch {
       return;
     }
-    if (!value || storage.get(AttributionManager.SEEN_TWCLID_KEY) === value) return;
-    params.twclid = value;
-    remember(value);
+    if (!value || this.seenTwclid() === value) return;
+    this.referrerTwclid = value;
+  }
+
+  /** Record a twclid as seen, for the attribution window. Never while marketing is declined. */
+  private rememberTwclid(value: string): void {
+    if (!this.isMarketingAllowed()) return;
+    storage.set(AttributionManager.SEEN_TWCLID_KEY, { v: value, expires_at: Date.now() + this.attributionWindow });
+  }
+
+  private seenTwclid(): string | null {
+    const data = storage.get(AttributionManager.SEEN_TWCLID_KEY);
+    if (data == null) return null;
+    if (typeof data !== 'object' || typeof data.v !== 'string' || !(Number(data.expires_at) > Date.now())) {
+      this.forgetSeenTwclid();
+      return null;
+    }
+    return data.v;
+  }
+
+  /** Drop the seen-twclid record (marketing withdrawal, reset, opt-out, analytics withdrawal). */
+  forgetSeenTwclid(): void {
+    storage.remove(AttributionManager.SEEN_TWCLID_KEY);
   }
 
   /**
@@ -313,6 +337,17 @@ export class AttributionManager {
         }
         attribution[canonical] = value;
       }
+    }
+
+    // twclid recovered from the referrer (see recoverReferrerTwclid): like a URL twclid,
+    // after every URL click id, and only while marketing is allowed.
+    if (!attribution.twclid && this.referrerTwclid && this.isMarketingAllowed()) {
+      if (!attribution.clickId) {
+        attribution.clickId = this.referrerTwclid;
+        attribution.clickIdType = 'twclid';
+      }
+      attribution.twclid = this.referrerTwclid;
+      this.rememberTwclid(this.referrerTwclid);
     }
 
     // Capture custom tracked parameters
@@ -603,6 +638,18 @@ export class AttributionManager {
     return parts.slice(3).join('.') || null;
   }
 
+  /**
+   * What a touch may keep at rest. Under a marketing decline the touch is stored exactly as
+   * before 1.9.9 (TR-03: existing click ids stay in touches, stripped from payloads), except
+   * `alart`, a persistent AppLovin user id, which is not stored at all. (A referrer-recovered
+   * twclid never gets here under a decline: captureAttribution does not apply it.)
+   */
+  private touchForStorage(a: Attribution): Attribution {
+    if (this.isMarketingAllowed() || !('alart' in a)) return a;
+    const { alart: _alart, ...rest } = a;
+    return rest;
+  }
+
   private nonEvidenceIds(a: Attribution): Record<string, string> {
     const out: Record<string, string> = {};
     for (const k of this.NON_CLICK_EVIDENCE_IDS) if (a[k]) out[k] = a[k];
@@ -613,6 +660,9 @@ export class AttributionManager {
    * Get attribution data for event
    */
   getAttributionData(): Record<string, any> {
+    // A marketing decline (Shopify, setConsent, or one already in force at load) must not
+    // leave the seen-twclid record at rest.
+    if (!this.isMarketingAllowed()) this.forgetSeenTwclid();
     const firstTouch = this.getFirstTouch();
     const lastTouch = this.getLastTouch();
     const journey = this.getJourney();
@@ -688,10 +738,10 @@ export class AttributionManager {
     // Only (re)write first/last touch when this pageview carried a REAL signal — never
     // overwrite stored attribution with the 'direct'/'none' floor of an internal nav.
     if (!firstTouch && hasRealAttribution) {
-      this.storeFirstTouch(current);
+      this.storeFirstTouch(this.touchForStorage(current));
     }
     if (hasRealAttribution) {
-      this.storeLastTouch(current);
+      this.storeLastTouch(this.touchForStorage(current));
     }
 
     const result: Record<string, any> = {
