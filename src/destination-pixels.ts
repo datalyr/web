@@ -2,8 +2,8 @@
  * Destination pixels loader (part of dl.js; the pixels themselves are NOT).
  *
  * Ad platforms whose browser pixel the Container runs next to DATALYR's server
- * sender (AppLovin today; the X Pixel and the LinkedIn Insight Tag are meant to
- * join it) live in one separate module, dl.pixels.<v>.js (src/pixels/index.ts,
+ * sender (AppLovin and the X Pixel; the LinkedIn Insight Tag is meant to join
+ * them) live in one separate module, dl.pixels.<v>.js (src/pixels/index.ts,
  * its own Rollup entry). It is injected only when /container-scripts sends a
  * config for one of them, so a site without any pays nothing but this file. The
  * module registers `window.DatalyrPixels` (DestinationPixelsModule below).
@@ -19,7 +19,7 @@ export const PIXELS_GLOBAL = 'DatalyrPixels';
 /** Contract version between dl.js and the module; bump on a breaking change. */
 export const PIXELS_API = 1;
 /** Platforms the module serves. */
-export const DESTINATION_PIXEL_PLATFORMS = ['applovin'] as const;
+export const DESTINATION_PIXEL_PLATFORMS = ['applovin', 'x'] as const;
 export type DestinationPixelPlatform = typeof DESTINATION_PIXEL_PLATFORMS[number];
 
 /** Outcome of a platform's one-time load decision. */

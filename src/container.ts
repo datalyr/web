@@ -356,6 +356,17 @@ export interface PixelConfig {
     /** DATALYR event names whose browser copy may carry a value. */
     values?: string[];
   };
+  /** Present only for workspaces with an active X connection while the X
+   *  destination gate is on. The pixel lives in dl.pixels.<v>.js. */
+  x?: {
+    enabled: boolean;
+    pixel_id: string;
+    /** DATALYR event name → X Event ID, from active website X rules. */
+    events?: Record<string, string>;
+    values?: string[];
+    /** DATALYR event names whose rule is an X PURCHASE. */
+    purchases?: string[];
+  };
 }
 
 export class ContainerManager {
@@ -913,6 +924,10 @@ export class ContainerManager {
     if (this.pixels.applovin?.enabled === true && this.pixels.applovin.event_key) {
       this.startDestinationPixel('applovin', this.pixels.applovin);
     }
+    // The X Pixel: same module, same gates; twq('config') sends X's page view.
+    if (this.pixels.x?.enabled === true && this.pixels.x.pixel_id) {
+      this.startDestinationPixel('x', this.pixels.x);
+    }
   }
 
   /** Marketing consent (the container gate) and no DNT / GPC / US opt-out. */
@@ -1297,7 +1312,7 @@ export class ContainerManager {
     // Authorization is request-scoped, never a positive cached decision. Do not
     // execute newly returned scripts or initialize a new destination here.
     const pixels: PixelConfig = { whop: initialized.whop };
-    const platforms = ['meta', 'google', 'tiktok', 'applovin'] as const;
+    const platforms = ['meta', 'google', 'tiktok', 'applovin', 'x'] as const;
     if (platforms.some(platform => initialized[platform]?.enabled === true)) {
       try {
         const data = await this.readConfiguration('pixel_forwarding');
@@ -1441,8 +1456,12 @@ export class ContainerManager {
     if (pixels?.applovin?.enabled === true) {
       mirror('applovin', this.trackToDestinationPixel('applovin', pixels.applovin, eventName, sanitizedProperties, eventId));
     }
+    // X: conversions only (twq('config') already counted the page view).
+    if (pixels?.x?.enabled === true && !isPageEvent(eventName)) {
+      mirror('x', this.trackToDestinationPixel('x', pixels.x, eventName, sanitizedProperties, eventId));
+    }
     if (companionDeliveries.length > 0) await Promise.all(companionDeliveries);
-    return ['meta', 'google', 'tiktok', 'whop', 'applovin'].filter((platform) => delivered.has(platform));
+    return ['meta', 'google', 'tiktok', 'whop', 'applovin', 'x'].filter((platform) => delivered.has(platform));
   }
 
   /**

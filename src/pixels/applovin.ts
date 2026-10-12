@@ -129,7 +129,7 @@ export function appLovinDedupeId(input: { eventName?: string; eventId?: string; 
   return appLovinText(input.eventId);
 }
 
-function appLovinNumber(value: unknown): number | undefined {
+export function appLovinNumber(value: unknown): number | undefined {
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
   if (typeof value !== 'string' || !/^\s*-?\d+(\.\d+)?\s*$/.test(value)) return undefined;
   return Number(value);
@@ -339,7 +339,7 @@ const FOREIGN_SCRIPT_SELECTOR = APPLOVIN_PIXEL_SCRIPTS
   .map((src) => `script[src^="${src.replace(/\.(iife\.)?js$/, '')}"]:not([data-datalyr-pixel])`).join(',');
 
 /** Every string inside a (parsed) Shopify web pixel configuration, nested JSON strings included. */
-function configurationStrings(value: unknown, depth = 0, out: string[] = []): string[] {
+export function configurationStrings(value: unknown, depth = 0, out: string[] = []): string[] {
   if (depth > 4 || value === null || value === undefined) return out;
   if (typeof value === 'string') {
     out.push(value.trim());
@@ -399,7 +399,7 @@ export function foreignAppLovinInstall(ours: unknown, eventKey: string): boolean
   }
 }
 
-function waitForParsedDocument(timeoutMs: number): Promise<void> {
+export function waitForParsedDocument(timeoutMs: number): Promise<void> {
   if (typeof document === 'undefined' || document.readyState !== 'loading') return Promise.resolve();
   return new Promise((resolve) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
