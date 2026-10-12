@@ -272,25 +272,40 @@ describe('X Pixel: events', () => {
     expect(JSON.stringify(events())).not.toMatch(/a@b\.co|email|phone/);
   });
 
-  test('purchase: only as strong as the server copy (in values, value above 0, the event\'s own currency)', async () => {
-    respond(x({ values: ['purchase', 'product_added'] }));
+  test('purchase: only as strong as the server copy (in values, value above 0); value and currency as the server reads them', async () => {
+    respond(x({ values: ['purchase', 'product_added'], currencies: { product_added: 'GBP' } }));
     manager = await started();
     expect(await manager.trackToPixels('purchase', { order_id: 'o0', value: 0, currency: 'USD' }, 'e0')).toEqual([]);
-    // No USD default: a purchase without its own currency is left to the server.
-    expect(await manager.trackToPixels('purchase', { order_id: 'o1', value: 25 }, 'e1')).toEqual([]);
+    // "N/A" is the first present value field: the server has no value and skips.
+    expect(await manager.trackToPixels('purchase', { order_id: 'o1', value: 'N/A', revenue: 9 }, 'e1')).toEqual([]);
+    // A currency the sender's /^[A-Z]{3}$/ rejects (" eur", not trimmed): the server
+    // skips the whole conversion, so nothing at all, purchase or not.
+    expect(await manager.trackToPixels('purchase', { order_id: 'o2', value: 9, currency: ' eur' }, 'e2')).toEqual([]);
+    expect(await manager.trackToPixels('signup_done', { currency: 'EURO' }, 'e3')).toEqual([]);
     expect(await manager.trackToPixels('purchase', { order_id: 6896206413937, value: 25, currency: 'eur',
-      items: [{ product_id: 'p1', sku: 'SKU-1', title: 'Tee', price: 12.5, quantity: 2 }], email: 'a@b.co' }, 'e2')).toEqual(['x']);
-    // Without an order reference the conversion_id is the DATALYR event id.
-    expect(await manager.trackToPixels('purchase', { value: 10, currency: 'USD' }, 'evt-p')).toEqual(['x']);
-    // A non-purchase without its own currency goes without a value.
-    await manager.trackToPixels('product_added', { value: 3 }, 'e3');
+      items: [{ product_id: 'p1', sku: 'SKU-1', title: 'Tee', price: 12.5, quantity: 2 }], email: 'a@b.co' }, 'e4')).toEqual(['x']);
+    // No event currency: USD, as the server; without an order reference the conversion_id is the event id.
+    expect(await manager.trackToPixels('purchase', { value: 10 }, 'evt-p')).toEqual(['x']);
+    // The rule's currency before USD.
+    await manager.trackToPixels('product_added', { amount: '3' }, 'e5');
     expect(events()).toEqual([
       ['event', 'tw-q19sf-q19sg', { conversion_id: '6896206413937', value: 25, currency: 'EUR',
         contents: [{ content_id: 'SKU-1', content_group_id: 'p1', content_name: 'Tee', content_price: 12.5, num_items: 2 }] }],
       ['event', 'tw-q19sf-q19sg', { conversion_id: 'evt-p', value: 10, currency: 'USD' }],
-      ['event', 'tw-q19sf-q19si', { conversion_id: 'e3' }],
+      ['event', 'tw-q19sf-q19si', { conversion_id: 'e5', value: 3, currency: 'GBP' }],
     ]);
     expect(JSON.stringify(events())).not.toMatch(/a@b\.co|email|phone/);
+  });
+
+  test('uwt.js not run: logged once, not per event', async () => {
+    respond(x());
+    const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    manager = new ContainerManager({ workspaceId: 'ws', sdkVersion: '1.9.10', debug: true });
+    await manager.init();
+    await manager.destinationPixelStatus('x');
+    for (const id of ['e1', 'e2', 'e3']) expect(await manager.trackToPixels('signup_done', {}, id)).toEqual([]);
+    expect(log.mock.calls.filter((call) => String(call[1]).includes('uwt.js has not run'))).toHaveLength(1);
+    log.mockRestore();
   });
 
   test('ids come from the raw properties: an order id sanitising would alter is the conversion_id as the server has it', async () => {

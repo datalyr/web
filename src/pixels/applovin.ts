@@ -75,6 +75,8 @@ export interface AppLovinPixelConfig {
   events?: Record<string, string>;
   /** DATALYR event names whose browser copy may carry a value. */
   values?: string[];
+  /** DATALYR event name → the rule's config.currency (the server's fallback before USD). */
+  currencies?: Record<string, string>;
 }
 
 const lowerText = (value: unknown): string => (typeof value === 'string' ? value.trim().toLowerCase() : '');
@@ -261,46 +263,125 @@ export function appLovinNormalizedEmail(raw: unknown): string | null {
   return local ? `${local}@${domain}` : null;
 }
 
+// ---------------------------------------------------------------------------
+// The server's value and currency, mirrored exactly (postback core/utils.js +
+// main.js on the worker branch). KEEP IN SYNC.
+// ---------------------------------------------------------------------------
+
+/** core/utils.js VALUE_FALLBACK_PATHS: where resolveConversionValue looks for a value. */
+export const VALUE_FALLBACK_PATHS = [
+  'value', 'revenue', 'total', 'amount',
+  'properties.value', 'properties.revenue', 'properties.total', 'properties.amount',
+  'order.total', 'order.value', 'transaction.amount', 'total_price',
+];
+
+/** core/utils.js getValueFromPath (dotted paths, `name[0]` indexes). */
+function serverPath(object: any, path: string): unknown {
+  try {
+    return path.split('.').reduce((o: any, k) => {
+      const m = k.match(/(\w+)\[(\d+)\]/);
+      return m ? o?.[m[1]]?.[Number(m[2])] : o?.[k];
+    }, object);
+  } catch {
+    return undefined;
+  }
+}
+
+/** core/utils.js fromAny: the FIRST present value (not undefined / null / ''), whatever it is. */
+export function serverFromAny(object: any, paths: string[]): unknown {
+  if (!object) return undefined;
+  for (const path of paths) {
+    const value = serverPath(object, path);
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  return undefined;
+}
+
+/** core/utils.js getNumber: numbers as they are, strings by its separator rules. */
+export function serverNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+  let s = value.trim().replace(/[^\d.,-]/g, '');
+  if (s === '' || s === '-' || s === '.' || s === ',') return undefined;
+  const hasComma = s.includes(',');
+  const hasDot = s.includes('.');
+  if (hasComma && hasDot) {
+    s = s.lastIndexOf(',') > s.lastIndexOf('.') ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
+  } else if (hasComma) {
+    const parts = s.split(',');
+    s = parts.length > 2 || (parts.length === 2 && parts[1].length === 3) ? s.replace(/,/g, '') : s.replace(',', '.');
+  } else if (hasDot && s.split('.').length > 2) {
+    s = s.replace(/\./g, '');
+  }
+  const num = parseFloat(s);
+  return Number.isFinite(num) ? num : undefined;
+}
+
+/**
+ * The value resolveConversionValue gives a rule that takes the event's own
+ * value (the only rules whose triggers ingest lists in `values`): the FIRST
+ * present VALUE_FALLBACK_PATHS field, as getNumber reads it. A present
+ * non-numeric field ("N/A") stops the search: no value, even when a later
+ * field holds a number, exactly as the server.
+ */
+export function serverEventValue(properties: unknown): number | undefined {
+  return serverNumber(serverFromAny(properties, VALUE_FALLBACK_PATHS));
+}
+
+/**
+ * The currency the server sends: main.js `(event.currency ||
+ * rule.config.currency || 'USD').toString().toUpperCase()` (event.currency is
+ * event_data.currency), then the senders' /^[A-Z]{3}$/ check. Undefined when
+ * that check would fail (" eur" stays invalid: the server does not trim).
+ * `ruleCurrency` is the rule's config.currency, published by ingest per trigger.
+ */
+export function serverCurrency(properties: any, ruleCurrency?: unknown): string | undefined {
+  const raw = (properties && typeof properties === 'object' ? properties.currency : undefined) || ruleCurrency || 'USD';
+  const currency = String(raw).toUpperCase();
+  return /^[A-Z]{3}$/.test(currency) ? currency : undefined;
+}
+
+/** AppLovin events whose currency + value the sender's validator requires. */
+const APPLOVIN_MONEY_EVENTS = new Set(['begin_checkout', 'purchase', 'generate_lead', 'add_payment_info', 'subscribe']);
+
 /**
  * The `data` object for one AppLovin event (AppLovin's "Events and objects",
- * shaped as the sender shapes it), or null when the event must not be sent.
- * `sendValue` false leaves `value` out entirely (the server copy carries it).
+ * shaped as the sender's buildData shapes it), or null when the event must not
+ * be sent (the sender would skip it or its validator would reject it).
  *
- * A purchase is sent from the browser ONLY when it can be as strong as the
- * server copy (owner decision 2026-10-12): an order reference (its dedupe_id),
- * a value the server would send as is (`sendValue`) above 0, and a currency the
- * event itself names (no USD default). Anything less is left to the server.
- * `orderReference` is the reference read from the RAW properties (before the
- * Container sanitises them), so the id is byte-for-byte the server's.
+ * - The value is the server's (serverEventValue), and only when `sendValue`
+ *   (the trigger is in `values`); otherwise it is left out.
+ * - The currency is the server's (serverCurrency, with the rule currency
+ *   ingest publishes); an event that needs one and has no valid one is not sent.
+ * - A purchase only when it is as strong as the server copy: the RAW order
+ *   reference (`orderReference`, its dedupe_id; no fallback to sanitised
+ *   properties), `sendValue`, and a value above 0. For a web event the server's
+ *   value is resolveConversionValue (appLovinPurchaseSubtotal applies only to
+ *   verified commerce sources), so no subtotal preference here.
  */
 export function appLovinEventData(
   name: string, eventName: string, properties: any,
-  { sendValue = false, orderReference }: { sendValue?: boolean; orderReference?: string } = {},
+  { sendValue = false, orderReference, ruleCurrency }: { sendValue?: boolean; orderReference?: string; ruleCurrency?: unknown } = {},
 ): Record<string, unknown> | null {
   const props = properties && typeof properties === 'object' ? properties : {};
   if (name === 'page_view' || name === 'login') return {};
-  const declared = typeof props.currency === 'string' && /^[A-Za-z]{3}$/.test(props.currency.trim())
-    ? props.currency.trim().toUpperCase() : undefined;
-  const currency = declared || 'USD';
+  const currency = serverCurrency(props, ruleCurrency);
+  if (!currency && APPLOVIN_MONEY_EVENTS.has(name)) return null;
   const items = appLovinItems(props);
-  const value = firstNumber(props, ['value', 'revenue']);
+  const value = sendValue ? serverEventValue(props) : undefined;
   switch (name) {
     case 'purchase': {
-      // Only with an order reference: it is the dedupe_id the server copy carries.
-      const reference = orderReference ?? appLovinOrderReference(props);
-      if (!reference || !sendValue || !declared) return null;
-      // "The total monetary amount due before tax and shipping (the subtotal)".
-      const amount = firstNumber(props, ['current_subtotal_price', 'subtotal_price', 'subtotal', 'total_excluding_tax', 'subtotal_excluding_tax']) ?? value;
-      if (!(amount !== undefined && amount > 0)) return null; // the sender skips a $0 purchase
-      const synthesized = items.length ? null : synthesizedAppLovinItem(props, amount);
+      if (!orderReference || !sendValue) return null;
+      if (!(value !== undefined && value > 0)) return null; // the sender skips a $0 purchase
+      const synthesized = items.length ? null : synthesizedAppLovinItem(props, value);
       const tax = firstNumber(props, ['total_tax', 'tax', 'amount_tax', 'tax_amount']);
       return dropEmpty({
-        currency: declared,
-        value: amount !== undefined ? round2(amount) : undefined,
+        currency,
+        value: round2(value),
         items: items.length ? items : (synthesized ? [synthesized] : undefined),
         shipping: round2(firstNumber(props, ['total_shipping', 'shipping', 'total_shipping_price', 'shipping_amount']) ?? 0),
         tax: tax !== undefined ? round2(tax) : undefined,
-        transaction_id: reference,
+        transaction_id: orderReference,
       });
     }
     case 'subscribe': {
@@ -311,6 +392,8 @@ export function appLovinEventData(
       return { currency, value: round2(Math.max(0, amount)) };
     }
     case 'generate_lead':
+      // Ingest lists a lead trigger outside `values` only when the rule has a
+      // fixed numeric value (the server always has one): sent without it.
       if (!sendValue) return { currency };
       // value is required and 0 means "low quality": never invented.
       if (value === undefined) return null;
@@ -330,7 +413,7 @@ export function appLovinEventData(
     case 'add_to_cart':
     case 'remove_from_cart':
     case 'view_cart':
-      return dropEmpty({ currency, value: sendValue && value !== undefined ? round2(value) : undefined, items });
+      return dropEmpty({ currency, value: value !== undefined ? round2(value) : undefined, items });
     case 'search':
       return dropEmpty({ search_term: firstText(props, ['search_term', 'query', 'search_query', 'search_string', 'q']) });
     case 'sign_up':
@@ -548,8 +631,11 @@ export class AppLovinPixel {
         if (!ctx.allowed()) return false;
       }
     }
-    const orderReference = appLovinOrderReference(event.ids ?? event.properties);
-    const data = appLovinEventData(name, event.name, event.properties, { sendValue, orderReference });
+    // The RAW id fields only (never the sanitised properties): the server's id.
+    const orderReference = appLovinOrderReference(event.ids ?? {});
+    const currencies = config.currencies && typeof config.currencies === 'object' ? config.currencies : {};
+    const ruleCurrency = Object.prototype.hasOwnProperty.call(currencies, event.name) ? currencies[event.name] : undefined;
+    const data = appLovinEventData(name, event.name, event.properties, { sendValue, orderReference, ruleCurrency });
     if (!data) return false;
     const dedupeId = appLovinDedupeId({ eventName: name, eventId: event.eventId, transactionId: data.transaction_id });
     // Without the shared id the pixel copy could never merge with the server copy.

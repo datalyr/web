@@ -24,25 +24,31 @@
  *   recorded, everything else (and a purchase without one) the DATALYR
  *   event_id the SDK generated for the event (the ingested copy's event_id).
  * - A value only where ingest says the server sends the event's own value
- *   (`values`), and only with a currency the event itself names (no USD
- *   default); never a client purchase amount the server treats as unverified.
+ *   (`values`), read exactly as the server reads it (serverEventValue: the
+ *   first present VALUE_FALLBACK_PATHS field); never a client purchase amount
+ *   the server treats as unverified.
+ * - The currency the server sends (serverCurrency: the event's, else the
+ *   rule's from ingest's `currencies`, else USD; no trimming). One the
+ *   sender's /^[A-Z]{3}$/ check rejects means the server skips the whole
+ *   conversion, so the browser sends nothing either.
  * - A PURCHASE only when it can be as strong as the server copy (owner
- *   decision 2026-10-12): its trigger is in `values`, its value is above 0 and
- *   its currency comes from the event. Anything less is left to the server
- *   (which may also skip it: zero value, money authority, renewals; ingest
- *   leaves rules with gates the browser cannot evaluate out of `events`).
+ *   decision 2026-10-12): its trigger is in `values` and its value is above 0.
+ *   Anything less is left to the server (which may also skip it: zero value,
+ *   money authority, renewals; ingest leaves rules with gates the browser
+ *   cannot evaluate out of `events`).
  * - No personal data from the browser: no email_address, no phone_number.
+ * - Never next to another X Pixel install (theme code, GTM, a Shopify app),
+ *   checked before loading and again before every send.
  *
  * X's uwt.js does automatic advanced matching: once loaded it reads form
  * fields on the page (emails, phone numbers) and hashes them for matching. That
  * is X's own collection under X's terms, another reason it loads only with
  * marketing consent; merchants can turn it off in X Events Manager.
- * - Never next to another X Pixel install (theme code, GTM, a Shopify app),
- *   checked before loading and again before every send.
  */
 import type { PixelEvent, PixelLoadContext, PixelLoadStatus, PixelTrackContext } from '../destination-pixels';
 import {
-  appLovinDedupeId, appLovinNumber, appLovinOrderReference, appLovinText, configurationStrings, firstItemList, waitForParsedDocument,
+  appLovinDedupeId, appLovinNumber, appLovinOrderReference, appLovinText, configurationStrings, firstItemList,
+  serverCurrency, serverEventValue, waitForParsedDocument,
 } from './applovin';
 
 export const X_PIXEL_SCRIPT = 'https://static.ads-twitter.com/uwt.js';
@@ -57,6 +63,8 @@ export interface XPixelConfig {
   values?: string[];
   /** DATALYR event names whose rule is an X PURCHASE (conversion_id = order reference). */
   purchases?: string[];
+  /** DATALYR event name → the rule's config.currency (the server's fallback before USD). */
+  currencies?: Record<string, string>;
 }
 
 const EVENT_ID = /^(tw-[a-z0-9]+-)?[a-z0-9]+$/i;
@@ -138,18 +146,17 @@ export function xContents(properties: any): Array<Record<string, unknown>> {
 
 /**
  * The parameters of one twq('event') call, or null when the event must not be
- * sent (a purchase whose value the server would send but which has none: the
- * sender skips a $0 purchase). Never personal data.
+ * sent: a currency the sender's check rejects (it skips the conversion), or a
+ * purchase that would be weaker than the server copy. Never personal data.
  */
-export function xEventParameters(properties: any, { purchase, sendValue, conversionId }:
-  { purchase: boolean; sendValue: boolean; conversionId: string }): Record<string, unknown> | null {
+export function xEventParameters(properties: any, { purchase, sendValue, conversionId, ruleCurrency }:
+  { purchase: boolean; sendValue: boolean; conversionId: string; ruleCurrency?: unknown }): Record<string, unknown> | null {
   const props = properties && typeof properties === 'object' ? properties : {};
-  // The event's own currency only: never a USD default the server copy may not share.
-  const currency = typeof props.currency === 'string' && /^[A-Za-z]{3}$/.test(props.currency.trim())
-    ? props.currency.trim().toUpperCase() : undefined;
-  const raw = sendValue && currency ? firstNumber(props, ['value', 'revenue']) : undefined;
+  const currency = serverCurrency(props, ruleCurrency);
+  if (!currency) return null;
+  const raw = sendValue ? serverEventValue(props) : undefined;
   const value = raw !== undefined && raw >= 0 ? round2(raw) : undefined;
-  // A purchase only as strong as the server copy: value allowed, above 0, the event's currency.
+  // A purchase only as strong as the server copy: value allowed and above 0.
   if (purchase && !(value !== undefined && value > 0)) return null;
   const contents = xContents(props);
   return dropEmpty({
@@ -216,6 +223,7 @@ export class XPixel {
   private stub: unknown = null;
   private pixelId: string | null = null;
   private companion = false;
+  private queuedLogged = false;
 
   isCompanion(): boolean {
     return this.companion;
@@ -278,11 +286,14 @@ export class XPixel {
     const eventId = xEventIdFor(event.name, config);
     if (!eventId) return false;
     const purchase = Array.isArray(config.purchases) && config.purchases.includes(event.name);
-    const conversionId = xConversionId({ purchase, properties: event.ids ?? event.properties, eventId: event.eventId });
+    // The RAW id fields only (never the sanitised properties): the server's id.
+    const conversionId = xConversionId({ purchase, properties: event.ids ?? {}, eventId: event.eventId });
     // Without the shared id the pixel copy could never dedupe with the server copy.
     if (!conversionId) return false;
     const sendValue = Array.isArray(config.values) && config.values.includes(event.name);
-    const parameters = xEventParameters(event.properties, { purchase, sendValue, conversionId });
+    const currencies = config.currencies && typeof config.currencies === 'object' ? config.currencies : {};
+    const ruleCurrency = Object.prototype.hasOwnProperty.call(currencies, event.name) ? currencies[event.name] : undefined;
+    const parameters = xEventParameters(event.properties, { purchase, sendValue, conversionId, ruleCurrency });
     if (!parameters) return false;
     const twq = (window as any).twq;
     if (typeof twq !== 'function') return false;
@@ -290,7 +301,11 @@ export class XPixel {
     // Delivered only once uwt.js runs (it sets twq.exe). Until then the call
     // waits in the queue (sent if uwt.js arrives); blocked, it never leaves.
     if (typeof twq.exe !== 'function') {
-      ctx.log?.('X Pixel: uwt.js has not loaded; the event is queued, not delivered');
+      // Once per page: a blocked uwt.js is a state, not a failure per event.
+      if (!this.queuedLogged) {
+        this.queuedLogged = true;
+        ctx.log?.('X Pixel: uwt.js has not run (yet); events wait in its queue and are not reported delivered');
+      }
       return false;
     }
     return true;

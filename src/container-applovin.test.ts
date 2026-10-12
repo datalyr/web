@@ -437,18 +437,37 @@ describe('AppLovin pixel: events', () => {
   test('purchase: sent only as strong as the server copy; dedupe_id = the order reference exactly as transaction_id', async () => {
     respond(applovin({ values: ['purchase'] }));
     manager = await started();
-    // No order reference, a $0 value, no currency of its own: left to the server.
+    // No order reference, or a $0 value: left to the server.
     expect(await manager.trackToPixels('purchase', { value: 50, currency: 'USD' }, 'evt-no-order')).toEqual([]);
     expect(await manager.trackToPixels('purchase', { order_id: 'o0', value: 0, currency: 'USD' }, 'e0')).toEqual([]);
-    expect(await manager.trackToPixels('purchase', { order_id: 'o1', value: 30 }, 'e1')).toEqual([]);
+    // The value is the server's (resolveConversionValue: `value` first), never the
+    // subtotal for a web event; the currency the server's (event's, else USD).
     await manager.trackToPixels('purchase', {
       order_id: 6896206413937, value: 118.5, subtotal: 100, shipping: 8.5, tax: 10, currency: 'eur',
       items: [{ product_id: 111, variant_id: 222, title: 'Tee', price: 50, quantity: 2 }],
     }, 'evt-purchase');
     expect(tracks()).toEqual([['track', 'purchase', {
-      currency: 'EUR', value: 100, shipping: 8.5, tax: 10, transaction_id: '6896206413937',
+      currency: 'EUR', value: 118.5, shipping: 8.5, tax: 10, transaction_id: '6896206413937',
       items: [{ item_id: '111', item_variant_id: '222', item_name: 'Tee', price: 50, quantity: 2 }],
     }, { dedupe_id: '6896206413937' }]]);
+  });
+
+  test('value and currency read exactly as the server: first present field, rule currency before USD, no trimming', async () => {
+    respond(applovin({ values: ['purchase', 'checkout_step'], currencies: { purchase: 'GBP' } }));
+    manager = await started();
+    // "N/A" is present: the server stops there (no value) and skips the purchase.
+    expect(await manager.trackToPixels('purchase', { order_id: 'o1', value: 'N/A', revenue: 20 }, 'e1')).toEqual([]);
+    // " eur" is not trimmed by the server: its validator rejects it, so nothing.
+    expect(await manager.trackToPixels('purchase', { order_id: 'o2', value: 20, currency: ' eur' }, 'e2')).toEqual([]);
+    expect(await manager.trackToPixels('checkout_step', { value: 20, currency: ' eur', items: [{ id: 'x', price: 20 }] }, 'e3')).toEqual([]);
+    // No event currency: the rule's (GBP) before USD; a string value as getNumber reads it.
+    await manager.trackToPixels('purchase', { order_id: 'o3', value: '$1,299.50' }, 'e4');
+    // A checkout with no currency of its own and no rule currency: USD, as the server.
+    await manager.trackToPixels('checkout_step', { total: '12,5', items: [{ id: 'x', price: 12.5 }] }, 'e5');
+    expect(tracks().map((call) => [call[1], (call[2] as any).currency, (call[2] as any).value])).toEqual([
+      ['purchase', 'GBP', 1299.5],
+      ['begin_checkout', 'USD', 12.5],
+    ]);
   });
 
   test('purchase in a workspace whose purchase value the server would not take from the browser: not sent at all', async () => {
@@ -581,17 +600,16 @@ describe('AppLovin mirrors of the sender contract', () => {
   });
 
   test('purchase data: no reference → not sent; shipping defaults to 0; tax only when recorded; synthesized item', () => {
-    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'USD' }, { sendValue: true })).toBeNull();
-    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'usd', order_id: 'o', items: [{ sku: 's', price: 50 }] }, { sendValue: true }))
+    // No raw order reference: not sent (no fallback to the sanitised properties).
+    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'USD', order_id: 'o' }, { sendValue: true })).toBeNull();
+    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'usd', items: [{ sku: 's', price: 50 }] }, { sendValue: true, orderReference: 'o' }))
       .toEqual({ currency: 'USD', value: 50, shipping: 0, transaction_id: 'o', items: [{ item_id: 's', price: 50, quantity: 1 }] });
-    // Without sendValue, or without the event's own currency: left to the server.
-    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'USD', order_id: 'o', product_id: 'prod_1' })).toBeNull();
-    expect(appLovinEventData('purchase', 'purchase', { value: 50, order_id: 'o', product_id: 'prod_1' }, { sendValue: true })).toBeNull();
-    // An explicit raw reference wins over the (sanitised) properties.
-    expect(appLovinEventData('purchase', 'purchase', { value: 5, currency: 'USD', order_id: 'ORD' }, { sendValue: true, orderReference: 'ORD<7>' }))
-      .toMatchObject({ transaction_id: 'ORD<7>' });
-    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'USD', order_id: 'o', price_id: 'price_1', plan: { product: 'prod_2' } }, { sendValue: true }))
-      .toMatchObject({ value: 50, items: [{ item_id: 'prod_2', item_variant_id: 'price_1', price: 50, quantity: 1 }] });
+    // Without sendValue: left to the server.
+    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'USD', product_id: 'prod_1' }, { orderReference: 'o' })).toBeNull();
+    // An unrecognised currency: the sender's validator would reject it.
+    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'EURO' }, { sendValue: true, orderReference: 'o' })).toBeNull();
+    expect(appLovinEventData('purchase', 'purchase', { value: 50, price_id: 'price_1', plan: { product: 'prod_2' } }, { sendValue: true, orderReference: 'o', ruleCurrency: 'cad' }))
+      .toMatchObject({ currency: 'CAD', value: 50, items: [{ item_id: 'prod_2', item_variant_id: 'price_1', price: 50, quantity: 1 }] });
     expect(appLovinEventData('page_view', 'pageview', { value: 3 }, { sendValue: true })).toEqual({});
     expect(appLovinEventData('subscribe', 'trial_started', { trial_expected_value: 30 }, { sendValue: true })).toEqual({ currency: 'USD', value: 30 });
     expect(appLovinEventData('subscribe', 'trial_started', { trial_expected_value: 30 })).toEqual({ currency: 'USD' });

@@ -355,6 +355,8 @@ export interface PixelConfig {
     events?: Record<string, string>;
     /** DATALYR event names whose browser copy may carry a value. */
     values?: string[];
+    /** DATALYR event name → the rule's currency (the server's fallback before USD). */
+    currencies?: Record<string, string>;
   };
   /** Present only for workspaces with an active X connection while the X
    *  destination gate is on. The pixel lives in dl.pixels.<v>.js. */
@@ -366,6 +368,7 @@ export interface PixelConfig {
     values?: string[];
     /** DATALYR event names whose rule is an X PURCHASE. */
     purchases?: string[];
+    currencies?: Record<string, string>;
   };
 }
 
