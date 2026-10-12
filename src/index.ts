@@ -614,6 +614,7 @@ class Datalyr {
       endpoint: this.config.endpoint,
       debug: this.config.debug,
       platform: this.config.platform,
+      sdkVersion: SDK_VERSION,
       canForward: () => this.shouldTrack() && this.consentAllowsMarketing() && this.config.privacyMode !== 'strict',
       // Fold the dashboard config in the moment the container reads it, BEFORE
       // any pixel loads: canForward above then already sees a dashboard

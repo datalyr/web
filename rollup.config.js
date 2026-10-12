@@ -128,6 +128,37 @@ export default [
     ]
   },
 
+  // Destination pixels (dl.pixels.<version>.js on the CDN): ad-platform browser
+  // pixels that run next to a DATALYR server sender (AppLovin; X / LinkedIn later).
+  // A separate entry src/index.ts never imports: src/destination-pixels.ts injects
+  // it only when /container-scripts configures one, so dl.js stays free of it
+  // (scripts/check-bundle.js enforces that).
+  {
+    input: 'src/pixels/index.ts',
+    output: [
+      {
+        file: 'dist/datalyr.pixels.min.js',
+        format: 'iife',
+        banner,
+        plugins: [terser()],
+        sourcemap: true
+      }
+    ],
+    plugins: [
+      injectSdkVersion(),
+      resolve({
+        browser: true,
+        preferBuiltins: false
+      }),
+      commonjs(),
+      typescript({
+        tsconfig: './tsconfig.json',
+        declaration: false,
+        declarationMap: false
+      })
+    ]
+  },
+
   // CommonJS build
   {
     input: 'src/index.ts',
