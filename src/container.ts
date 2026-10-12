@@ -4,7 +4,7 @@
  */
 
 import { storage } from './storage';
-import { sha256Hex } from './utils';
+import { isDoNotTrackEnabled, isGlobalPrivacyControlEnabled, sha256Hex } from './utils';
 import type { SdkRemoteConfig } from './config';
 
 // Meta Pixel reference, verified 2026-09-15:
@@ -179,6 +179,392 @@ export function shopifyPageConfiguresTikTokAppPixel(pixelCode: string, doc?: Doc
     apiClientId === SHOPIFY_TIKTOK_APP_CLIENT_ID && String(configuration?.pixelCode ?? '').trim() === wanted);
 }
 
+// ---------------------------------------------------------------------------
+// AppLovin (Axon) pixel
+//
+// Loaded exactly as AppLovin's native-JS snippet does ("Axon Pixel: Native
+// JS"): a global AXON_EVENT_KEY, a queueing `axon` stub carrying eventKey, the
+// two scripts below, then axon("init"). Events go out as
+// axon("track", name, data, { dedupe_id }).
+//
+// Everything a browser event carries mirrors the postback worker's Conversion
+// API sender (infra/cloudflare/postback/platforms/applovin-payload.js in the
+// DATALYR repo): the same name map, and above all the same `dedupe_id`, so
+// AppLovin merges the pixel copy and the server copy of one event (it merges
+// duplicates that arrive within five minutes and drops a later one). The SDK
+// cannot import worker code, so the rules are copied here; KEEP IN SYNC.
+// ---------------------------------------------------------------------------
+
+/** The two scripts AppLovin's native-JS snippet loads, in its order. */
+export const APPLOVIN_PIXEL_SCRIPTS = Object.freeze([
+  'https://s.axon.ai/pixel.js',
+  'https://res4.applovin.com/p/l/loader.iife.js',
+]);
+
+/** AppLovin's standard web event names (applovin-payload.js APPLOVIN_EVENT_NAMES). Custom names are prohibited. */
+const APPLOVIN_EVENT_NAMES = new Set([
+  'page_view', 'view_item', 'add_to_cart', 'remove_from_cart', 'view_cart', 'begin_checkout',
+  'add_payment_info', 'purchase', 'generate_lead', 'sign_up', 'login', 'search', 'subscribe',
+]);
+
+/** Lead-gen accounts send only these (applovin-payload.js LEAD_GEN_EVENT_NAMES). */
+const APPLOVIN_LEAD_GEN_EVENTS = new Set(['page_view', 'generate_lead']);
+
+/** DATALYR (and other platforms') event names → AppLovin's (applovin-payload.js NAME_ALIASES). */
+const APPLOVIN_NAME_ALIASES: Record<string, string> = {
+  purchase: 'purchase', order_completed: 'purchase', order_paid: 'purchase', complete_payment: 'purchase',
+  'checkout.session.completed': 'purchase', 'invoice.payment_succeeded': 'purchase',
+  subscription_started: 'purchase', trial_converted: 'purchase',
+  checkout_started: 'begin_checkout', initiate_checkout: 'begin_checkout', start_checkout: 'begin_checkout',
+  add_to_cart: 'add_to_cart', add_cart: 'add_to_cart', product_added: 'add_to_cart',
+  remove_from_cart: 'remove_from_cart', view_cart: 'view_cart',
+  view_item: 'view_item', view_content: 'view_item', product_viewed: 'view_item',
+  add_payment_info: 'add_payment_info', add_billing: 'add_payment_info',
+  trial_started: 'subscribe', start_trial: 'subscribe', subscribe: 'subscribe',
+  signup: 'sign_up', sign_up: 'sign_up', complete_registration: 'sign_up',
+  lead: 'generate_lead', form_submit: 'generate_lead', generate_lead: 'generate_lead',
+  login: 'login', search: 'search', page_view: 'page_view', pageview: 'page_view',
+};
+
+const APPLOVIN_TRIAL_EVENTS = new Set(['trial_started', 'start_trial']);
+
+export interface AppLovinPixelConfig {
+  enabled: boolean;
+  /** The connection's AppLovin Event Key (AXON_EVENT_KEY). Public by AppLovin's design. */
+  event_key: string;
+  /** 'purchase' | 'lead_gen'. Restricted lead-gen accounts never get the browser pixel. */
+  account_type?: string;
+  /** trigger_event_name → the rule's platform_event_name, as the sender resolves it. */
+  event_mappings?: Record<string, string>;
+}
+
+const lowerText = (value: unknown): string => (typeof value === 'string' ? value.trim().toLowerCase() : '');
+
+/**
+ * AppLovin's name for one of our events, or null when it has none (then nothing
+ * is sent). Mirrors appLovinEventName(rule, event): the workspace rule's
+ * platform_event_name first (a standard name as is, else through the alias
+ * map), else the alias map on the event name itself.
+ */
+export function appLovinEventName(eventName: string, eventMappings?: Record<string, string> | null): string | null {
+  const fromRule = lowerText(eventMappings && typeof eventMappings === 'object' ? eventMappings[eventName] : undefined);
+  if (fromRule) return APPLOVIN_EVENT_NAMES.has(fromRule) ? fromRule : (APPLOVIN_NAME_ALIASES[fromRule] ?? null);
+  return APPLOVIN_NAME_ALIASES[lowerText(eventName)] ?? null;
+}
+
+/** Whether an account of this type may send the event (applovin-payload.js appLovinEventAllowed). */
+export function appLovinEventAllowed(name: string, accountType?: string): boolean {
+  const type = lowerText(accountType) || 'purchase';
+  if (type === 'purchase') return APPLOVIN_EVENT_NAMES.has(name);
+  if (type === 'lead_gen') return APPLOVIN_LEAD_GEN_EVENTS.has(name);
+  return false; // restricted_lead_gen (domain-only URLs, no email) or unknown: never from the browser
+}
+
+/** The sender's text(): a string or finite number, trimmed; undefined when empty. */
+export function appLovinText(value: unknown): string | undefined {
+  let out: string | undefined;
+  if (typeof value === 'string') out = value;
+  else if (typeof value === 'number' && Number.isFinite(value)) out = String(value);
+  return out && out.trim() ? out.trim() : undefined;
+}
+
+function firstText(object: any, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = appLovinText(object?.[key]);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+/**
+ * The order / invoice / charge id an event names, or undefined. Same keys, same
+ * order as the sender's appLovinOrderReference: order_id, transaction_id, the
+ * invoice (the object's own id when it IS one), the charge, the payment intent,
+ * the checkout id.
+ */
+export function appLovinOrderReference(properties: any): string | undefined {
+  const own = (object: string) => (lowerText(properties?.object) === object ? appLovinText(properties?.id) : undefined);
+  return firstText(properties, ['order_id', 'transaction_id'])
+    || own('invoice') || firstText(properties, ['invoice', 'invoice_id'])
+    || own('charge') || firstText(properties, ['charge', 'charge_id', 'payment_intent', 'checkout_id']);
+}
+
+/**
+ * The `dedupe_id` (applovin-payload.js appLovinDedupeId, the contract decided
+ * 2026-10-12): a purchase with an order / transaction id carries that id exactly
+ * as data.transaction_id holds it (no prefix, case kept); every other event,
+ * and a purchase without one, carries the DATALYR event id the SDK generated
+ * for the event, which the ingested server copy keeps as its event_id.
+ */
+export function appLovinDedupeId(input: { eventName?: string; eventId?: string; transactionId?: unknown; orderId?: unknown }): string | undefined {
+  const reference = appLovinText(input.transactionId) || appLovinText(input.orderId);
+  if (lowerText(input.eventName) === 'purchase' && reference) return reference;
+  return appLovinText(input.eventId);
+}
+
+function appLovinNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== 'string' || !/^\s*-?\d+(\.\d+)?\s*$/.test(value)) return undefined;
+  return Number(value);
+}
+
+function firstNumber(object: any, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = appLovinNumber(object?.[key]);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+function dropEmpty<T extends Record<string, unknown>>(object: T): T {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(object)) {
+    const value = object[key];
+    if (value !== undefined && value !== null && value !== '') out[key] = value;
+  }
+  return out as T;
+}
+
+const APPLOVIN_IMAGE_URL = /^https?:\/\/[^\s]+\.(png|jpe?g)(\?[^\s]*)?$/i;
+
+/**
+ * One Axon item from a line item / product object (applovin-payload.js
+ * mapAppLovinItem, plus `product_title`, the name dl.js's own Shopify product
+ * view uses). item_id is the PARENT product, so it joins AppLovin's catalog.
+ */
+export function appLovinItem(raw: any): Record<string, unknown> | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const itemId = firstText(raw, ['product_id', 'item_id', 'productId', 'id', 'sku', 'variant_id']);
+  if (!itemId) return null;
+  const quantity = firstNumber(raw, ['quantity', 'qty', 'num_items']);
+  const units = quantity !== undefined && quantity > 0 ? quantity : 1;
+  const unitPrice = firstNumber(raw, ['price', 'item_price', 'unit_price', 'content_price']);
+  let discount = firstNumber(raw, ['discount', 'unit_discount']);
+  const lineDiscount = firstNumber(raw, ['total_discount', 'line_discount']);
+  if (discount === undefined && lineDiscount !== undefined && lineDiscount > 0) discount = lineDiscount / units;
+  const discounted = unitPrice !== undefined && discount !== undefined ? Math.max(0, unitPrice - discount) : unitPrice;
+  const image = firstText(raw, ['image_url', 'image', 'imageUrl']);
+  const category = appLovinNumber(raw.item_category_id ?? raw.google_product_category_id ?? raw.google_product_category);
+  const item = dropEmpty({
+    item_id: itemId,
+    item_variant_id: firstText(raw, ['variant_id', 'item_variant_id', 'variantId']),
+    item_name: firstText(raw, ['title', 'name', 'item_name', 'product_name', 'product_title', 'content_name']),
+    price: discounted !== undefined ? round2(discounted) : undefined,
+    discount: discount !== undefined && discount > 0 ? round2(discount) : undefined,
+    quantity: units,
+    image_url: image && APPLOVIN_IMAGE_URL.test(image) ? image : undefined,
+    item_brand: firstText(raw, ['vendor', 'brand', 'item_brand']),
+    item_category_id: category !== undefined && Number.isInteger(category) && category > 0 ? category : undefined,
+  });
+  if (item.item_variant_id === item.item_id) delete item.item_variant_id;
+  return item;
+}
+
+const APPLOVIN_ITEM_LISTS = ['items', 'line_items', 'products', 'contents'];
+
+/**
+ * The event's items: its first non-empty item list (the sender's list paths),
+ * else the one product a single-product event names at the top level (dl.js's
+ * Shopify view_item / add_to_cart shape), else none.
+ */
+export function appLovinItems(properties: any): Array<Record<string, unknown>> {
+  if (!properties || typeof properties !== 'object') return [];
+  const nested = properties.properties && typeof properties.properties === 'object' ? properties.properties : null;
+  const lists = [...APPLOVIN_ITEM_LISTS.map((key) => properties[key]), nested?.items, nested?.products];
+  for (const list of lists) {
+    if (Array.isArray(list) && list.length) {
+      return list.map(appLovinItem).filter((item): item is Record<string, unknown> => !!item).slice(0, 100);
+    }
+  }
+  if (firstText(properties, ['product_id', 'item_id', 'variant_id', 'sku'])) {
+    const item = appLovinItem(properties);
+    if (item) return [item];
+  }
+  return [];
+}
+
+/**
+ * Stripe / Whop style payments carry no line items; one item stands for the
+ * product (applovin-payload.js synthesizedAppLovinItem). None without an id.
+ */
+function synthesizedAppLovinItem(properties: any, value: number): Record<string, unknown> | null {
+  const first = (keys: string[]) => {
+    for (const key of keys) {
+      const raw = key.split('.').reduce((object: any, part) => object?.[part], properties);
+      const text = Array.isArray(raw) ? appLovinText(raw[0]) : appLovinText(raw);
+      if (text) return text;
+    }
+    return undefined;
+  };
+  const productId = first(['product_id', 'product_ids', 'plan.product', 'whop_product_id']);
+  const priceId = first(['price_id', 'price_ids', 'plan.id', 'plan_id']);
+  const itemId = productId || priceId;
+  if (!itemId) return null;
+  return dropEmpty({
+    item_id: itemId,
+    item_variant_id: priceId && priceId !== itemId ? priceId : undefined,
+    item_name: first(['product_name', 'plan_name', 'plan.nickname', 'description']),
+    price: round2(value),
+    quantity: 1,
+  });
+}
+
+/**
+ * AppLovin's email normalization ("Events and objects"): trimmed, lowercased,
+ * printable ASCII with exactly one @; for gmail.com / googlemail.com the dots
+ * and the first + and everything after it go from the local part. Null when the
+ * address does not qualify (AppLovin's rule then produces no value).
+ */
+export function appLovinNormalizedEmail(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const email = raw.trim().toLowerCase();
+  if (!/^[!-?A-~]+@[!-?A-~]+$/.test(email)) return null;
+  const at = email.indexOf('@');
+  let local = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    local = local.replace(/\./g, '');
+    const plus = local.indexOf('+');
+    if (plus >= 0) local = local.slice(0, plus);
+  }
+  return local ? `${local}@${domain}` : null;
+}
+
+/**
+ * The `data` object for one AppLovin event, from the event's properties, per
+ * AppLovin's "Events and objects" and shaped as the sender shapes it. Null when
+ * the event must not be sent (the same conditions the sender skips on: a
+ * purchase with no positive value, a lead with no value).
+ *
+ * `transaction_id` on a purchase is the order reference, else the DATALYR event
+ * id, exactly as the sender's appLovinTransactionId, so the dedupe_id derived
+ * from it matches the server copy.
+ */
+export function appLovinEventData(name: string, eventName: string, properties: any, eventId?: string): Record<string, unknown> | null {
+  const props = properties && typeof properties === 'object' ? properties : {};
+  if (name === 'page_view' || name === 'login') return {};
+  const declaredCurrency = typeof props.currency === 'string' && /^[A-Za-z]{3}$/.test(props.currency.trim())
+    ? props.currency.trim().toUpperCase() : undefined;
+  const currency = declaredCurrency || 'USD';
+  const items = appLovinItems(props);
+  const value = firstNumber(props, ['value', 'revenue']);
+  switch (name) {
+    case 'purchase': {
+      // "The total monetary amount due before tax and shipping (the subtotal)".
+      const subtotal = firstNumber(props, ['current_subtotal_price', 'subtotal_price', 'subtotal', 'total_excluding_tax', 'subtotal_excluding_tax']);
+      const amount = subtotal ?? value;
+      if (amount === undefined || !(amount > 0)) return null;
+      const synthesized = items.length ? null : synthesizedAppLovinItem(props, amount);
+      const tax = firstNumber(props, ['total_tax', 'tax', 'amount_tax', 'tax_amount']);
+      return dropEmpty({
+        currency,
+        value: round2(amount),
+        items: items.length ? items : (synthesized ? [synthesized] : undefined),
+        shipping: round2(firstNumber(props, ['total_shipping', 'shipping', 'total_shipping_price', 'shipping_amount']) ?? 0),
+        tax: tax !== undefined ? round2(tax) : undefined,
+        transaction_id: appLovinOrderReference(props) || appLovinText(eventId),
+      });
+    }
+    case 'subscribe': {
+      const trialValue = APPLOVIN_TRIAL_EVENTS.has(lowerText(eventName)) ? appLovinNumber(props.trial_expected_value) : undefined;
+      const amount = APPLOVIN_TRIAL_EVENTS.has(lowerText(eventName))
+        ? (trialValue !== undefined && trialValue > 0 ? trialValue : 0)
+        : (value ?? 0);
+      return { currency, value: round2(Math.max(0, amount)) };
+    }
+    case 'generate_lead':
+      // value is required and 0 means "low quality": never invented.
+      if (value === undefined) return null;
+      return { currency, value: round2(Math.max(0, value)) };
+    case 'add_payment_info':
+      return dropEmpty({
+        currency,
+        value: round2(Math.max(0, value ?? 0)),
+        items: items.length ? items : undefined,
+        payment_type: firstText(props, ['payment_type', 'paymentType']),
+      });
+    case 'begin_checkout': {
+      const amount = value ?? items.reduce((sum, item: any) => sum + (item.price ?? 0) * (item.quantity ?? 1), 0);
+      return dropEmpty({ currency, value: round2(Math.max(0, amount)), items });
+    }
+    case 'view_item':
+    case 'add_to_cart':
+    case 'remove_from_cart':
+    case 'view_cart':
+      return dropEmpty({ currency, value: value !== undefined ? round2(value) : undefined, items });
+    case 'search':
+      return dropEmpty({ search_term: firstText(props, ['search_term', 'query', 'search_query', 'search_string', 'q']) });
+    case 'sign_up':
+      return dropEmpty({ method: firstText(props, ['method', 'signup_method', 'auth_method']) });
+    default:
+      return {};
+  }
+}
+
+/** Every string inside a (parsed) Shopify web pixel configuration, nested JSON strings included. */
+function configurationStrings(value: unknown, depth = 0, out: string[] = []): string[] {
+  if (depth > 4 || value === null || value === undefined) return out;
+  if (typeof value === 'string') {
+    out.push(value.trim());
+    const parsed = value.length > 1 && (value[0] === '{' || value[0] === '[') ? parseJsonMaybe(value) : undefined;
+    if (parsed && typeof parsed === 'object') configurationStrings(parsed, depth + 1, out);
+  } else if (typeof value === 'object') {
+    for (const key of Object.keys(value as object)) configurationStrings((value as any)[key], depth + 1, out);
+  }
+  return out;
+}
+
+/**
+ * The AppLovin Shopify app (or any other install) already runs the AppLovin
+ * pixel on this page, so the Container must not load a second one:
+ *
+ * - window.axon exists and is not ours (the native snippet, GTM template or
+ *   the Shopify app's theme embed has run; the pixel keeps ONE event key per
+ *   page, so ours could not coexist with it anyway),
+ * - one of AppLovin's pixel scripts is already in the document, or an inline
+ *   snippet that sets AXON_EVENT_KEY (present in the HTML before it runs),
+ * - Shopify's web pixel config carries this Event Key (the app's web pixel;
+ *   its apiClientId is not documented, so it is matched on the key itself).
+ */
+export function appLovinPixelOnPage(eventKey: string, entries?: ShopifyWebPixelEntry[], doc?: Document): boolean {
+  try {
+    const host = typeof window !== 'undefined' ? (window as any) : undefined;
+    if (host && host.axon && !host.axon.__datalyr) return true;
+    const root = doc || (typeof document !== 'undefined' ? document : undefined);
+    if (root) {
+      const scripts = root.getElementsByTagName('script');
+      for (let i = 0; i < scripts.length; i++) {
+        const script = scripts[i];
+        if (script.dataset?.datalyrPixel === 'applovin') continue;
+        const src = script.src || '';
+        if (/^https:\/\/s\.axon\.ai\/pixel/i.test(src) || /^https:\/\/res\d*\.applovin\.com\/p\/l\/loader/i.test(src)) return true;
+        if (!src) {
+          const text = script.text || script.textContent || '';
+          if (text.indexOf('AXON_EVENT_KEY') !== -1 || text.indexOf('s.axon.ai/pixel') !== -1) return true;
+        }
+      }
+    }
+    const wanted = String(eventKey || '').trim();
+    if (wanted) {
+      const list = entries || readShopifyWebPixelsConfig(root);
+      if (list.some(({ configuration }) => configurationStrings(configuration).includes(wanted))) return true;
+    }
+  } catch { /* DOM access failed: no signal */ }
+  return false;
+}
+
+/**
+ * The browser's do-not-track signals, which the AppLovin pixel honors whatever
+ * the site's respectDoNotTrack / respectGlobalPrivacyControl settings: DNT and
+ * GPC (dl.js's fingerprint.dnt flag, which the sender also skips on) and the
+ * explicit navigator.globalPrivacyControl.
+ */
+export function appLovinPrivacySignal(): boolean {
+  try { return isDoNotTrackEnabled() || isGlobalPrivacyControlEnabled(); } catch { return true; }
+}
+
 /** Array-like command queue entries (fbq.queue, dataLayer) as plain arrays. */
 function queuedCalls(queue: any): unknown[][] {
   try {
@@ -342,6 +728,9 @@ export interface PixelConfig {
     enabled: boolean;
     company_id: string;
   };
+  /** Present only for workspaces with an active AppLovin connection, and only
+   *  where ingest allows it for this visitor (destination gate, country). */
+  applovin?: AppLovinPixelConfig;
 }
 
 export class ContainerManager {
@@ -378,6 +767,10 @@ export class ContainerManager {
   private initPromise: Promise<void> | null = null;
   /** Shopify's own app runs this platform's tag for the same id on this page. */
   private companion = { meta: false, google: false, tiktok: false };
+  /** AppLovin pixel: its one-time load decision (resolves true once our pixel
+   *  is initialized), and whether another install already runs it on the page. */
+  private appLovinInit: Promise<boolean> | null = null;
+  private appLovinCompanion = false;
   private companionWaits = new Map<string, { promise: Promise<any>; resolve: (value: any) => void; timer: ReturnType<typeof setInterval> }>();
   private companionPending = 0;
 
@@ -885,6 +1278,115 @@ export class ContainerManager {
     if (this.pixels.whop?.enabled && this.pixels.whop.company_id) {
       this.initializeWhopPixel(this.pixels.whop);
     }
+
+    // AppLovin decides on its own clock (it may wait for the page's HTML to
+    // see another install), so the other pixels are not held for it. Events
+    // tracked meanwhile wait on this decision inside trackToPixels.
+    if (this.pixels.applovin?.enabled === true && typeof this.pixels.applovin.event_key === 'string'
+      && this.pixels.applovin.event_key && !this.appLovinInit) {
+      const config = this.pixels.applovin;
+      this.appLovinInit = this.initializeAppLovinPixel(config, shopifyPixels).catch((error) => {
+        this.log('Error initializing AppLovin pixel:', error);
+        return false;
+      });
+    }
+  }
+
+  /** Marketing consent (the container gate) and no DNT / GPC signal. */
+  private appLovinAllowed(): boolean {
+    return this.forwardingAllowed() && !appLovinPrivacySignal();
+  }
+
+  /**
+   * Load AppLovin's pixel the way its native-JS snippet does, once per page.
+   * Never when the browser sends DNT / GPC, never for an account type the
+   * browser cannot serve, and never next to another AppLovin pixel already on
+   * the page (the Shopify app's theme embed or a merchant install): that one
+   * keeps the page, and the Container sends nothing through it (no double fire;
+   * the server copy still goes). Resolves true when our pixel is initialized.
+   */
+  private async initializeAppLovinPixel(config: AppLovinPixelConfig, shopifyPixels: ShopifyWebPixelEntry[]): Promise<boolean> {
+    if (!this.appLovinAllowed()) return false;
+    if (!appLovinEventAllowed('page_view', config.account_type)) return false;
+    // Other installs are placed further down the page (Shopify app embeds sit at
+    // the end of <body>): decide once the HTML has been parsed, bounded.
+    let entries = shopifyPixels;
+    if (typeof document !== 'undefined' && document.readyState === 'loading') {
+      await waitForDomContentLoaded(COMPANION_DOM_WAIT_MS);
+      entries = readShopifyWebPixelsConfig();
+      if (!this.appLovinAllowed()) return false;
+    }
+    const key = String(config.event_key);
+    if (appLovinPixelOnPage(key, entries)) {
+      this.appLovinCompanion = true;
+      this.log('AppLovin pixel already on this page; the Container does not load a second one');
+      return false;
+    }
+    const host = window as any;
+    // AppLovin's native-JS snippet, unchanged in substance: the global event key,
+    // the queueing stub, both scripts, then init. The scripts are marked as ours
+    // so a later check never mistakes them for another install.
+    host.AXON_EVENT_KEY = key;
+    (function (e: any, r: Document) {
+      const t = APPLOVIN_PIXEL_SCRIPTS;
+      if (!e.axon) {
+        const a: any = e.axon = function () {
+          // eslint-disable-next-line prefer-rest-params
+          a.performOperation ? a.performOperation.apply(a, arguments) : a.operationQueue.push(arguments);
+        };
+        a.operationQueue = [];
+        a.ts = Date.now();
+        a.eventKey = e.AXON_EVENT_KEY;
+        a.__datalyr = true;
+        const n = r.getElementsByTagName('script')[0];
+        for (let o = 0; o < t.length; o++) {
+          const i = r.createElement('script');
+          i.async = true;
+          i.src = t[o];
+          i.dataset.datalyrPixel = 'applovin';
+          if (n?.parentNode) n.parentNode.insertBefore(i, n);
+          else r.head.appendChild(i);
+        }
+      }
+    })(host, document);
+    host.axon('init');
+    this.log('AppLovin pixel initialized');
+    return true;
+  }
+
+  /** True when another AppLovin install owns the pixel on this page. */
+  isAppLovinCompanionMode(): boolean {
+    return this.appLovinCompanion;
+  }
+
+  /**
+   * Send one event to our AppLovin pixel: AppLovin's standard name (no custom
+   * names; an unmapped event is not sent), its data object and the dedupe_id
+   * the server copy carries. Waits for the one-time load decision.
+   */
+  private async trackToAppLovin(config: AppLovinPixelConfig, eventName: string, properties: any, eventId?: string): Promise<boolean> {
+    const loaded = this.appLovinInit ? await this.appLovinInit : false;
+    if (!loaded || !this.appLovinAllowed()) return false;
+    const host = window as any;
+    if (typeof host.axon !== 'function') return false;
+    const name = appLovinEventName(eventName, config.event_mappings);
+    if (!name || !appLovinEventAllowed(name, config.account_type)) return false;
+    const data = appLovinEventData(name, eventName, properties, eventId);
+    if (!data) return false;
+    const dedupeId = appLovinDedupeId({ eventName: name, eventId, transactionId: data.transaction_id });
+    // Without the shared id the pixel copy could never merge with the server
+    // copy, so it is not sent at all.
+    if (!dedupeId) return false;
+    if (name === 'purchase' || name === 'sign_up') {
+      // user_data is required on these two; only the identified email, hashed
+      // with AppLovin's own normalization (never Meta's).
+      const email = appLovinNormalizedEmail(this.getIdentity?.()?.email);
+      const hash = email ? await sha256Hex(email) : null;
+      if (hash) data.user_data = { email: hash };
+      if (!this.appLovinAllowed()) return false;
+    }
+    host.axon('track', name, data, { dedupe_id: dedupeId });
+    return true;
   }
 
   /** Initialize Whop's official first-party attribution pixel. */
@@ -1217,7 +1719,7 @@ export class ContainerManager {
     // Authorization is request-scoped, never a positive cached decision. Do not
     // execute newly returned scripts or initialize a new destination here.
     const pixels: PixelConfig = { whop: initialized.whop };
-    const platforms = ['meta', 'google', 'tiktok'] as const;
+    const platforms = ['meta', 'google', 'tiktok', 'applovin'] as const;
     if (platforms.some(platform => initialized[platform]?.enabled === true)) {
       try {
         const data = await this.readConfiguration('pixel_forwarding');
@@ -1225,7 +1727,7 @@ export class ContainerManager {
         for (const platform of platforms) {
           const prior = initialized[platform];
           const current = data?.pixels?.[platform];
-          const id = platform === 'google' ? 'tag_id' : 'pixel_id';
+          const id = platform === 'google' ? 'tag_id' : platform === 'applovin' ? 'event_key' : 'pixel_id';
           if (prior?.enabled === true && current?.enabled === true
             && typeof current[id] === 'string' && current[id].length > 0
             && current[id] === (prior as any)[id]) {
@@ -1354,8 +1856,13 @@ export class ContainerManager {
         this.log('Error tracking Whop Pixel page:', error);
       }
     }
+    // AppLovin: only through the pixel the Container loaded itself (never
+    // through another install's), after its load decision.
+    if (pixels?.applovin?.enabled === true && this.appLovinInit) {
+      mirror('applovin', this.trackToAppLovin(pixels.applovin, eventName, sanitizedProperties, eventId));
+    }
     if (companionDeliveries.length > 0) await Promise.all(companionDeliveries);
-    return ['meta', 'google', 'tiktok', 'whop'].filter((platform) => delivered.has(platform));
+    return ['meta', 'google', 'tiktok', 'whop', 'applovin'].filter((platform) => delivered.has(platform));
   }
 
   /**
