@@ -119,14 +119,18 @@ describe('AppLovin pixel behind Shopify consent', () => {
     const added = enqueue.mock.calls.map((call: any[]) => call[0]).find((p: any) => p.event_name === 'product_added');
     expect(axonCalls()[2]).toEqual(['track', 'add_to_cart', expect.any(Object), { dedupe_id: added.event_id }]);
 
+    // A super property is part of the server copy's event_data: the pixel
+    // reads the currency from it too.
+    instance.setSuperProperties({ currency: 'gbp' });
     // A purchase: the pixel's dedupe_id is the order id, which the ingested
     // copy carries in event_data.order_id.
-    instance.track('purchase', { order_id: 'ORD-9', value: 25, currency: 'usd' });
+    instance.track('purchase', { order_id: 'ORD-9', value: 25 });
     await settle();
     const purchase = enqueue.mock.calls.map((call: any[]) => call[0]).find((p: any) => p.event_name === 'purchase');
     expect(purchase.event_data.order_id).toBe('ORD-9');
     expect(axonCalls()[3]).toEqual(['track', 'purchase',
-      expect.objectContaining({ transaction_id: 'ORD-9', currency: 'USD', value: 25 }), { dedupe_id: 'ORD-9' }]);
+      expect.objectContaining({ transaction_id: 'ORD-9', currency: 'GBP', value: 25 }), { dedupe_id: 'ORD-9' }]);
+    expect(purchase.event_data.currency).toBe('gbp'); // the server copy carries the same super property
   });
 
   test.each([

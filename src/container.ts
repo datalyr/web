@@ -271,6 +271,16 @@ function companionGtagReady(tagId: string): boolean {
   return queuedCalls(host.dataLayer).some((call) => call[0] === 'config' && String(call[1]) === tagId);
 }
 
+/** A JSON round trip (what the server reads back), or {} when it cannot be serialised. */
+function jsonSnapshot(value: unknown): Record<string, unknown> {
+  try {
+    const copy = JSON.parse(JSON.stringify(value ?? {}));
+    return copy && typeof copy === 'object' && !Array.isArray(copy) ? copy : {};
+  } catch {
+    return {};
+  }
+}
+
 function isPageEvent(eventName: string): boolean {
   const name = String(eventName).toLowerCase();
   return name === 'pageview' || name === 'page_view';
@@ -357,6 +367,8 @@ export interface PixelConfig {
     values?: string[];
     /** DATALYR event name → the rule's currency (the server's fallback before USD). */
     currencies?: Record<string, string>;
+    /** generate_lead triggers whose rules send a fixed value: that value. */
+    fixed_values?: Record<string, number>;
   };
   /** Present only for workspaces with an active X connection while the X
    *  destination gate is on. The pixel lives in dl.pixels.<v>.js. */
@@ -976,14 +988,14 @@ export class ContainerManager {
   /** Send one event through a destination pixel the Container loaded itself. */
   private async trackToDestinationPixel(platform: DestinationPixelPlatform, config: unknown, eventName: string,
     properties: Record<string, unknown>, eventId: string | undefined,
-    extra: { landing?: boolean; ids?: Record<string, string | number> }): Promise<boolean> {
+    extra: { landing?: boolean; ids?: Record<string, string | number>; data?: Record<string, unknown> }): Promise<boolean> {
     const status = await this.startDestinationPixel(platform, config);
     if (status !== 'loaded' || !this.destinationAllowed()) return false;
     const module = await this.destinationPixels.get();
     if (!module) return false;
     return module.track(platform, config, {
       name: eventName, properties, eventId, email: this.getIdentity?.()?.email ?? null,
-      landing: extra.landing === true, ids: extra.ids,
+      landing: extra.landing === true, ids: extra.ids, data: extra.data,
     }, { allowed: () => this.destinationAllowed(), log: (...args: unknown[]) => this.log(...args) });
   }
 
@@ -1306,14 +1318,19 @@ export class ContainerManager {
       landing?: boolean;
       /** false: Meta / Google / TikTok / Whop only (a pixel-only co-fire no server sender mirrors). */
       destinationPixels?: boolean;
+      /** The server copy's event_data (super properties + properties), for the destination pixels. */
+      data?: Record<string, unknown>;
     } = {}): Promise<string[]> {
     if (!this.forwardingAllowed() || eventName.startsWith('$')) return [];
     // Snapshot before awaiting: caller mutations must not change the queued event.
     const sanitizedEventName = this.sanitizeEventName(eventName);
-    // Dedup ids are read from the RAW properties: sanitising could alter an
-    // order id the server copy carries untouched.
-    const ids = pixelIdFields(properties);
     const sanitizedProperties = this.sanitizeProperties(properties);
+    // The destination pixels read value, currency and dedup ids from the data
+    // the server copy carries, as JSON and NOT display-sanitised: sanitising
+    // could alter an order id or turn "EUR<br>" into a valid "EUR".
+    const destinationData = jsonSnapshot(options.data ?? properties);
+    const ids = pixelIdFields(destinationData);
+    const destinationProperties = options.data ? this.sanitizeProperties(destinationData) : sanitizedProperties;
     // An event tracked while init() is still running (e.g. the pageview released
     // when Shopify consent resolves right after the container was created) is
     // forwarded once the pixels are initialized instead of being dropped.
@@ -1469,12 +1486,12 @@ export class ContainerManager {
     // will not send them (the module decides; src/pixels/applovin.ts).
     const destinations = options.destinationPixels !== false;
     if (destinations && pixels?.applovin?.enabled === true) {
-      mirror('applovin', this.trackToDestinationPixel('applovin', pixels.applovin, eventName, sanitizedProperties, eventId,
-        { landing: options.landing, ids }));
+      mirror('applovin', this.trackToDestinationPixel('applovin', pixels.applovin, eventName, destinationProperties, eventId,
+        { landing: options.landing, ids, data: destinationData }));
     }
     // X: conversions only (twq('config') already counted the page view).
     if (destinations && pixels?.x?.enabled === true && !isPageEvent(eventName)) {
-      mirror('x', this.trackToDestinationPixel('x', pixels.x, eventName, sanitizedProperties, eventId, { ids }));
+      mirror('x', this.trackToDestinationPixel('x', pixels.x, eventName, destinationProperties, eventId, { ids, data: destinationData }));
     }
     if (companionDeliveries.length > 0) await Promise.all(companionDeliveries);
     return ['meta', 'google', 'tiktok', 'whop', 'applovin', 'x'].filter((platform) => delivered.has(platform));

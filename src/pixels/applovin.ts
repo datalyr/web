@@ -77,6 +77,8 @@ export interface AppLovinPixelConfig {
   values?: string[];
   /** DATALYR event name → the rule's config.currency (the server's fallback before USD). */
   currencies?: Record<string, string>;
+  /** generate_lead triggers whose rules send a fixed value_static: that value. */
+  fixed_values?: Record<string, number>;
 }
 
 const lowerText = (value: unknown): string => (typeof value === 'string' ? value.trim().toLowerCase() : '');
@@ -319,12 +321,15 @@ export function serverNumber(value: unknown): number | undefined {
 
 /**
  * The value resolveConversionValue gives a rule that takes the event's own
- * value (the only rules whose triggers ingest lists in `values`): the FIRST
- * present VALUE_FALLBACK_PATHS field, as getNumber reads it. A present
- * non-numeric field ("N/A") stops the search: no value, even when a later
- * field holds a number, exactly as the server.
+ * value (the only rules whose triggers ingest lists in `values`; never
+ * value_type 'none'): trial_expected_value first when it is above 0
+ * (trialExpectedValueFallback), else the FIRST present VALUE_FALLBACK_PATHS
+ * field, as getNumber reads it. A present non-numeric field ("N/A") stops the
+ * search: no value, even when a later field holds a number, exactly as the server.
  */
 export function serverEventValue(properties: unknown): number | undefined {
+  const trial = serverNumber(properties && typeof properties === 'object' ? (properties as any).trial_expected_value : undefined);
+  if (trial !== undefined && trial > 0) return trial;
   return serverNumber(serverFromAny(properties, VALUE_FALLBACK_PATHS));
 }
 
@@ -361,14 +366,21 @@ const APPLOVIN_MONEY_EVENTS = new Set(['begin_checkout', 'purchase', 'generate_l
  */
 export function appLovinEventData(
   name: string, eventName: string, properties: any,
-  { sendValue = false, orderReference, ruleCurrency }: { sendValue?: boolean; orderReference?: string; ruleCurrency?: unknown } = {},
+  { sendValue = false, orderReference, ruleCurrency, data, fixedValue }: {
+    sendValue?: boolean; orderReference?: string; ruleCurrency?: unknown;
+    /** The server copy's event_data (raw, merged); value and currency come from it. */
+    data?: unknown;
+    /** generate_lead: the rule's fixed value_static (ingest's fixed_values). */
+    fixedValue?: number;
+  } = {},
 ): Record<string, unknown> | null {
   const props = properties && typeof properties === 'object' ? properties : {};
+  const source = data && typeof data === 'object' ? data as any : props;
   if (name === 'page_view' || name === 'login') return {};
-  const currency = serverCurrency(props, ruleCurrency);
+  const currency = serverCurrency(source, ruleCurrency);
   if (!currency && APPLOVIN_MONEY_EVENTS.has(name)) return null;
   const items = appLovinItems(props);
-  const value = sendValue ? serverEventValue(props) : undefined;
+  const value = sendValue ? serverEventValue(source) : undefined;
   switch (name) {
     case 'purchase': {
       if (!orderReference || !sendValue) return null;
@@ -387,14 +399,18 @@ export function appLovinEventData(
     case 'subscribe': {
       if (!sendValue) return { currency };
       const trial = APPLOVIN_TRIAL_EVENTS.has(lowerText(eventName));
-      const trialValue = trial ? appLovinNumber(props.trial_expected_value) : undefined;
+      const trialValue = trial ? appLovinNumber(source.trial_expected_value) : undefined;
       const amount = trial ? (trialValue !== undefined && trialValue > 0 ? trialValue : 0) : (value ?? 0);
       return { currency, value: round2(Math.max(0, amount)) };
     }
     case 'generate_lead':
-      // Ingest lists a lead trigger outside `values` only when the rule has a
-      // fixed numeric value (the server always has one): sent without it.
-      if (!sendValue) return { currency };
+      // Ingest lists a lead trigger outside `values` only when its rules have a
+      // fixed numeric value_static (fixed_values): sent with that value, as
+      // the server sends it.
+      if (!sendValue) {
+        return typeof fixedValue === 'number' && Number.isFinite(fixedValue)
+          ? { currency, value: round2(Math.max(0, fixedValue)) } : null;
+      }
       // value is required and 0 means "low quality": never invented.
       if (value === undefined) return null;
       return { currency, value: round2(Math.max(0, value)) };
@@ -635,7 +651,11 @@ export class AppLovinPixel {
     const orderReference = appLovinOrderReference(event.ids ?? {});
     const currencies = config.currencies && typeof config.currencies === 'object' ? config.currencies : {};
     const ruleCurrency = Object.prototype.hasOwnProperty.call(currencies, event.name) ? currencies[event.name] : undefined;
-    const data = appLovinEventData(name, event.name, event.properties, { sendValue, orderReference, ruleCurrency });
+    const fixedValues = config.fixed_values && typeof config.fixed_values === 'object' ? config.fixed_values : {};
+    const fixedValue = Object.prototype.hasOwnProperty.call(fixedValues, event.name) ? fixedValues[event.name] : undefined;
+    const data = appLovinEventData(name, event.name, event.properties, {
+      sendValue, orderReference, ruleCurrency, data: event.data, fixedValue,
+    });
     if (!data) return false;
     const dedupeId = appLovinDedupeId({ eventName: name, eventId: event.eventId, transactionId: data.transaction_id });
     // Without the shared id the pixel copy could never merge with the server copy.

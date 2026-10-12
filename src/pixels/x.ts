@@ -149,12 +149,14 @@ export function xContents(properties: any): Array<Record<string, unknown>> {
  * sent: a currency the sender's check rejects (it skips the conversion), or a
  * purchase that would be weaker than the server copy. Never personal data.
  */
-export function xEventParameters(properties: any, { purchase, sendValue, conversionId, ruleCurrency }:
-  { purchase: boolean; sendValue: boolean; conversionId: string; ruleCurrency?: unknown }): Record<string, unknown> | null {
+export function xEventParameters(properties: any, { purchase, sendValue, conversionId, ruleCurrency, data }:
+  { purchase: boolean; sendValue: boolean; conversionId: string; ruleCurrency?: unknown; data?: unknown }): Record<string, unknown> | null {
   const props = properties && typeof properties === 'object' ? properties : {};
-  const currency = serverCurrency(props, ruleCurrency);
+  // Value and currency from the server copy's event_data (raw, merged) when given.
+  const source = data && typeof data === 'object' ? data : props;
+  const currency = serverCurrency(source, ruleCurrency);
   if (!currency) return null;
-  const raw = sendValue ? serverEventValue(props) : undefined;
+  const raw = sendValue ? serverEventValue(source) : undefined;
   const value = raw !== undefined && raw >= 0 ? round2(raw) : undefined;
   // A purchase only as strong as the server copy: value allowed and above 0.
   if (purchase && !(value !== undefined && value > 0)) return null;
@@ -293,7 +295,7 @@ export class XPixel {
     const sendValue = Array.isArray(config.values) && config.values.includes(event.name);
     const currencies = config.currencies && typeof config.currencies === 'object' ? config.currencies : {};
     const ruleCurrency = Object.prototype.hasOwnProperty.call(currencies, event.name) ? currencies[event.name] : undefined;
-    const parameters = xEventParameters(event.properties, { purchase, sendValue, conversionId, ruleCurrency });
+    const parameters = xEventParameters(event.properties, { purchase, sendValue, conversionId, ruleCurrency, data: event.data });
     if (!parameters) return false;
     const twq = (window as any).twq;
     if (typeof twq !== 'function') return false;

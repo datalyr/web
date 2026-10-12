@@ -54,6 +54,12 @@ export interface PixelEvent {
    * byte for byte (PIXEL_ID_FIELDS).
    */
   ids?: Record<string, string | number>;
+  /**
+   * The event_data the server copy carries: super properties merged with the
+   * event's properties, before the Container's display sanitising, as JSON
+   * (the server reads the stored JSON). Value and currency are read from it.
+   */
+  data?: Record<string, unknown>;
 }
 
 /** The fields an order / transaction reference is read from (the senders' order). */

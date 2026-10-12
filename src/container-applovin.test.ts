@@ -502,10 +502,31 @@ describe('AppLovin pixel: events', () => {
     manager.cleanupAllIframes();
     resetPage();
     registerModule();
-    respond(applovin({ values: [] }));
+    // A lead rule with a fixed value_static: ingest publishes it (fixed_values)
+    // and the browser sends exactly that value, as the server does.
+    respond(applovin({ values: [], fixed_values: { lead: 25 } }));
     manager = await started();
     expect(await manager.trackToPixels('lead', { value: 99 }, 'e3')).toEqual(['applovin']);
-    expect(tracks()).toEqual([['track', 'generate_lead', { currency: 'USD' }, { dedupe_id: 'e3' }]]);
+    expect(tracks()).toEqual([['track', 'generate_lead', { currency: 'USD', value: 25 }, { dedupe_id: 'e3' }]]);
+    // Without a fixed value (and not in values): nothing the browser could match.
+    respond(applovin({ values: [] }));
+    expect(await manager.trackToPixels('lead', { value: 99 }, 'e4')).toEqual([]);
+  });
+
+  test('value, currency and ids come from the server copy\'s data: super properties merged, raw, JSON', async () => {
+    respond(applovin({ values: ['purchase', 'product_added'] }));
+    manager = await started();
+    // A super-property currency and value reach the pixel (the server merges them too).
+    await manager.trackToPixels('product_added', { product_id: 'p' }, 'e1', { data: { currency: 'gbp', value: 7, product_id: 'p' } });
+    // "EUR<br>" is invalid on the server (no display sanitising there): nothing.
+    expect(await manager.trackToPixels('purchase', { order_id: 'o1', value: 5, currency: 'EUR<br>' }, 'e2',
+      { data: { order_id: 'o1', value: 5, currency: 'EUR<br>' } })).toEqual([]);
+    // trial_expected_value comes first, as resolveConversionValue.
+    await manager.trackToPixels('purchase', {}, 'e3', { data: { order_id: 'o3', trial_expected_value: 30, value: 5, currency: 'USD' } });
+    expect(tracks().map((call) => [call[1], (call[2] as any).currency, (call[2] as any).value, call[3]])).toEqual([
+      ['add_to_cart', 'GBP', 7, { dedupe_id: 'e1' }],
+      ['purchase', 'USD', 30, { dedupe_id: 'o3' }],
+    ]);
   });
 
   test('an event with no event id is not sent (it could never merge with the server copy)', async () => {

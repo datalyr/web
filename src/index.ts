@@ -710,7 +710,11 @@ class Datalyr {
       // install on the page tracks (a destination pixel sends only that one).
       const landing = eventName === 'pageview' && claimLandingPageView();
       if (this.container) {
-        void this.container.trackToPixels(eventName, properties, eventId, { landing }).catch(() => {
+        // What the server copy's event_data starts as (createEventPayload): super
+        // properties under the event's own. The destination pixels read value,
+        // currency and order ids from it, exactly as the server senders do.
+        const data = deepMerge({}, this.superProperties, sanitizeEventData(properties));
+        void this.container.trackToPixels(eventName, properties, eventId, { landing, data }).catch(() => {
           this.log("Pixel forwarding failed; event was not retried to the pixel");
         });
       }

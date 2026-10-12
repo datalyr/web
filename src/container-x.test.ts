@@ -297,6 +297,18 @@ describe('X Pixel: events', () => {
     expect(JSON.stringify(events())).not.toMatch(/a@b\.co|email|phone/);
   });
 
+  test('value and currency from the server copy\'s data (super properties, raw); trial_expected_value first', async () => {
+    respond(x({ values: ['purchase', 'product_added'] }));
+    manager = await started();
+    await manager.trackToPixels('product_added', {}, 'e1', { data: { currency: 'cad', revenue: '4' } });
+    expect(await manager.trackToPixels('purchase', { order_id: 'o', value: 5 }, 'e2', { data: { order_id: 'o', value: 5, currency: 'EUR<br>' } })).toEqual([]);
+    await manager.trackToPixels('purchase', {}, 'e3', { data: { order_id: 'o3', trial_expected_value: 12, value: 1 } });
+    expect(events().map((call) => call[2])).toEqual([
+      { conversion_id: 'e1', value: 4, currency: 'CAD' },
+      { conversion_id: 'o3', value: 12, currency: 'USD' },
+    ]);
+  });
+
   test('uwt.js not run: logged once, not per event', async () => {
     respond(x());
     const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
