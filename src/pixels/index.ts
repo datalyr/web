@@ -16,7 +16,6 @@ import { AppLovinPixel } from './applovin';
 interface Platform {
   load(config: any, ctx: PixelLoadContext): Promise<PixelLoadStatus>;
   track(config: any, event: PixelEvent, ctx: { allowed: () => boolean }): Promise<boolean>;
-  active(): boolean;
 }
 
 export function createPixelsModule(): DestinationPixelsModule & { platforms: Record<string, Platform>; pixels_version: string } {
@@ -30,10 +29,6 @@ export function createPixelsModule(): DestinationPixelsModule & { platforms: Rec
       const target = Object.prototype.hasOwnProperty.call(platforms, platform) ? platforms[platform] : null;
       if (!target) return 'blocked';
       try { return await target.load(config, ctx); } catch { return 'blocked'; }
-    },
-    active(platform) {
-      const target = Object.prototype.hasOwnProperty.call(platforms, platform) ? platforms[platform] : null;
-      try { return !!target && target.active(); } catch { return false; }
     },
     async track(platform, config, event, ctx) {
       const target = Object.prototype.hasOwnProperty.call(platforms, platform) ? platforms[platform] : null;

@@ -644,15 +644,9 @@ class Datalyr {
         email: this.userProperties?.email,
       })
     });
-    // The landing pageview follows this promise (initializeAsync and the late
-    // Shopify grant): it also waits, bounded, for the destination pixels' load
-    // decisions, so the pageview can carry applovin_pixel_fired.
-    const container = this.container;
-    this.containerReady = container.init()
-      .then(() => container.destinationPixelsSettled())
-      .catch(error => {
-        this.log('Container initialization failed:', error);
-      });
+    this.containerReady = this.container.init().catch(error => {
+      this.log('Container initialization failed:', error);
+    });
     return this.containerReady;
   }
 
@@ -698,13 +692,6 @@ class Datalyr {
       if (this.identity.recoveredFromSession && !this.visitorRecoveryReported && !INTERNAL_SIGNAL_EVENTS.has(eventName)) {
         this.visitorRecoveryReported = true;
         properties = { ...properties, visitor_recovered: 'session' };
-      }
-
-      // Page views AppLovin's own pixel counts (the Container never sends them
-      // through axon): the server sender skips its copy of exactly these. Only
-      // when our pixel is loaded and active on this page right now; never otherwise.
-      if (eventName === 'pageview' && this.container?.destinationPixelActive('applovin')) {
-        properties = { ...properties, applovin_pixel_fired: true };
       }
 
       // Create event payload
