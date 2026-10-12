@@ -124,7 +124,7 @@ describe('AppLovin pixel: loading and gating', () => {
     const fetchMock = respond(applovin());
     manager = await started();
     await manager.init();
-    expect(await manager.trackToPixels('pageview', { url: 'https://shop.example/' }, 'evt-landing')).toEqual(['applovin']);
+    expect(await manager.trackToPixels('pageview', { url: 'https://shop.example/' }, 'evt-landing', { landing: true })).toEqual(['applovin']);
     // Later page views on the same page load are SPA navigations: AppLovin's
     // pixel sends those itself (autoSpaPageView true), so we do not.
     expect(await manager.trackToPixels('pageview', {}, 'evt-spa-1')).toEqual([]);
@@ -139,7 +139,7 @@ describe('AppLovin pixel: loading and gating', () => {
   test('autoSpaPageView false: SPA page views are sent by us, each with its own event id', async () => {
     const fetchMock = respond(applovin(), { autoEmailCapture: false, autoSpaPageView: false });
     manager = await started();
-    await manager.trackToPixels('pageview', {}, 'evt-landing');
+    await manager.trackToPixels('pageview', {}, 'evt-landing', { landing: true });
     expect(await manager.trackToPixels('pageview', {}, 'evt-spa-1')).toEqual(['applovin']);
     expect(await manager.trackToPixels('pageview', {}, 'evt-spa-2')).toEqual(['applovin']);
     expect(tracks()).toEqual([
@@ -156,17 +156,17 @@ describe('AppLovin pixel: loading and gating', () => {
   ])('%s: no SPA page views from us (never doubled), the landing one still goes', async (_name, config) => {
     respond(applovin(), config);
     manager = await started();
-    await manager.trackToPixels('pageview', {}, 'evt-landing');
+    await manager.trackToPixels('pageview', {}, 'evt-landing', { landing: true });
     expect(await manager.trackToPixels('pageview', {}, 'evt-spa')).toEqual([]);
     expect(tracks()).toEqual([['track', 'page_view', {}, { dedupe_id: 'evt-landing' }]]);
   });
 
-  test('two page views racing for the landing: only one is sent as such', async () => {
+  test('two dl.js installs on one page both claim the landing: only one is sent as such', async () => {
     respond(applovin());
     manager = await started();
     const results = await Promise.all([
-      manager.trackToPixels('pageview', {}, 'evt-a'),
-      manager.trackToPixels('pageview', {}, 'evt-b'),
+      manager.trackToPixels('pageview', {}, 'evt-a', { landing: true }),
+      manager.trackToPixels('pageview', {}, 'evt-b', { landing: true }),
     ]);
     expect(results.filter((delivered) => delivered.includes('applovin'))).toHaveLength(1);
     expect(tracks()).toHaveLength(1);
@@ -175,15 +175,28 @@ describe('AppLovin pixel: loading and gating', () => {
   test('a page view without a page_view entry in the map, or without an event id, is not sent', async () => {
     respond(applovin({ events: { purchase: 'purchase' } }));
     manager = await started();
-    expect(await manager.trackToPixels('pageview', {}, 'evt-landing')).toEqual([]);
+    expect(await manager.trackToPixels('pageview', {}, 'evt-landing', { landing: true })).toEqual([]);
     manager.cleanupAllIframes();
     resetPage();
     registerModule();
     respond(applovin());
     manager = await started();
-    expect(await manager.trackToPixels('pageview', {})).toEqual([]);
-    // The landing is still to come: the next page view (with an id) is it.
-    expect(await manager.trackToPixels('pageview', {}, 'evt-2')).toEqual(['applovin']);
+    expect(await manager.trackToPixels('pageview', {}, undefined, { landing: true })).toEqual([]);
+  });
+
+  test('the landing is the first page view of the page load: dropped, it is still consumed (autoSpaPageView true)', async () => {
+    respond(applovin());
+    let allowed = false;
+    manager = new ContainerManager({ workspaceId: 'ws', canForward: () => allowed });
+    // The landing page view goes by before consent: never reaches the pixel.
+    expect(await manager.trackToPixels('pageview', {}, 'evt-landing', { landing: true })).toEqual([]);
+    allowed = true;
+    await manager.init();
+    await manager.destinationPixelStatus('applovin');
+    // A later page view is an SPA navigation, not a late landing: AppLovin's
+    // pixel sends those itself, so nothing from us.
+    expect(await manager.trackToPixels('pageview', {}, 'evt-spa')).toEqual([]);
+    expect(tracks()).toEqual([]);
   });
 
   test('no marketing consent: nothing loads, the module is not even fetched', async () => {
@@ -421,26 +434,45 @@ describe('AppLovin pixel: events', () => {
     ]);
   });
 
-  test('purchase: only with an order reference; dedupe_id = that reference exactly as transaction_id; no unverified value', async () => {
-    respond(applovin());
+  test('purchase: sent only as strong as the server copy; dedupe_id = the order reference exactly as transaction_id', async () => {
+    respond(applovin({ values: ['purchase'] }));
     manager = await started();
+    // No order reference, a $0 value, no currency of its own: left to the server.
     expect(await manager.trackToPixels('purchase', { value: 50, currency: 'USD' }, 'evt-no-order')).toEqual([]);
+    expect(await manager.trackToPixels('purchase', { order_id: 'o0', value: 0, currency: 'USD' }, 'e0')).toEqual([]);
+    expect(await manager.trackToPixels('purchase', { order_id: 'o1', value: 30 }, 'e1')).toEqual([]);
     await manager.trackToPixels('purchase', {
-      order_id: 6896206413937, value: 118.5, subtotal: 100, shipping: 8.5, tax: 10, currency: 'USD',
+      order_id: 6896206413937, value: 118.5, subtotal: 100, shipping: 8.5, tax: 10, currency: 'eur',
       items: [{ product_id: 111, variant_id: 222, title: 'Tee', price: 50, quantity: 2 }],
     }, 'evt-purchase');
     expect(tracks()).toEqual([['track', 'purchase', {
-      currency: 'USD', shipping: 8.5, tax: 10, transaction_id: '6896206413937',
+      currency: 'EUR', value: 100, shipping: 8.5, tax: 10, transaction_id: '6896206413937',
       items: [{ item_id: '111', item_variant_id: '222', item_name: 'Tee', price: 50, quantity: 2 }],
     }, { dedupe_id: '6896206413937' }]]);
   });
 
-  test('purchase with a value the server would send as is: the subtotal goes too; a $0 one is not sent', async () => {
+  test('purchase in a workspace whose purchase value the server would not take from the browser: not sent at all', async () => {
+    respond(applovin({ values: [] })); // verified money source, or a rule with its own value
+    manager = await started();
+    expect(await manager.trackToPixels('purchase', { order_id: 'A-1', value: 118.5, currency: 'USD' }, 'e1')).toEqual([]);
+    expect(tracks()).toEqual([]);
+  });
+
+  test('ids come from the raw properties: an order id sanitising would alter is sent as the server has it', async () => {
     respond(applovin({ values: ['purchase'] }));
     manager = await started();
-    expect(await manager.trackToPixels('purchase', { order_id: 'o0', value: 0 }, 'e0')).toEqual([]);
-    await manager.trackToPixels('purchase', { order_id: 'A-1', value: 118.5, subtotal: 100 }, 'e1');
-    expect(tracks()[0]).toEqual(['track', 'purchase', expect.objectContaining({ value: 100, transaction_id: 'A-1' }), { dedupe_id: 'A-1' }]);
+    await manager.trackToPixels('purchase', { order_id: 'ORD<7>onx=1', value: 5, currency: 'USD' }, 'e1');
+    const [call] = tracks();
+    expect((call[2] as any).transaction_id).toBe('ORD<7>onx=1');
+    expect(call[3]).toEqual({ dedupe_id: 'ORD<7>onx=1' });
+  });
+
+  test('a pixel-only co-fire (destinationPixels: false) never reaches AppLovin', async () => {
+    respond(applovin({ values: ['purchase'] }));
+    manager = await started();
+    expect(await manager.trackToPixels('purchase', { order_id: 'CC-1', value: 5, currency: 'USD' }, 'checkoutchamp_purchase_CC-1',
+      { destinationPixels: false })).toEqual([]);
+    expect(tracks()).toEqual([]);
   });
 
   test('a lead: with a value only when allowed (then a missing value skips it, as the sender does)', async () => {
@@ -461,15 +493,13 @@ describe('AppLovin pixel: events', () => {
     respond(applovin());
     manager = await started();
     expect(await manager.trackToPixels('product_added', { product_id: 'p1' })).toEqual([]);
-    expect(await manager.trackToPixels('purchase', { order_id: 'A-1' })).toEqual(['applovin']);
-    expect(tracks()[0][3]).toEqual({ dedupe_id: 'A-1' });
   });
 
   test('lead-gen accounts send only page_view and generate_lead', async () => {
     respond(applovin({ account_type: 'lead_gen' }));
     manager = await started();
-    await manager.trackToPixels('pageview', {}, 'e1');
-    await manager.trackToPixels('purchase', { order_id: 'o' }, 'e2');
+    await manager.trackToPixels('pageview', {}, 'e1', { landing: true });
+    await manager.trackToPixels('purchase', { order_id: 'o', value: 5, currency: 'USD' }, 'e2');
     await manager.trackToPixels('lead', { value: 12 }, 'e3');
     expect(tracks().map((call) => call[1])).toEqual(['page_view', 'generate_lead']);
   });
@@ -500,9 +530,9 @@ describe('AppLovin pixel: events', () => {
       (globalThis as any).TextEncoder = NodeTextEncoder;
       restore.push(() => delete (globalThis as any).TextEncoder);
     }
-    respond(applovin());
+    respond(applovin({ values: ['purchase'] }));
     manager = await started({ getIdentity: () => ({ email: ' J..A.NE+work.more+extra@GMAIL.COM ' }) });
-    await manager.trackToPixels('purchase', { order_id: 'o1' }, 'e1');
+    await manager.trackToPixels('purchase', { order_id: 'o1', value: 9, currency: 'USD' }, 'e1');
     expect((tracks()[0][2] as any).user_data).toEqual({
       email: '988b074286b20c503e3015c2076533f3bf4ce5ca6f8a507ab52c2e0f98d620b7',
     });
@@ -551,12 +581,16 @@ describe('AppLovin mirrors of the sender contract', () => {
   });
 
   test('purchase data: no reference → not sent; shipping defaults to 0; tax only when recorded; synthesized item', () => {
-    expect(appLovinEventData('purchase', 'purchase', { value: 50 }, { sendValue: true })).toBeNull();
-    expect(appLovinEventData('purchase', 'purchase', { value: 50, order_id: 'o', items: [{ sku: 's', price: 50 }] }, { sendValue: true }))
+    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'USD' }, { sendValue: true })).toBeNull();
+    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'usd', order_id: 'o', items: [{ sku: 's', price: 50 }] }, { sendValue: true }))
       .toEqual({ currency: 'USD', value: 50, shipping: 0, transaction_id: 'o', items: [{ item_id: 's', price: 50, quantity: 1 }] });
-    expect(appLovinEventData('purchase', 'purchase', { value: 50, order_id: 'o', product_id: 'prod_1' }))
-      .toEqual({ currency: 'USD', shipping: 0, transaction_id: 'o', items: [{ item_id: 'prod_1', quantity: 1 }] });
-    expect(appLovinEventData('purchase', 'purchase', { value: 50, order_id: 'o', price_id: 'price_1', plan: { product: 'prod_2' } }, { sendValue: true }))
+    // Without sendValue, or without the event's own currency: left to the server.
+    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'USD', order_id: 'o', product_id: 'prod_1' })).toBeNull();
+    expect(appLovinEventData('purchase', 'purchase', { value: 50, order_id: 'o', product_id: 'prod_1' }, { sendValue: true })).toBeNull();
+    // An explicit raw reference wins over the (sanitised) properties.
+    expect(appLovinEventData('purchase', 'purchase', { value: 5, currency: 'USD', order_id: 'ORD' }, { sendValue: true, orderReference: 'ORD<7>' }))
+      .toMatchObject({ transaction_id: 'ORD<7>' });
+    expect(appLovinEventData('purchase', 'purchase', { value: 50, currency: 'USD', order_id: 'o', price_id: 'price_1', plan: { product: 'prod_2' } }, { sendValue: true }))
       .toMatchObject({ value: 50, items: [{ item_id: 'prod_2', item_variant_id: 'price_1', price: 50, quantity: 1 }] });
     expect(appLovinEventData('page_view', 'pageview', { value: 3 }, { sendValue: true })).toEqual({});
     expect(appLovinEventData('subscribe', 'trial_started', { trial_expected_value: 30 }, { sendValue: true })).toEqual({ currency: 'USD', value: 30 });

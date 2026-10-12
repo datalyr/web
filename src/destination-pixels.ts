@@ -46,13 +46,59 @@ export interface PixelEvent {
   eventId?: string;
   /** Identified email (plain); a module hashes it the platform's way, if it uses it. */
   email?: string | null;
+  /** This is the landing page view of the page load (the first one dl.js tracked). */
+  landing?: boolean;
+  /**
+   * The order / transaction id fields as the caller passed them, read BEFORE
+   * the Container sanitises properties, so dedup ids match the server's copy
+   * byte for byte (PIXEL_ID_FIELDS).
+   */
+  ids?: Record<string, string | number>;
+}
+
+/** The fields an order / transaction reference is read from (the senders' order). */
+export const PIXEL_ID_FIELDS = ['order_id', 'transaction_id', 'object', 'id', 'invoice', 'invoice_id',
+  'charge', 'charge_id', 'payment_intent', 'checkout_id'] as const;
+
+/** The raw id fields of an event's properties (strings and finite numbers only). */
+export function pixelIdFields(properties: unknown): Record<string, string | number> {
+  const out: Record<string, string | number> = {};
+  if (!properties || typeof properties !== 'object') return out;
+  for (const key of PIXEL_ID_FIELDS) {
+    const value = (properties as Record<string, unknown>)[key];
+    if (typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value))) out[key] = value;
+  }
+  return out;
+}
+
+/** What a module may use when it sends. */
+export interface PixelTrackContext {
+  allowed: () => boolean;
+  log?: (...args: unknown[]) => void;
+}
+
+/**
+ * Claim the landing page view of this page load: true for the FIRST page view
+ * any dl.js install on the page tracks, false for every later one (SPA
+ * navigations, a second install). One claim per page, consumed even when that
+ * page view never reaches a pixel.
+ */
+export function claimLandingPageView(): boolean {
+  try {
+    const host = window as any;
+    if (host.__datalyrLandingPageView === true) return false;
+    host.__datalyrLandingPageView = true;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface DestinationPixelsModule {
   api: number;
   version: string;
   load(platform: string, config: unknown, ctx: PixelLoadContext): Promise<PixelLoadStatus>;
-  track(platform: string, config: unknown, event: PixelEvent, ctx: { allowed: () => boolean }): Promise<boolean>;
+  track(platform: string, config: unknown, event: PixelEvent, ctx: PixelTrackContext): Promise<boolean>;
 }
 
 /** Versioned, immutable module URL. */

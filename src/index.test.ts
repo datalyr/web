@@ -177,7 +177,9 @@ describe('Checkout Champ pixel guard follows actual SDK forwarding', () => {
     expect(window.sessionStorage.getItem('__dl_cc_purchase_order-policy')).toBe('1');
     await instance.fireCheckoutChampPurchasePixel();
     expect(forward).toHaveBeenCalledTimes(2);
-    expect(forward).toHaveBeenLastCalledWith('purchase', expect.objectContaining({ value: 12, currency: 'USD' }), 'checkoutchamp_purchase_order-policy');
+    // destinationPixels: false — AppLovin / X never get this pixel-only co-fire.
+    expect(forward).toHaveBeenLastCalledWith('purchase', expect.objectContaining({ value: 12, currency: 'USD' }), 'checkoutchamp_purchase_order-policy',
+      { destinationPixels: false });
   });
   test('overlapping calls do not forward the same order twice', async () => {
     const instance: any = loadSdk().createDatalyrInstance();

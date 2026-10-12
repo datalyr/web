@@ -49,7 +49,7 @@
  *   merchant snippet, a GTM tag), checked before loading and again before
  *   every send.
  */
-import type { PixelEvent, PixelLoadContext, PixelLoadStatus } from '../destination-pixels';
+import type { PixelEvent, PixelLoadContext, PixelLoadStatus, PixelTrackContext } from '../destination-pixels';
 import { sha256Hex } from '../utils';
 
 /** The two scripts AppLovin's native-JS snippet loads, in its order. */
@@ -189,7 +189,18 @@ export function appLovinItem(raw: any): Record<string, unknown> | null {
   return item;
 }
 
-const APPLOVIN_ITEM_LISTS = ['items', 'line_items', 'products', 'contents'];
+/** The sender's ITEM_LIST_PATHS, in its order (applovin-payload.js / x-payload.js). */
+export const ITEM_LIST_PATHS = ['items', 'line_items', 'products', 'properties.items', 'properties.products', 'contents'];
+
+/** The first non-empty item list on the sender's paths, or null. */
+export function firstItemList(properties: any): unknown[] | null {
+  if (!properties || typeof properties !== 'object') return null;
+  for (const path of ITEM_LIST_PATHS) {
+    const list = path.split('.').reduce((object: any, key) => (object && typeof object === 'object' ? object[key] : undefined), properties);
+    if (Array.isArray(list) && list.length) return list;
+  }
+  return null;
+}
 
 /**
  * The event's items: its first non-empty item list (the sender's list paths),
@@ -198,13 +209,8 @@ const APPLOVIN_ITEM_LISTS = ['items', 'line_items', 'products', 'contents'];
  */
 export function appLovinItems(properties: any): Array<Record<string, unknown>> {
   if (!properties || typeof properties !== 'object') return [];
-  const nested = properties.properties && typeof properties.properties === 'object' ? properties.properties : null;
-  const lists = [...APPLOVIN_ITEM_LISTS.map((key) => properties[key]), nested?.items, nested?.products];
-  for (const list of lists) {
-    if (Array.isArray(list) && list.length) {
-      return list.map(appLovinItem).filter((item): item is Record<string, unknown> => !!item).slice(0, 100);
-    }
-  }
+  const list = firstItemList(properties);
+  if (list) return list.map(appLovinItem).filter((item): item is Record<string, unknown> => !!item).slice(0, 100);
   if (firstText(properties, ['product_id', 'item_id', 'variant_id', 'sku'])) {
     const item = appLovinItem(properties);
     if (item) return [item];
@@ -259,10 +265,17 @@ export function appLovinNormalizedEmail(raw: unknown): string | null {
  * The `data` object for one AppLovin event (AppLovin's "Events and objects",
  * shaped as the sender shapes it), or null when the event must not be sent.
  * `sendValue` false leaves `value` out entirely (the server copy carries it).
+ *
+ * A purchase is sent from the browser ONLY when it can be as strong as the
+ * server copy (owner decision 2026-10-12): an order reference (its dedupe_id),
+ * a value the server would send as is (`sendValue`) above 0, and a currency the
+ * event itself names (no USD default). Anything less is left to the server.
+ * `orderReference` is the reference read from the RAW properties (before the
+ * Container sanitises them), so the id is byte-for-byte the server's.
  */
 export function appLovinEventData(
   name: string, eventName: string, properties: any,
-  { sendValue = false }: { sendValue?: boolean } = {},
+  { sendValue = false, orderReference }: { sendValue?: boolean; orderReference?: string } = {},
 ): Record<string, unknown> | null {
   const props = properties && typeof properties === 'object' ? properties : {};
   if (name === 'page_view' || name === 'login') return {};
@@ -274,17 +287,15 @@ export function appLovinEventData(
   switch (name) {
     case 'purchase': {
       // Only with an order reference: it is the dedupe_id the server copy carries.
-      const reference = appLovinOrderReference(props);
-      if (!reference) return null;
+      const reference = orderReference ?? appLovinOrderReference(props);
+      if (!reference || !sendValue || !declared) return null;
       // "The total monetary amount due before tax and shipping (the subtotal)".
-      const amount = sendValue
-        ? firstNumber(props, ['current_subtotal_price', 'subtotal_price', 'subtotal', 'total_excluding_tax', 'subtotal_excluding_tax']) ?? value
-        : undefined;
-      if (sendValue && !(amount !== undefined && amount > 0)) return null; // the sender skips a $0 purchase
+      const amount = firstNumber(props, ['current_subtotal_price', 'subtotal_price', 'subtotal', 'total_excluding_tax', 'subtotal_excluding_tax']) ?? value;
+      if (!(amount !== undefined && amount > 0)) return null; // the sender skips a $0 purchase
       const synthesized = items.length ? null : synthesizedAppLovinItem(props, amount);
       const tax = firstNumber(props, ['total_tax', 'tax', 'amount_tax', 'tax_amount']);
       return dropEmpty({
-        currency,
+        currency: declared,
         value: amount !== undefined ? round2(amount) : undefined,
         items: items.length ? items : (synthesized ? [synthesized] : undefined),
         shipping: round2(firstNumber(props, ['total_shipping', 'shipping', 'total_shipping_price', 'shipping_amount']) ?? 0),
@@ -423,11 +434,11 @@ export function appLovinPixelConfigUrl(eventKey: string): string {
 }
 
 /**
- * Whether WE may send SPA page views: only when AppLovin's pixel config says
- * autoSpaPageView === false. Anything else (true, missing, a failed or slow
- * fetch) leaves SPA page views to AppLovin's pixel, so they are never doubled.
+ * True only when AppLovin's pixel config says autoSpaPageView === false (then
+ * WE send SPA page views). Anything else (true, missing, a failed or slow
+ * fetch) is false: SPA page views stay with AppLovin's pixel, never doubled.
  */
-export async function appLovinSendsOwnSpaPageViews(eventKey: string, timeoutMs = 5000): Promise<boolean> {
+export async function appLovinAutoSpaPageViewOff(eventKey: string, timeoutMs = 5000): Promise<boolean> {
   try {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = setTimeout(() => controller?.abort(), timeoutMs);
@@ -448,8 +459,8 @@ export class AppLovinPixel {
   private stub: unknown = null;
   private key: string | null = null;
   private companion = false;
-  /** The landing page view of this page load has been sent. */
-  private landingSent = false;
+  /** The landing page view of this page load has been handled (sent or not). */
+  private landingSeen = false;
   /** Resolves true only when AppLovin's config has autoSpaPageView === false. */
   private ownSpaPageViews: Promise<boolean> | null = null;
 
@@ -507,12 +518,12 @@ export class AppLovinPixel {
     this.stub = host.axon;
     this.key = key;
     // Once per page: who sends SPA page views (see the file header).
-    this.ownSpaPageViews = appLovinSendsOwnSpaPageViews(key);
+    this.ownSpaPageViews = appLovinAutoSpaPageViewOff(key);
     ctx.log('AppLovin pixel initialized');
     return 'loaded';
   }
 
-  async track(config: AppLovinPixelConfig, event: PixelEvent, ctx: { allowed: () => boolean }): Promise<boolean> {
+  async track(config: AppLovinPixelConfig, event: PixelEvent, ctx: PixelTrackContext): Promise<boolean> {
     if (!this.stub || !this.key || this.companion || !ctx.allowed()) return false;
     const key = typeof config?.event_key === 'string' ? config.event_key.trim() : '';
     if (key !== this.key) return false;
@@ -524,22 +535,25 @@ export class AppLovinPixel {
     const name = appLovinEventName(event.name, config);
     if (!name) return false;
     const sendValue = Array.isArray(config.values) && config.values.includes(event.name);
-    const data = appLovinEventData(name, event.name, event.properties, { sendValue });
+    if (name === 'page_view') {
+      // dl.js marks the FIRST page view of the page load as the landing (one
+      // claim per page, shared by every dl.js install on it). It is sent once;
+      // a landing that was dropped (no consent yet, no id) is still consumed.
+      // Every other page view is an SPA navigation: only when AppLovin's own
+      // pixel will not send it (autoSpaPageView false).
+      if (event.landing === true && !this.landingSeen) {
+        this.landingSeen = true;
+      } else {
+        if (!(await (this.ownSpaPageViews ?? Promise.resolve(false)))) return false;
+        if (!ctx.allowed()) return false;
+      }
+    }
+    const orderReference = appLovinOrderReference(event.ids ?? event.properties);
+    const data = appLovinEventData(name, event.name, event.properties, { sendValue, orderReference });
     if (!data) return false;
     const dedupeId = appLovinDedupeId({ eventName: name, eventId: event.eventId, transactionId: data.transaction_id });
     // Without the shared id the pixel copy could never merge with the server copy.
     if (!dedupeId) return false;
-    if (name === 'page_view') {
-      // The first page view of this page load is the landing: sent once.
-      // Later ones are SPA navigations: only when AppLovin's pixel won't.
-      // Claimed synchronously, so two page views can never both be the landing.
-      if (this.landingSent) {
-        if (!(await (this.ownSpaPageViews ?? Promise.resolve(false)))) return false;
-        if (!ctx.allowed()) return false;
-      } else {
-        this.landingSent = true;
-      }
-    }
     if (name === 'purchase' || name === 'sign_up') {
       // user_data is required on these two; only the identified email, hashed
       // with AppLovin's own normalization (never Meta's).

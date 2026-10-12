@@ -10,13 +10,13 @@
  * `platforms` entry with the same load / track shape.
  */
 import { PIXELS_API, PIXELS_GLOBAL } from '../destination-pixels';
-import type { DestinationPixelsModule, PixelEvent, PixelLoadContext, PixelLoadStatus } from '../destination-pixels';
+import type { DestinationPixelsModule, PixelEvent, PixelLoadContext, PixelLoadStatus, PixelTrackContext } from '../destination-pixels';
 import { AppLovinPixel } from './applovin';
 import { XPixel } from './x';
 
 interface Platform {
   load(config: any, ctx: PixelLoadContext): Promise<PixelLoadStatus>;
-  track(config: any, event: PixelEvent, ctx: { allowed: () => boolean }): Promise<boolean>;
+  track(config: any, event: PixelEvent, ctx: PixelTrackContext): Promise<boolean>;
 }
 
 export function createPixelsModule(): DestinationPixelsModule & { platforms: Record<string, Platform>; pixels_version: string } {

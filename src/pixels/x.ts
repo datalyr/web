@@ -24,14 +24,25 @@
  *   recorded, everything else (and a purchase without one) the DATALYR
  *   event_id the SDK generated for the event (the ingested copy's event_id).
  * - A value only where ingest says the server sends the event's own value
- *   (`values`); never a client purchase amount the server treats as unverified.
+ *   (`values`), and only with a currency the event itself names (no USD
+ *   default); never a client purchase amount the server treats as unverified.
+ * - A PURCHASE only when it can be as strong as the server copy (owner
+ *   decision 2026-10-12): its trigger is in `values`, its value is above 0 and
+ *   its currency comes from the event. Anything less is left to the server
+ *   (which may also skip it: zero value, money authority, renewals; ingest
+ *   leaves rules with gates the browser cannot evaluate out of `events`).
  * - No personal data from the browser: no email_address, no phone_number.
+ *
+ * X's uwt.js does automatic advanced matching: once loaded it reads form
+ * fields on the page (emails, phone numbers) and hashes them for matching. That
+ * is X's own collection under X's terms, another reason it loads only with
+ * marketing consent; merchants can turn it off in X Events Manager.
  * - Never next to another X Pixel install (theme code, GTM, a Shopify app),
  *   checked before loading and again before every send.
  */
-import type { PixelEvent, PixelLoadContext, PixelLoadStatus } from '../destination-pixels';
+import type { PixelEvent, PixelLoadContext, PixelLoadStatus, PixelTrackContext } from '../destination-pixels';
 import {
-  appLovinDedupeId, appLovinNumber, appLovinOrderReference, appLovinText, configurationStrings, waitForParsedDocument,
+  appLovinDedupeId, appLovinNumber, appLovinOrderReference, appLovinText, configurationStrings, firstItemList, waitForParsedDocument,
 } from './applovin';
 
 export const X_PIXEL_SCRIPT = 'https://static.ads-twitter.com/uwt.js';
@@ -74,7 +85,8 @@ export function xEventIdFor(eventName: string, config: Pick<XPixelConfig, 'event
 
 /**
  * conversion_id (x-payload.js xConversionId): the AppLovin dedupe_id contract —
- * a purchase → its order reference, else the DATALYR event id.
+ * a purchase → its order reference, else the DATALYR event id. `properties`
+ * are the RAW id fields (PixelEvent.ids), never sanitised ones.
  */
 export function xConversionId(input: { purchase: boolean; properties: unknown; eventId?: string }): string | undefined {
   return appLovinDedupeId({
@@ -118,18 +130,10 @@ export function xContent(raw: any): Record<string, unknown> | null {
   });
 }
 
-const ITEM_LISTS = ['items', 'line_items', 'products', 'contents'];
-
-/** The event's contents (x-payload.js xContents' list paths). */
+/** The event's contents (x-payload.js xContents: its ITEM_LIST_PATHS, in order). */
 export function xContents(properties: any): Array<Record<string, unknown>> {
-  if (!properties || typeof properties !== 'object') return [];
-  const nested = properties.properties && typeof properties.properties === 'object' ? properties.properties : null;
-  for (const list of [...ITEM_LISTS.map((key) => properties[key]), nested?.items, nested?.products]) {
-    if (Array.isArray(list) && list.length) {
-      return list.map(xContent).filter((item): item is Record<string, unknown> => !!item).slice(0, 100);
-    }
-  }
-  return [];
+  const list = firstItemList(properties);
+  return list ? list.map(xContent).filter((item): item is Record<string, unknown> => !!item).slice(0, 100) : [];
 }
 
 /**
@@ -140,14 +144,17 @@ export function xContents(properties: any): Array<Record<string, unknown>> {
 export function xEventParameters(properties: any, { purchase, sendValue, conversionId }:
   { purchase: boolean; sendValue: boolean; conversionId: string }): Record<string, unknown> | null {
   const props = properties && typeof properties === 'object' ? properties : {};
-  const value = sendValue ? firstNumber(props, ['value', 'revenue']) : undefined;
-  if (purchase && sendValue && !(value !== undefined && value > 0)) return null;
+  // The event's own currency only: never a USD default the server copy may not share.
   const currency = typeof props.currency === 'string' && /^[A-Za-z]{3}$/.test(props.currency.trim())
-    ? props.currency.trim().toUpperCase() : 'USD';
+    ? props.currency.trim().toUpperCase() : undefined;
+  const raw = sendValue && currency ? firstNumber(props, ['value', 'revenue']) : undefined;
+  const value = raw !== undefined && raw >= 0 ? round2(raw) : undefined;
+  // A purchase only as strong as the server copy: value allowed, above 0, the event's currency.
+  if (purchase && !(value !== undefined && value > 0)) return null;
   const contents = xContents(props);
   return dropEmpty({
     conversion_id: conversionId,
-    value: value !== undefined && value >= 0 ? round2(value) : undefined,
+    value,
     currency: value !== undefined ? currency : undefined,
     contents: contents.length ? contents : undefined,
   });
@@ -184,13 +191,24 @@ export function xPixelOnPage(pixelId: string, shopifyPixels: unknown[] = [], doc
   return false;
 }
 
-/** Before every send: another install replaced window.twq or added uwt.js. */
-export function foreignXInstall(ours: unknown): boolean {
+/** X's own twq once uwt.js has run: the base code's shape (exe or version). */
+function isXTwq(value: any): boolean {
+  return typeof value === 'function' && (typeof value.exe === 'function' || typeof value.version === 'string');
+}
+
+/**
+ * Before every send. 'ours': window.twq is still our stub. 'replaced': X's own
+ * code put another twq in place (it has exe / version): keep sending through
+ * it. 'foreign': something else replaced it, or another install added uwt.js.
+ */
+export function xTwqState(ours: unknown): 'ours' | 'replaced' | 'foreign' {
   try {
-    if ((window as any).twq !== ours) return true;
-    return !!document.querySelector(FOREIGN_SCRIPT_SELECTOR);
+    if (document.querySelector(FOREIGN_SCRIPT_SELECTOR)) return 'foreign';
+    const current = (window as any).twq;
+    if (current === ours) return 'ours';
+    return isXTwq(current) ? 'replaced' : 'foreign';
   } catch {
-    return true;
+    return 'foreign';
   }
 }
 
@@ -243,18 +261,24 @@ export class XPixel {
     return 'loaded';
   }
 
-  async track(config: XPixelConfig, event: PixelEvent, ctx: { allowed: () => boolean }): Promise<boolean> {
+  async track(config: XPixelConfig, event: PixelEvent, ctx: PixelTrackContext): Promise<boolean> {
     if (!this.stub || !this.pixelId || this.companion || !ctx.allowed()) return false;
     const pixelId = typeof config?.pixel_id === 'string' ? config.pixel_id.trim() : '';
     if (pixelId !== this.pixelId) return false;
-    if (foreignXInstall(this.stub)) {
+    const state = xTwqState(this.stub);
+    if (state === 'foreign') {
       this.companion = true;
+      ctx.log?.('X Pixel: another install took window.twq or added uwt.js; the Container stops sending');
       return false;
+    }
+    if (state === 'replaced') {
+      ctx.log?.('X Pixel: window.twq was replaced by X\'s own code; sending through it');
+      this.stub = (window as any).twq;
     }
     const eventId = xEventIdFor(event.name, config);
     if (!eventId) return false;
     const purchase = Array.isArray(config.purchases) && config.purchases.includes(event.name);
-    const conversionId = xConversionId({ purchase, properties: event.properties, eventId: event.eventId });
+    const conversionId = xConversionId({ purchase, properties: event.ids ?? event.properties, eventId: event.eventId });
     // Without the shared id the pixel copy could never dedupe with the server copy.
     if (!conversionId) return false;
     const sendValue = Array.isArray(config.values) && config.values.includes(event.name);
@@ -263,6 +287,12 @@ export class XPixel {
     const twq = (window as any).twq;
     if (typeof twq !== 'function') return false;
     twq('event', eventId, parameters);
+    // Delivered only once uwt.js runs (it sets twq.exe). Until then the call
+    // waits in the queue (sent if uwt.js arrives); blocked, it never leaves.
+    if (typeof twq.exe !== 'function') {
+      ctx.log?.('X Pixel: uwt.js has not loaded; the event is queued, not delivered');
+      return false;
+    }
     return true;
   }
 }

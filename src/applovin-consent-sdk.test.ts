@@ -23,7 +23,7 @@ const KEY = 'AxEvtKey_sdk';
 function mockNetwork(): jest.Mock {
   const fetchMock = jest.fn(async (url: string) => {
     if (String(url).includes('/container-scripts')) {
-      return { ok: true, status: 200, json: async () => ({ scripts: [], pixels: { applovin: { enabled: true, event_key: KEY, account_type: 'purchase', events: { pageview: 'page_view', product_added: 'add_to_cart', purchase: 'purchase' } } } }) };
+      return { ok: true, status: 200, json: async () => ({ scripts: [], pixels: { applovin: { enabled: true, event_key: KEY, account_type: 'purchase', events: { pageview: 'page_view', product_added: 'add_to_cart', purchase: 'purchase' }, values: ['purchase'] } } }) };
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
   });
@@ -84,7 +84,7 @@ describe('AppLovin pixel behind Shopify consent', () => {
     instance?.destroy();
     instance = undefined;
     global.fetch = originalFetch;
-    for (const key of ['Shopify', 'axon', 'AXON_EVENT_KEY', 'datalyr', 'DatalyrPixels']) {
+    for (const key of ['Shopify', 'axon', 'AXON_EVENT_KEY', 'datalyr', 'DatalyrPixels', '__datalyrLandingPageView']) {
       try { delete (window as any)[key]; } catch { (window as any)[key] = undefined; }
     }
     document.head.innerHTML = '';
@@ -126,8 +126,7 @@ describe('AppLovin pixel behind Shopify consent', () => {
     const purchase = enqueue.mock.calls.map((call: any[]) => call[0]).find((p: any) => p.event_name === 'purchase');
     expect(purchase.event_data.order_id).toBe('ORD-9');
     expect(axonCalls()[3]).toEqual(['track', 'purchase',
-      expect.objectContaining({ transaction_id: 'ORD-9', currency: 'USD' }), { dedupe_id: 'ORD-9' }]);
-    expect((axonCalls()[3][2] as any).value).toBeUndefined(); // not in `values`: a client amount is not sent
+      expect.objectContaining({ transaction_id: 'ORD-9', currency: 'USD', value: 25 }), { dedupe_id: 'ORD-9' }]);
   });
 
   test.each([

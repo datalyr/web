@@ -38,15 +38,25 @@ function clearGlobal(key: string): void {
 function resetPage(): void {
   document.head.innerHTML = '';
   document.body.innerHTML = '';
-  for (const key of ['twq', 'axon', 'AXON_EVENT_KEY', 'Shopify', 'globalPrivacyControl', '__uspapi', PIXELS_GLOBAL]) clearGlobal(key);
+  for (const key of ['twq', 'axon', 'AXON_EVENT_KEY', 'Shopify', 'globalPrivacyControl', '__uspapi', '__datalyrLandingPageView', PIXELS_GLOBAL]) clearGlobal(key);
   delete (navigator as any).globalPrivacyControl;
   Object.defineProperty(navigator, 'doNotTrack', { configurable: true, value: null });
   document.cookie = 'usprivacy=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
 }
-async function started(options: { canForward?: () => boolean } = {}): Promise<ContainerManager> {
-  const manager = new ContainerManager({ workspaceId: 'ws', sdkVersion: '1.9.10', ...options });
+/**
+ * uwt.js arriving: it sets twq.exe, which the base-code stub then calls
+ * instead of queueing. Recorded into the same queue so twqCalls() reads both.
+ */
+function uwtLoads(): void {
+  const twq = (window as any).twq;
+  if (twq && twq.__datalyr) twq.exe = (...args: unknown[]) => { twq.queue.push(args); };
+}
+async function started(options: { canForward?: () => boolean; uwt?: boolean } = {}): Promise<ContainerManager> {
+  const { uwt = true, ...rest } = options;
+  const manager = new ContainerManager({ workspaceId: 'ws', sdkVersion: '1.9.10', ...rest });
   await manager.init();
   await manager.destinationPixelStatus('x');
+  if (uwt) uwtLoads();
   return manager;
 }
 
@@ -111,6 +121,26 @@ describe('X Pixel: loading and gating', () => {
       expect((window as any).twq).toBeUndefined();
       manager.cleanupAllIframes();
     }
+  });
+
+  test('consent or a GPC signal withdrawn after load: later events are not sent', async () => {
+    respond(x());
+    let allowed = true;
+    manager = await started({ canForward: () => allowed });
+    expect(await manager.trackToPixels('signup_done', {}, 'e1')).toEqual(['x']);
+    allowed = false;
+    expect(await manager.trackToPixels('signup_done', {}, 'e2')).toEqual([]);
+    allowed = true;
+    (navigator as any).globalPrivacyControl = true;
+    expect(await manager.trackToPixels('signup_done', {}, 'e3')).toEqual([]);
+    expect(events()).toHaveLength(1);
+  });
+
+  test('uwt.js blocked (never loads): the event waits in the queue and is not reported delivered', async () => {
+    respond(x());
+    manager = await started({ uwt: false });
+    expect(await manager.trackToPixels('signup_done', {}, 'e1')).toEqual([]);
+    expect(events()).toEqual([['event', 'tw-q19sf-q19sh', { conversion_id: 'e1' }]]);
   });
 
   test('X and AppLovin come from one module load', async () => {
@@ -178,6 +208,22 @@ describe('X Pixel: another install already on the page', () => {
     expect(xPixelOnPage(PIXEL)).toBe(true);
   });
 
+  test("window.twq replaced by X's own code after load: sending continues through it, and is logged", async () => {
+    respond(x());
+    const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    manager = new ContainerManager({ workspaceId: 'ws', sdkVersion: '1.9.10', debug: true });
+    await manager.init();
+    await manager.destinationPixelStatus('x');
+    const xOwn: any = jest.fn();
+    xOwn.exe = jest.fn();
+    xOwn.version = '1.1';
+    (window as any).twq = xOwn;
+    expect(await manager.trackToPixels('signup_done', {}, 'e1')).toEqual(['x']);
+    expect(xOwn).toHaveBeenCalledWith('event', 'tw-q19sf-q19sh', { conversion_id: 'e1' });
+    expect(log.mock.calls.some((call) => String(call[1]).includes("replaced by X's own code"))).toBe(true);
+    log.mockRestore();
+  });
+
   test.each([
     ['a GTM tag adds uwt.js', () => { const s = document.createElement('script'); s.src = X_PIXEL_SCRIPT; document.head.appendChild(s); }],
     ['another install replaces window.twq', () => { (window as any).twq = jest.fn(); }],
@@ -207,9 +253,9 @@ describe('X Pixel: events', () => {
   test("only events with a website X rule, under the rule's full Event ID; conversion_id per the sender", async () => {
     respond(x());
     manager = await started();
-    // Purchase with an order reference: conversion_id = that reference, exactly.
-    await manager.trackToPixels('purchase', { order_id: 6896206413937, value: 99, currency: 'eur',
-      items: [{ product_id: 'p1', sku: 'SKU-1', title: 'Tee', price: 49.5, quantity: 2 }], email: 'a@b.co' }, 'evt-purchase');
+    // A purchase whose value the server would not take from the browser
+    // (not in `values`): left to the server entirely.
+    expect(await manager.trackToPixels('purchase', { order_id: 6896206413937, value: 99, currency: 'eur' }, 'evt-p0')).toEqual([]);
     // A bare Event ID gets the pixel prefix; a non-purchase uses the event id.
     await manager.trackToPixels('signup_done', { order_id: 'not-used' }, 'evt-signup');
     // Value allowed for this one.
@@ -219,10 +265,6 @@ describe('X Pixel: events', () => {
     expect(await manager.trackToPixels('bad', {}, 'e-bad')).toEqual([]);
     expect(await manager.trackToPixels('$identify', {}, 'e-int')).toEqual([]);
     expect(events()).toEqual([
-      ['event', 'tw-q19sf-q19sg', {
-        conversion_id: '6896206413937',
-        contents: [{ content_id: 'SKU-1', content_group_id: 'p1', content_name: 'Tee', content_price: 49.5, num_items: 2 }],
-      }],
       ['event', 'tw-q19sf-q19sh', { conversion_id: 'evt-signup' }],
       ['event', 'tw-q19sf-q19si', { conversion_id: 'evt-cart', value: 12.35, currency: 'GBP' }],
     ]);
@@ -230,26 +272,46 @@ describe('X Pixel: events', () => {
     expect(JSON.stringify(events())).not.toMatch(/a@b\.co|email|phone/);
   });
 
-  test('purchase without an order reference: conversion_id is the DATALYR event id', async () => {
-    respond(x());
+  test('purchase: only as strong as the server copy (in values, value above 0, the event\'s own currency)', async () => {
+    respond(x({ values: ['purchase', 'product_added'] }));
     manager = await started();
-    await manager.trackToPixels('purchase', { value: 10 }, 'evt-p');
-    expect(events()[0][2]).toEqual({ conversion_id: 'evt-p' });
+    expect(await manager.trackToPixels('purchase', { order_id: 'o0', value: 0, currency: 'USD' }, 'e0')).toEqual([]);
+    // No USD default: a purchase without its own currency is left to the server.
+    expect(await manager.trackToPixels('purchase', { order_id: 'o1', value: 25 }, 'e1')).toEqual([]);
+    expect(await manager.trackToPixels('purchase', { order_id: 6896206413937, value: 25, currency: 'eur',
+      items: [{ product_id: 'p1', sku: 'SKU-1', title: 'Tee', price: 12.5, quantity: 2 }], email: 'a@b.co' }, 'e2')).toEqual(['x']);
+    // Without an order reference the conversion_id is the DATALYR event id.
+    expect(await manager.trackToPixels('purchase', { value: 10, currency: 'USD' }, 'evt-p')).toEqual(['x']);
+    // A non-purchase without its own currency goes without a value.
+    await manager.trackToPixels('product_added', { value: 3 }, 'e3');
+    expect(events()).toEqual([
+      ['event', 'tw-q19sf-q19sg', { conversion_id: '6896206413937', value: 25, currency: 'EUR',
+        contents: [{ content_id: 'SKU-1', content_group_id: 'p1', content_name: 'Tee', content_price: 12.5, num_items: 2 }] }],
+      ['event', 'tw-q19sf-q19sg', { conversion_id: 'evt-p', value: 10, currency: 'USD' }],
+      ['event', 'tw-q19sf-q19si', { conversion_id: 'e3' }],
+    ]);
+    expect(JSON.stringify(events())).not.toMatch(/a@b\.co|email|phone/);
   });
 
-  test('purchase with a value the server sends as is: the value goes; a $0 one is not sent', async () => {
+  test('ids come from the raw properties: an order id sanitising would alter is the conversion_id as the server has it', async () => {
     respond(x({ values: ['purchase'] }));
     manager = await started();
-    expect(await manager.trackToPixels('purchase', { order_id: 'o0', value: 0 }, 'e0')).toEqual([]);
-    expect(await manager.trackToPixels('purchase', { order_id: 'o1', value: 25 }, 'e1')).toEqual(['x']);
-    expect(events()[0]).toEqual(['event', 'tw-q19sf-q19sg', { conversion_id: 'o1', value: 25, currency: 'USD' }]);
+    await manager.trackToPixels('purchase', { order_id: 'ORD<7>onx=1', value: 5, currency: 'USD' }, 'e1');
+    expect((events()[0][2] as any).conversion_id).toBe('ORD<7>onx=1');
+  });
+
+  test('a pixel-only co-fire (destinationPixels: false) never reaches X', async () => {
+    respond(x({ values: ['purchase'] }));
+    manager = await started();
+    expect(await manager.trackToPixels('purchase', { order_id: 'CC-1', value: 5, currency: 'USD' }, 'cc', { destinationPixels: false })).toEqual([]);
+    expect(events()).toEqual([]);
   });
 
   test('no event id: not sent (except a purchase with an order reference)', async () => {
-    respond(x());
+    respond(x({ values: ['purchase'] }));
     manager = await started();
     expect(await manager.trackToPixels('signup_done', {})).toEqual([]);
-    expect(await manager.trackToPixels('purchase', { order_id: 'A-1' })).toEqual(['x']);
+    expect(await manager.trackToPixels('purchase', { order_id: 'A-1', value: 2, currency: 'USD' })).toEqual(['x']);
   });
 
   test('the current policy must still allow X with the same pixel id', async () => {
@@ -282,5 +344,9 @@ describe('X mirrors of the sender contract', () => {
   test('contents follow mapXContent: SKU first, the product as the group, integer num_items', () => {
     expect(xContents({ line_items: [{ variant_id: 'v1', product_id: 'p1', price: '10', quantity: 2.4 }] }))
       .toEqual([{ content_id: 'v1', content_group_id: 'p1', content_price: 10, num_items: 2 }]);
+  });
+  test("item lists are read in the sender's ITEM_LIST_PATHS order (properties.items before contents)", () => {
+    expect(xContents({ contents: [{ id: 'c' }], properties: { items: [{ id: 'nested' }] } }))
+      .toEqual([{ content_id: 'nested', num_items: 1 }]);
   });
 });

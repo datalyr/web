@@ -10,6 +10,7 @@ import { EventQueue } from './queue';
 import { FingerprintCollector } from './fingerprint';
 import { storage, CookieStorage } from './storage';
 import { ContainerManager } from './container';
+import { claimLandingPageView } from './destination-pixels';
 import { dataEncryption } from './encryption'; // SEC-03 Fix
 import { AutoIdentifyManager } from './auto-identify';
 import { StripeSessionWatcher } from './stripe-session';
@@ -705,8 +706,11 @@ class Datalyr {
 
       // Track to third-party pixels if container is initialized.
       // Pass the shared eventId so the Meta Pixel fires with the same { eventID }.
+      // The landing page view of this page load: the first pageview any dl.js
+      // install on the page tracks (a destination pixel sends only that one).
+      const landing = eventName === 'pageview' && claimLandingPageView();
       if (this.container) {
-        void this.container.trackToPixels(eventName, properties, eventId).catch(() => {
+        void this.container.trackToPixels(eventName, properties, eventId, { landing }).catch(() => {
           this.log("Pixel forwarding failed; event was not retried to the pixel");
         });
       }
@@ -1757,7 +1761,9 @@ class Datalyr {
 
       // Pixel-only co-fire. 'purchase' maps to Meta 'Purchase' in trackToPixels,
       // matching the server-side rule's platform_event_name.
-      const delivered = await this.container.trackToPixels("purchase", properties, eventId);
+      // Meta only: no server sender mirrors this pixel-only co-fire, so the
+      // destination pixels (AppLovin, X) never get it.
+      const delivered = await this.container.trackToPixels("purchase", properties, eventId, { destinationPixels: false });
       if (!delivered.includes("meta")) return;
       window.sessionStorage.setItem(guardKey, "1");
 

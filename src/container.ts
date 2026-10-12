@@ -5,7 +5,7 @@
 
 import { storage } from './storage';
 import { sha256Hex } from './utils';
-import { DestinationPixelsLoader, destinationPrivacyOptOut } from './destination-pixels';
+import { DestinationPixelsLoader, destinationPrivacyOptOut, pixelIdFields } from './destination-pixels';
 import type { DestinationPixelPlatform, PixelLoadStatus } from './destination-pixels';
 import type { SdkRemoteConfig } from './config';
 
@@ -972,14 +972,16 @@ export class ContainerManager {
 
   /** Send one event through a destination pixel the Container loaded itself. */
   private async trackToDestinationPixel(platform: DestinationPixelPlatform, config: unknown, eventName: string,
-    properties: Record<string, unknown>, eventId?: string): Promise<boolean> {
+    properties: Record<string, unknown>, eventId: string | undefined,
+    extra: { landing?: boolean; ids?: Record<string, string | number> }): Promise<boolean> {
     const status = await this.startDestinationPixel(platform, config);
     if (status !== 'loaded' || !this.destinationAllowed()) return false;
     const module = await this.destinationPixels.get();
     if (!module) return false;
     return module.track(platform, config, {
       name: eventName, properties, eventId, email: this.getIdentity?.()?.email ?? null,
-    }, { allowed: () => this.destinationAllowed() });
+      landing: extra.landing === true, ids: extra.ids,
+    }, { allowed: () => this.destinationAllowed(), log: (...args: unknown[]) => this.log(...args) });
   }
 
   /** Initialize Whop's official first-party attribution pixel. */
@@ -1295,10 +1297,19 @@ export class ContainerManager {
   /**
    * Track event to all initialized pixels
    */
-  async trackToPixels(eventName: string, properties: any = {}, eventId?: string): Promise<string[]> {
+  async trackToPixels(eventName: string, properties: any = {}, eventId?: string,
+    options: {
+      /** The landing page view of this page load (claimLandingPageView). */
+      landing?: boolean;
+      /** false: Meta / Google / TikTok / Whop only (a pixel-only co-fire no server sender mirrors). */
+      destinationPixels?: boolean;
+    } = {}): Promise<string[]> {
     if (!this.forwardingAllowed() || eventName.startsWith('$')) return [];
     // Snapshot before awaiting: caller mutations must not change the queued event.
     const sanitizedEventName = this.sanitizeEventName(eventName);
+    // Dedup ids are read from the RAW properties: sanitising could alter an
+    // order id the server copy carries untouched.
+    const ids = pixelIdFields(properties);
     const sanitizedProperties = this.sanitizeProperties(properties);
     // An event tracked while init() is still running (e.g. the pageview released
     // when Shopify consent resolves right after the container was created) is
@@ -1453,12 +1464,14 @@ export class ContainerManager {
     // through another install's), and only the events the module's map names.
     // Page views: the landing one once, SPA ones only when AppLovin's pixel
     // will not send them (the module decides; src/pixels/applovin.ts).
-    if (pixels?.applovin?.enabled === true) {
-      mirror('applovin', this.trackToDestinationPixel('applovin', pixels.applovin, eventName, sanitizedProperties, eventId));
+    const destinations = options.destinationPixels !== false;
+    if (destinations && pixels?.applovin?.enabled === true) {
+      mirror('applovin', this.trackToDestinationPixel('applovin', pixels.applovin, eventName, sanitizedProperties, eventId,
+        { landing: options.landing, ids }));
     }
     // X: conversions only (twq('config') already counted the page view).
-    if (pixels?.x?.enabled === true && !isPageEvent(eventName)) {
-      mirror('x', this.trackToDestinationPixel('x', pixels.x, eventName, sanitizedProperties, eventId));
+    if (destinations && pixels?.x?.enabled === true && !isPageEvent(eventName)) {
+      mirror('x', this.trackToDestinationPixel('x', pixels.x, eventName, sanitizedProperties, eventId, { ids }));
     }
     if (companionDeliveries.length > 0) await Promise.all(companionDeliveries);
     return ['meta', 'google', 'tiktok', 'whop', 'applovin', 'x'].filter((platform) => delivered.has(platform));
