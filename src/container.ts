@@ -5,7 +5,7 @@
 
 import { storage } from './storage';
 import { sha256Hex } from './utils';
-import { DestinationPixelsLoader, destinationPrivacyOptOut } from './destination-pixels';
+import { DestinationPixelsLoader, destinationPrivacyOptOut, registeredPixelsModule } from './destination-pixels';
 import type { DestinationPixelPlatform, PixelLoadStatus } from './destination-pixels';
 import type { SdkRemoteConfig } from './config';
 
@@ -396,6 +396,7 @@ export class ContainerManager {
    *  platform's one-time load decision. */
   private destinationPixels: DestinationPixelsLoader;
   private destinationLoads = new Map<DestinationPixelPlatform, Promise<PixelLoadStatus>>();
+  private destinationStatus = new Map<DestinationPixelPlatform, PixelLoadStatus>();
   private companionWaits = new Map<string, { promise: Promise<any>; resolve: (value: any) => void; timer: ReturnType<typeof setInterval> }>();
   private companionPending = 0;
 
@@ -943,11 +944,41 @@ export class ContainerManager {
       this.log(`Error loading the ${platform} pixel:`, error);
       return 'blocked';
     }).then((status) => {
-      if (status === 'retry' && this.destinationLoads.get(platform) === decision) this.destinationLoads.delete(platform);
+      if (this.destinationLoads.get(platform) === decision) {
+        if (status === 'retry') this.destinationLoads.delete(platform);
+        else this.destinationStatus.set(platform, status);
+      }
       return status;
     });
     this.destinationLoads.set(platform, decision);
     return decision;
+  }
+
+  /**
+   * Wait (bounded) for every destination pixel load decision already started,
+   * so the landing pageview can say whether AppLovin's own pixel is counting
+   * it (see destinationPixelActive). Resolves at once when none was started.
+   */
+  async destinationPixelsSettled(timeoutMs = 2500): Promise<void> {
+    const pending = Array.from(this.destinationLoads.values());
+    if (pending.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.all(pending),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+  }
+
+  /**
+   * Synchronous: our own pixel for this platform is loaded, still the only
+   * install on the page, and every gate (consent, DNT / GPC / US opt-out) is
+   * open right now. False for anything still deciding, blocked or companion.
+   */
+  destinationPixelActive(platform: DestinationPixelPlatform): boolean {
+    if (this.destinationStatus.get(platform) !== 'loaded' || !this.destinationAllowed()) return false;
+    const module = registeredPixelsModule();
+    try { return !!module && typeof module.active === 'function' && module.active(platform) === true; } catch { return false; }
   }
 
   /** A platform's load decision on this page, if one was started. */

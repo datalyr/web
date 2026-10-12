@@ -53,6 +53,8 @@ export interface DestinationPixelsModule {
   version: string;
   load(platform: string, config: unknown, ctx: PixelLoadContext): Promise<PixelLoadStatus>;
   track(platform: string, config: unknown, event: PixelEvent, ctx: { allowed: () => boolean }): Promise<boolean>;
+  /** Our pixel for this platform is initialized and still the only install on the page. */
+  active?(platform: string): boolean;
 }
 
 /** Versioned, immutable module URL. */

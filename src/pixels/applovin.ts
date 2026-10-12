@@ -465,6 +465,16 @@ export class AppLovinPixel {
     return 'loaded';
   }
 
+  /** Ours is initialized and no other install has appeared since (re-checked now). */
+  active(): boolean {
+    if (!this.stub || !this.key || this.companion) return false;
+    if (foreignAppLovinInstall(this.stub, this.key)) {
+      this.companion = true;
+      return false;
+    }
+    return true;
+  }
+
   async track(config: AppLovinPixelConfig, event: PixelEvent, ctx: { allowed: () => boolean }): Promise<boolean> {
     if (!this.stub || !this.key || this.companion || !ctx.allowed()) return false;
     if (config?.event_key !== this.key) return false;

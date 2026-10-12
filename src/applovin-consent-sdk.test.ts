@@ -111,6 +111,8 @@ describe('AppLovin pixel behind Shopify consent', () => {
     const pageviews = enqueue.mock.calls.map((call: any[]) => call[0]).filter((p: any) => p.event_name === 'pageview');
     expect(pageviews).toHaveLength(1);
     expect(axonCalls()).toEqual([['init']]); // AppLovin's own pixel counts the page view
+    // ... so the ingested copy says so, and the server sender skips its own.
+    expect(pageviews[0].event_data.applovin_pixel_fired).toBe(true);
 
     instance.track('product_added', { product_id: 'p1' });
     await settle();
@@ -128,16 +130,65 @@ describe('AppLovin pixel behind Shopify consent', () => {
     expect((axonCalls()[2][2] as any).value).toBeUndefined(); // not in `values`: a client amount is not sent
   });
 
-  test('marketing declined: the AppLovin pixel never loads', async () => {
+  test('marketing declined: the AppLovin pixel never loads, and the pageview is not stamped', async () => {
     mockNetwork();
     const shopify = stubPendingShopify();
     instance = loadSdk().createDatalyrInstance();
     instance.init(baseConfig);
     await instance.ready();
+    const enqueue = jest.spyOn(instance.queue, 'enqueue');
     shopify.resolve({ analytics: true, marketing: false });
     document.dispatchEvent(new Event('visitorConsentCollected'));
     await settle();
     expect((window as any).axon).toBeUndefined();
     expect(Array.from(document.querySelectorAll('script')).some((s) => s.src.includes('axon.ai'))).toBe(false);
+    const pageviews = enqueue.mock.calls.map((call: any[]) => call[0]).filter((p: any) => p.event_name === 'pageview');
+    expect(pageviews).toHaveLength(1);
+    expect('applovin_pixel_fired' in pageviews[0].event_data).toBe(false);
+  });
+
+  test.each([
+    ['another AppLovin install owns the page', () => { const theirs: any = jest.fn(); theirs.eventKey = KEY; (window as any).axon = theirs; }, true],
+    ['no AppLovin in the config', () => undefined, false],
+    ['the module never arrives (blocked)', () => { delete (window as any).DatalyrPixels; }, true],
+  ])('%s: the pageview is not stamped', async (_name, arrange, withAppLovin) => {
+    arrange();
+    const fetchMock = mockNetwork();
+    if (!withAppLovin) {
+      fetchMock.mockImplementation(async (url: string) => (String(url).includes('/container-scripts')
+        ? { ok: true, status: 200, json: async () => ({ scripts: [], pixels: {} }) }
+        : { ok: true, status: 200, json: async () => ({}), text: async () => '' }));
+    }
+    const shopify = stubPendingShopify();
+    instance = loadSdk().createDatalyrInstance();
+    instance.init(baseConfig);
+    await instance.ready();
+    const enqueue = jest.spyOn(instance.queue, 'enqueue');
+    shopify.resolve({ analytics: true, marketing: true });
+    document.dispatchEvent(new Event('visitorConsentCollected'));
+    // The module case waits out the bounded settle (no module ever registers).
+    for (let i = 0; i < 40 && !enqueue.mock.calls.some((call: any[]) => call[0].event_name === 'pageview'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const pageviews = enqueue.mock.calls.map((call: any[]) => call[0]).filter((p: any) => p.event_name === 'pageview');
+    expect(pageviews).toHaveLength(1);
+    expect('applovin_pixel_fired' in pageviews[0].event_data).toBe(false);
+  });
+
+  test('an SPA page view after a late install appears is not stamped', async () => {
+    mockNetwork();
+    const shopify = stubPendingShopify();
+    instance = loadSdk().createDatalyrInstance();
+    instance.init(baseConfig);
+    await instance.ready();
+    const enqueue = jest.spyOn(instance.queue, 'enqueue');
+    shopify.resolve({ analytics: true, marketing: true });
+    document.dispatchEvent(new Event('visitorConsentCollected'));
+    await settle();
+    (window as any).AXON_EVENT_KEY = 'someone-else';
+    instance.page();
+    await settle();
+    const pageviews = enqueue.mock.calls.map((call: any[]) => call[0]).filter((p: any) => p.event_name === 'pageview');
+    expect(pageviews.map((p: any) => p.event_data.applovin_pixel_fired === true)).toEqual([true, false]);
   });
 });
