@@ -23,7 +23,7 @@ const KEY = 'AxEvtKey_sdk';
 function mockNetwork(): jest.Mock {
   const fetchMock = jest.fn(async (url: string) => {
     if (String(url).includes('/container-scripts')) {
-      return { ok: true, status: 200, json: async () => ({ scripts: [], pixels: { applovin: { enabled: true, event_key: KEY, account_type: 'purchase', events: { product_added: 'add_to_cart', purchase: 'purchase' } } } }) };
+      return { ok: true, status: 200, json: async () => ({ scripts: [], pixels: { applovin: { enabled: true, event_key: KEY, account_type: 'purchase', events: { pageview: 'page_view', product_added: 'add_to_cart', purchase: 'purchase' } } } }) };
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
   });
@@ -110,12 +110,14 @@ describe('AppLovin pixel behind Shopify consent', () => {
     expect((window as any).AXON_EVENT_KEY).toBe(KEY);
     const pageviews = enqueue.mock.calls.map((call: any[]) => call[0]).filter((p: any) => p.event_name === 'pageview');
     expect(pageviews).toHaveLength(1);
-    expect(axonCalls()).toEqual([['init']]); // AppLovin's own pixel counts the page view
+    // axon("init") sends no page view, so the Container sends the landing one,
+    // with the ingested copy's event_id as dedupe_id.
+    expect(axonCalls()).toEqual([['init'], ['track', 'page_view', {}, { dedupe_id: pageviews[0].event_id }]]);
 
     instance.track('product_added', { product_id: 'p1' });
     await settle();
     const added = enqueue.mock.calls.map((call: any[]) => call[0]).find((p: any) => p.event_name === 'product_added');
-    expect(axonCalls()[1]).toEqual(['track', 'add_to_cart', expect.any(Object), { dedupe_id: added.event_id }]);
+    expect(axonCalls()[2]).toEqual(['track', 'add_to_cart', expect.any(Object), { dedupe_id: added.event_id }]);
 
     // A purchase: the pixel's dedupe_id is the order id, which the ingested
     // copy carries in event_data.order_id.
@@ -123,9 +125,9 @@ describe('AppLovin pixel behind Shopify consent', () => {
     await settle();
     const purchase = enqueue.mock.calls.map((call: any[]) => call[0]).find((p: any) => p.event_name === 'purchase');
     expect(purchase.event_data.order_id).toBe('ORD-9');
-    expect(axonCalls()[2]).toEqual(['track', 'purchase',
+    expect(axonCalls()[3]).toEqual(['track', 'purchase',
       expect.objectContaining({ transaction_id: 'ORD-9', currency: 'USD' }), { dedupe_id: 'ORD-9' }]);
-    expect((axonCalls()[2][2] as any).value).toBeUndefined(); // not in `values`: a client amount is not sent
+    expect((axonCalls()[3][2] as any).value).toBeUndefined(); // not in `values`: a client amount is not sent
   });
 
   test.each([

@@ -42,11 +42,25 @@ function axonCalls(): unknown[][] {
 }
 const tracks = () => axonCalls().filter((call) => call[0] === 'track');
 
-function respond(pixels: Record<string, unknown>): jest.Mock {
-  const fetchMock = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ scripts: [], pixels }) });
+/**
+ * Network for one test: /container-scripts answers `pixels`; AppLovin's pixel
+ * config (b.applovin.com/v1/pixel/config) answers `applovinConfig`, or fails
+ * when it is 'fail'. Default: what AppLovin returned live on 2026-10-12.
+ */
+function respond(pixels: Record<string, unknown>,
+  applovinConfig: Record<string, unknown> | 'fail' = { autoEmailCapture: true, autoSpaPageView: true }): jest.Mock {
+  const fetchMock = jest.fn(async (url: string) => {
+    if (String(url).startsWith('https://b.applovin.com/v1/pixel/config')) {
+      if (applovinConfig === 'fail') throw new TypeError('Failed to fetch');
+      return { ok: true, json: async () => applovinConfig };
+    }
+    return { ok: true, json: async () => ({ scripts: [], pixels }) };
+  });
   global.fetch = fetchMock as unknown as typeof fetch;
   return fetchMock;
 }
+const configFetches = (fetchMock: jest.Mock) =>
+  fetchMock.mock.calls.filter(([url]) => String(url).startsWith('https://b.applovin.com/v1/pixel/config'));
 
 function applovin(extra: Record<string, unknown> = {}) {
   return { applovin: { enabled: true, event_key: KEY, account_type: 'purchase', events: EVENTS, values: ['product_added', 'checkout_step', 'lead'], ...extra } };
@@ -106,14 +120,70 @@ describe('AppLovin pixel: loading and gating', () => {
     expect(axonCalls()).toEqual([['init']]);
   });
 
-  test('loads once; page views are never sent through it', async () => {
-    respond(applovin());
+  test('loads once; the landing page view is sent once, with its DATALYR event id as dedupe_id', async () => {
+    const fetchMock = respond(applovin());
     manager = await started();
     await manager.init();
-    expect(await manager.trackToPixels('pageview', {}, 'evt-1')).toEqual([]);
-    expect(await manager.trackToPixels('page_view', {}, 'evt-2')).toEqual([]);
+    expect(await manager.trackToPixels('pageview', { url: 'https://shop.example/' }, 'evt-landing')).toEqual(['applovin']);
+    // Later page views on the same page load are SPA navigations: AppLovin's
+    // pixel sends those itself (autoSpaPageView true), so we do not.
+    expect(await manager.trackToPixels('pageview', {}, 'evt-spa-1')).toEqual([]);
+    expect(await manager.trackToPixels('pageview', {}, 'evt-spa-2')).toEqual([]);
     expect(appLovinScripts()).toHaveLength(2);
-    expect(axonCalls()).toEqual([['init']]);
+    expect(axonCalls()).toEqual([['init'], ['track', 'page_view', {}, { dedupe_id: 'evt-landing' }]]);
+    // AppLovin's config: read once per page, from the same endpoint its pixel uses.
+    expect(configFetches(fetchMock).map(([url]) => url))
+      .toEqual([`https://b.applovin.com/v1/pixel/config?event_key=${encodeURIComponent(KEY)}`]);
+  });
+
+  test('autoSpaPageView false: SPA page views are sent by us, each with its own event id', async () => {
+    const fetchMock = respond(applovin(), { autoEmailCapture: false, autoSpaPageView: false });
+    manager = await started();
+    await manager.trackToPixels('pageview', {}, 'evt-landing');
+    expect(await manager.trackToPixels('pageview', {}, 'evt-spa-1')).toEqual(['applovin']);
+    expect(await manager.trackToPixels('pageview', {}, 'evt-spa-2')).toEqual(['applovin']);
+    expect(tracks()).toEqual([
+      ['track', 'page_view', {}, { dedupe_id: 'evt-landing' }],
+      ['track', 'page_view', {}, { dedupe_id: 'evt-spa-1' }],
+      ['track', 'page_view', {}, { dedupe_id: 'evt-spa-2' }],
+    ]);
+    expect(configFetches(fetchMock)).toHaveLength(1);
+  });
+
+  test.each([
+    ['the config fetch fails', 'fail' as const],
+    ['autoSpaPageView missing', { autoEmailCapture: true }],
+  ])('%s: no SPA page views from us (never doubled), the landing one still goes', async (_name, config) => {
+    respond(applovin(), config);
+    manager = await started();
+    await manager.trackToPixels('pageview', {}, 'evt-landing');
+    expect(await manager.trackToPixels('pageview', {}, 'evt-spa')).toEqual([]);
+    expect(tracks()).toEqual([['track', 'page_view', {}, { dedupe_id: 'evt-landing' }]]);
+  });
+
+  test('two page views racing for the landing: only one is sent as such', async () => {
+    respond(applovin());
+    manager = await started();
+    const results = await Promise.all([
+      manager.trackToPixels('pageview', {}, 'evt-a'),
+      manager.trackToPixels('pageview', {}, 'evt-b'),
+    ]);
+    expect(results.filter((delivered) => delivered.includes('applovin'))).toHaveLength(1);
+    expect(tracks()).toHaveLength(1);
+  });
+
+  test('a page view without a page_view entry in the map, or without an event id, is not sent', async () => {
+    respond(applovin({ events: { purchase: 'purchase' } }));
+    manager = await started();
+    expect(await manager.trackToPixels('pageview', {}, 'evt-landing')).toEqual([]);
+    manager.cleanupAllIframes();
+    resetPage();
+    registerModule();
+    respond(applovin());
+    manager = await started();
+    expect(await manager.trackToPixels('pageview', {})).toEqual([]);
+    // The landing is still to come: the next page view (with an id) is it.
+    expect(await manager.trackToPixels('pageview', {}, 'evt-2')).toEqual(['applovin']);
   });
 
   test('no marketing consent: nothing loads, the module is not even fetched', async () => {
@@ -395,12 +465,13 @@ describe('AppLovin pixel: events', () => {
     expect(tracks()[0][3]).toEqual({ dedupe_id: 'A-1' });
   });
 
-  test('lead-gen accounts send only generate_lead', async () => {
+  test('lead-gen accounts send only page_view and generate_lead', async () => {
     respond(applovin({ account_type: 'lead_gen' }));
     manager = await started();
+    await manager.trackToPixels('pageview', {}, 'e1');
     await manager.trackToPixels('purchase', { order_id: 'o' }, 'e2');
     await manager.trackToPixels('lead', { value: 12 }, 'e3');
-    expect(tracks().map((call) => call[1])).toEqual(['generate_lead']);
+    expect(tracks().map((call) => call[1])).toEqual(['page_view', 'generate_lead']);
   });
 
   test('the current policy must still allow AppLovin with the same Event Key, and its map applies', async () => {
@@ -440,11 +511,12 @@ describe('AppLovin pixel: events', () => {
 });
 
 describe('AppLovin mirrors of the sender contract', () => {
-  test('event names come from the rule map only; no custom names, never page_view', () => {
+  test('event names come from the map only; no custom names', () => {
     const config = { events: { a: 'Add_To_Cart', b: 'CompletePayment', c: 'page_view', d: 'purchase' } };
     expect(appLovinEventName('a', config)).toBe('add_to_cart');
     expect(appLovinEventName('b', config)).toBeNull();
-    expect(appLovinEventName('c', config)).toBeNull();
+    expect(appLovinEventName('c', config)).toBe('page_view');
+    expect(appLovinEventName('c', { ...config, account_type: 'lead_gen' })).toBe('page_view');
     expect(appLovinEventName('purchase', config)).toBeNull(); // not mapped: not sent
     expect(appLovinEventName('d', { ...config, account_type: 'lead_gen' })).toBeNull();
     expect(appLovinEventName('toString', config)).toBeNull();
@@ -486,7 +558,7 @@ describe('AppLovin mirrors of the sender contract', () => {
       .toEqual({ currency: 'USD', shipping: 0, transaction_id: 'o', items: [{ item_id: 'prod_1', quantity: 1 }] });
     expect(appLovinEventData('purchase', 'purchase', { value: 50, order_id: 'o', price_id: 'price_1', plan: { product: 'prod_2' } }, { sendValue: true }))
       .toMatchObject({ value: 50, items: [{ item_id: 'prod_2', item_variant_id: 'price_1', price: 50, quantity: 1 }] });
-    expect(appLovinEventData('page_view', 'pageview', {}, { sendValue: true })).toBeNull();
+    expect(appLovinEventData('page_view', 'pageview', { value: 3 }, { sendValue: true })).toEqual({});
     expect(appLovinEventData('subscribe', 'trial_started', { trial_expected_value: 30 }, { sendValue: true })).toEqual({ currency: 'USD', value: 30 });
     expect(appLovinEventData('subscribe', 'trial_started', { trial_expected_value: 30 })).toEqual({ currency: 'USD' });
   });

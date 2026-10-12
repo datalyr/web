@@ -1435,9 +1435,10 @@ export class ContainerManager {
       }
     }
     // AppLovin: only through the pixel the Container loaded itself (never
-    // through another install's), never a page view (AppLovin's own pixel
-    // counts those), and only the events the module's rule map names.
-    if (pixels?.applovin?.enabled === true && !isPageEvent(eventName)) {
+    // through another install's), and only the events the module's map names.
+    // Page views: the landing one once, SPA ones only when AppLovin's pixel
+    // will not send them (the module decides; src/pixels/applovin.ts).
+    if (pixels?.applovin?.enabled === true) {
       mirror('applovin', this.trackToDestinationPixel('applovin', pixels.applovin, eventName, sanitizedProperties, eventId));
     }
     if (companionDeliveries.length > 0) await Promise.all(companionDeliveries);

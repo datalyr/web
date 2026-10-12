@@ -20,8 +20,23 @@
  * the postback sender, infra/cloudflare/postback/platforms/applovin-payload.js):
  * - Only events the workspace has an active website AppLovin rule for, under
  *   the name that rule sends. Ingest derives the map (`events`) from the rules;
- *   rules with property conditions are left to the server. Unmapped events, and
- *   page_view always (AppLovin's own pixel counts page views), are not sent.
+ *   rules with property conditions are left to the server. Unmapped events are
+ *   not sent.
+ * - Page views (ingest always maps `pageview` → page_view; the server sender
+ *   no longer sends page_view except for restricted lead-gen accounts, which
+ *   never get this pixel). axon("init") sends NO page view (checked live,
+ *   2026-10-12), so the Container sends the LANDING page view of each full page
+ *   load exactly once, dedupe_id = that page view's DATALYR event_id. SPA page
+ *   views only when AppLovin's own pixel will not: its config
+ *   (b.applovin.com/v1/pixel/config, fetched once per page) has
+ *   autoSpaPageView === false. Unknown (fetch failed) counts as true: no SPA
+ *   page views from us, never doubles.
+ *
+ * AppLovin's `autoEmailCapture` (on by default in the pixel config) makes
+ * their pixel read email addresses typed into forms on the page. That is
+ * AppLovin's own collection under their terms, which is one more reason the
+ * pixel loads only with marketing consent; merchants can turn it off in
+ * AppLovin.
  * - A purchase only when it carries an order / transaction reference.
  * - Every call carries the server copy's dedupe_id: a purchase's order
  *   reference exactly as data.transaction_id holds it, otherwise the DATALYR
@@ -68,7 +83,7 @@ const lowerText = (value: unknown): string => (typeof value === 'string' ? value
 export function appLovinEventName(eventName: string, config: Pick<AppLovinPixelConfig, 'events' | 'account_type'>): string | null {
   const events = config?.events && typeof config.events === 'object' ? config.events : {};
   const name = Object.prototype.hasOwnProperty.call(events, eventName) ? lowerText(events[eventName]) : '';
-  if (!name || name === 'page_view' || !APPLOVIN_EVENT_NAMES.has(name)) return null;
+  if (!name || !APPLOVIN_EVENT_NAMES.has(name)) return null;
   return appLovinEventAllowed(name, config.account_type) ? name : null;
 }
 
@@ -250,8 +265,7 @@ export function appLovinEventData(
   { sendValue = false }: { sendValue?: boolean } = {},
 ): Record<string, unknown> | null {
   const props = properties && typeof properties === 'object' ? properties : {};
-  if (name === 'page_view') return null;
-  if (name === 'login') return {};
+  if (name === 'page_view' || name === 'login') return {};
   const declared = typeof props.currency === 'string' && /^[A-Za-z]{3}$/.test(props.currency.trim())
     ? props.currency.trim().toUpperCase() : undefined;
   const currency = declared || 'USD';
@@ -403,10 +417,41 @@ function waitForParsedDocument(timeoutMs: number): Promise<void> {
 // The platform
 // ---------------------------------------------------------------------------
 
+/** AppLovin's pixel config endpoint (the same call its own pixel makes). */
+export function appLovinPixelConfigUrl(eventKey: string): string {
+  return `https://b.applovin.com/v1/pixel/config?event_key=${encodeURIComponent(eventKey)}`;
+}
+
+/**
+ * Whether WE may send SPA page views: only when AppLovin's pixel config says
+ * autoSpaPageView === false. Anything else (true, missing, a failed or slow
+ * fetch) leaves SPA page views to AppLovin's pixel, so they are never doubled.
+ */
+export async function appLovinSendsOwnSpaPageViews(eventKey: string, timeoutMs = 5000): Promise<boolean> {
+  try {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = setTimeout(() => controller?.abort(), timeoutMs);
+    try {
+      const response = await fetch(appLovinPixelConfigUrl(eventKey), { credentials: 'omit', signal: controller?.signal });
+      if (!response.ok) return false;
+      const config = await response.json();
+      return config?.autoSpaPageView === false;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return false;
+  }
+}
+
 export class AppLovinPixel {
   private stub: unknown = null;
   private key: string | null = null;
   private companion = false;
+  /** The landing page view of this page load has been sent. */
+  private landingSent = false;
+  /** Resolves true only when AppLovin's config has autoSpaPageView === false. */
+  private ownSpaPageViews: Promise<boolean> | null = null;
 
   isCompanion(): boolean {
     return this.companion;
@@ -461,6 +506,8 @@ export class AppLovinPixel {
     host.axon('init');
     this.stub = host.axon;
     this.key = key;
+    // Once per page: who sends SPA page views (see the file header).
+    this.ownSpaPageViews = appLovinSendsOwnSpaPageViews(key);
     ctx.log('AppLovin pixel initialized');
     return 'loaded';
   }
@@ -482,6 +529,17 @@ export class AppLovinPixel {
     const dedupeId = appLovinDedupeId({ eventName: name, eventId: event.eventId, transactionId: data.transaction_id });
     // Without the shared id the pixel copy could never merge with the server copy.
     if (!dedupeId) return false;
+    if (name === 'page_view') {
+      // The first page view of this page load is the landing: sent once.
+      // Later ones are SPA navigations: only when AppLovin's pixel won't.
+      // Claimed synchronously, so two page views can never both be the landing.
+      if (this.landingSent) {
+        if (!(await (this.ownSpaPageViews ?? Promise.resolve(false)))) return false;
+        if (!ctx.allowed()) return false;
+      } else {
+        this.landingSent = true;
+      }
+    }
     if (name === 'purchase' || name === 'sign_up') {
       // user_data is required on these two; only the identified email, hashed
       // with AppLovin's own normalization (never Meta's).
