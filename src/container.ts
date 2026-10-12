@@ -5,6 +5,8 @@
 
 import { storage } from './storage';
 import { sha256Hex } from './utils';
+import { DestinationPixelsLoader, destinationPrivacyOptOut, pixelIdFields } from './destination-pixels';
+import type { DestinationPixelPlatform, PixelLoadStatus } from './destination-pixels';
 import type { SdkRemoteConfig } from './config';
 
 // Meta Pixel reference, verified 2026-09-15:
@@ -269,6 +271,16 @@ function companionGtagReady(tagId: string): boolean {
   return queuedCalls(host.dataLayer).some((call) => call[0] === 'config' && String(call[1]) === tagId);
 }
 
+/** A JSON round trip (what the server reads back), or {} when it cannot be serialised. */
+function jsonSnapshot(value: unknown): Record<string, unknown> {
+  try {
+    const copy = JSON.parse(JSON.stringify(value ?? {}));
+    return copy && typeof copy === 'object' && !Array.isArray(copy) ? copy : {};
+  } catch {
+    return {};
+  }
+}
+
 function isPageEvent(eventName: string): boolean {
   const name = String(eventName).toLowerCase();
   return name === 'pageview' || name === 'page_view';
@@ -342,6 +354,34 @@ export interface PixelConfig {
     enabled: boolean;
     company_id: string;
   };
+  /** Present only for workspaces with an active AppLovin connection, and only
+   *  where ingest allows it for this visitor (destination gate, country). The
+   *  pixel itself lives in the lazily loaded dl.pixels.<v>.js. */
+  applovin?: {
+    enabled: boolean;
+    event_key: string;
+    account_type?: string;
+    /** DATALYR event name → AppLovin name, from active website rules. */
+    events?: Record<string, string>;
+    /** DATALYR event names whose browser copy may carry a value. */
+    values?: string[];
+    /** DATALYR event name → the rule's currency (the server's fallback before USD). */
+    currencies?: Record<string, string>;
+    /** generate_lead triggers whose rules send a fixed value: that value. */
+    fixed_values?: Record<string, number>;
+  };
+  /** Present only for workspaces with an active X connection while the X
+   *  destination gate is on. The pixel lives in dl.pixels.<v>.js. */
+  x?: {
+    enabled: boolean;
+    pixel_id: string;
+    /** DATALYR event name → X Event ID, from active website X rules. */
+    events?: Record<string, string>;
+    values?: string[];
+    /** DATALYR event names whose rule is an X PURCHASE. */
+    purchases?: string[];
+    currencies?: Record<string, string>;
+  };
 }
 
 export class ContainerManager {
@@ -378,6 +418,10 @@ export class ContainerManager {
   private initPromise: Promise<void> | null = null;
   /** Shopify's own app runs this platform's tag for the same id on this page. */
   private companion = { meta: false, google: false, tiktok: false };
+  /** Destination pixels (dl.pixels.<v>.js): the module loader and each
+   *  platform's one-time load decision. */
+  private destinationPixels: DestinationPixelsLoader;
+  private destinationLoads = new Map<DestinationPixelPlatform, Promise<PixelLoadStatus>>();
   private companionWaits = new Map<string, { promise: Promise<any>; resolve: (value: any) => void; timer: ReturnType<typeof setInterval> }>();
   private companionPending = 0;
 
@@ -389,6 +433,8 @@ export class ContainerManager {
     canForward?: () => boolean;
     onRemoteConfig?: (config: SdkRemoteConfig | undefined) => void;
     platform?: string;
+    /** dl.js version: picks the matching dl.pixels.<v>.js. */
+    sdkVersion?: string;
   }) {
     this.workspaceId = options.workspaceId;
     // Container scripts use the same endpoint as tracking (ingest)
@@ -398,6 +444,7 @@ export class ContainerManager {
     this.canForward = options.canForward;
     this.onRemoteConfig = options.onRemoteConfig;
     this.platform = options.platform;
+    this.destinationPixels = new DestinationPixelsLoader(options.sdkVersion || 'latest');
 
     // Load session scripts from storage
     const sessionScripts = storage.get('dl_session_scripts', []);
@@ -885,6 +932,71 @@ export class ContainerManager {
     if (this.pixels.whop?.enabled && this.pixels.whop.company_id) {
       this.initializeWhopPixel(this.pixels.whop);
     }
+
+    // AppLovin lives in the lazily loaded destination pixels module and decides
+    // on its own clock (it may wait for the page's HTML to see another
+    // install), so the other pixels are not held for it.
+    if (this.pixels.applovin?.enabled === true && this.pixels.applovin.event_key) {
+      this.startDestinationPixel('applovin', this.pixels.applovin);
+    }
+    // The X Pixel: same module, same gates; twq('config') sends X's page view.
+    if (this.pixels.x?.enabled === true && this.pixels.x.pixel_id) {
+      this.startDestinationPixel('x', this.pixels.x);
+    }
+  }
+
+  /** Marketing consent (the container gate) and no DNT / GPC / US opt-out. */
+  private destinationAllowed(): boolean {
+    return this.forwardingAllowed() && !destinationPrivacyOptOut();
+  }
+
+  /**
+   * One platform's load decision, once per page. The module is fetched only
+   * here, i.e. only for a site whose config names one of its platforms and
+   * only for a visitor the gate allows. A decision taken while consent was
+   * missing ('retry') is dropped so a later event decides again.
+   */
+  private startDestinationPixel(platform: DestinationPixelPlatform, config: unknown): Promise<PixelLoadStatus> {
+    const existing = this.destinationLoads.get(platform);
+    if (existing) return existing;
+    if (!this.destinationAllowed()) return Promise.resolve('retry');
+    const decision = (async (): Promise<PixelLoadStatus> => {
+      const module = await this.destinationPixels.get();
+      if (!module) return 'blocked';
+      if (!this.destinationAllowed()) return 'retry';
+      return module.load(platform, config, {
+        readShopifyPixels: () => readShopifyWebPixelsConfig(),
+        allowed: () => this.destinationAllowed(),
+        log: (...args: unknown[]) => this.log(...args),
+      });
+    })().catch((error): PixelLoadStatus => {
+      this.log(`Error loading the ${platform} pixel:`, error);
+      return 'blocked';
+    }).then((status) => {
+      if (status === 'retry' && this.destinationLoads.get(platform) === decision) this.destinationLoads.delete(platform);
+      return status;
+    });
+    this.destinationLoads.set(platform, decision);
+    return decision;
+  }
+
+  /** A platform's load decision on this page, if one was started. */
+  destinationPixelStatus(platform: DestinationPixelPlatform): Promise<PixelLoadStatus> | undefined {
+    return this.destinationLoads.get(platform);
+  }
+
+  /** Send one event through a destination pixel the Container loaded itself. */
+  private async trackToDestinationPixel(platform: DestinationPixelPlatform, config: unknown, eventName: string,
+    properties: Record<string, unknown>, eventId: string | undefined,
+    extra: { landing?: boolean; ids?: Record<string, string | number>; data?: Record<string, unknown> }): Promise<boolean> {
+    const status = await this.startDestinationPixel(platform, config);
+    if (status !== 'loaded' || !this.destinationAllowed()) return false;
+    const module = await this.destinationPixels.get();
+    if (!module) return false;
+    return module.track(platform, config, {
+      name: eventName, properties, eventId, email: this.getIdentity?.()?.email ?? null,
+      landing: extra.landing === true, ids: extra.ids, data: extra.data,
+    }, { allowed: () => this.destinationAllowed(), log: (...args: unknown[]) => this.log(...args) });
   }
 
   /** Initialize Whop's official first-party attribution pixel. */
@@ -1200,11 +1312,25 @@ export class ContainerManager {
   /**
    * Track event to all initialized pixels
    */
-  async trackToPixels(eventName: string, properties: any = {}, eventId?: string): Promise<string[]> {
+  async trackToPixels(eventName: string, properties: any = {}, eventId?: string,
+    options: {
+      /** The landing page view of this page load (claimLandingPageView). */
+      landing?: boolean;
+      /** false: Meta / Google / TikTok / Whop only (a pixel-only co-fire no server sender mirrors). */
+      destinationPixels?: boolean;
+      /** The server copy's event_data (super properties + properties), for the destination pixels. */
+      data?: Record<string, unknown>;
+    } = {}): Promise<string[]> {
     if (!this.forwardingAllowed() || eventName.startsWith('$')) return [];
     // Snapshot before awaiting: caller mutations must not change the queued event.
     const sanitizedEventName = this.sanitizeEventName(eventName);
     const sanitizedProperties = this.sanitizeProperties(properties);
+    // The destination pixels read value, currency and dedup ids from the data
+    // the server copy carries, as JSON and NOT display-sanitised: sanitising
+    // could alter an order id or turn "EUR<br>" into a valid "EUR".
+    const destinationData = jsonSnapshot(options.data ?? properties);
+    const ids = pixelIdFields(destinationData);
+    const destinationProperties = options.data ? this.sanitizeProperties(destinationData) : sanitizedProperties;
     // An event tracked while init() is still running (e.g. the pageview released
     // when Shopify consent resolves right after the container was created) is
     // forwarded once the pixels are initialized instead of being dropped.
@@ -1217,7 +1343,7 @@ export class ContainerManager {
     // Authorization is request-scoped, never a positive cached decision. Do not
     // execute newly returned scripts or initialize a new destination here.
     const pixels: PixelConfig = { whop: initialized.whop };
-    const platforms = ['meta', 'google', 'tiktok'] as const;
+    const platforms = ['meta', 'google', 'tiktok', 'applovin', 'x'] as const;
     if (platforms.some(platform => initialized[platform]?.enabled === true)) {
       try {
         const data = await this.readConfiguration('pixel_forwarding');
@@ -1225,7 +1351,7 @@ export class ContainerManager {
         for (const platform of platforms) {
           const prior = initialized[platform];
           const current = data?.pixels?.[platform];
-          const id = platform === 'google' ? 'tag_id' : 'pixel_id';
+          const id = platform === 'google' ? 'tag_id' : platform === 'applovin' ? 'event_key' : 'pixel_id';
           if (prior?.enabled === true && current?.enabled === true
             && typeof current[id] === 'string' && current[id].length > 0
             && current[id] === (prior as any)[id]) {
@@ -1354,8 +1480,21 @@ export class ContainerManager {
         this.log('Error tracking Whop Pixel page:', error);
       }
     }
+    // AppLovin: only through the pixel the Container loaded itself (never
+    // through another install's), and only the events the module's map names.
+    // Page views: the landing one once, SPA ones only when AppLovin's pixel
+    // will not send them (the module decides; src/pixels/applovin.ts).
+    const destinations = options.destinationPixels !== false;
+    if (destinations && pixels?.applovin?.enabled === true) {
+      mirror('applovin', this.trackToDestinationPixel('applovin', pixels.applovin, eventName, destinationProperties, eventId,
+        { landing: options.landing, ids, data: destinationData }));
+    }
+    // X: conversions only (twq('config') already counted the page view).
+    if (destinations && pixels?.x?.enabled === true && !isPageEvent(eventName)) {
+      mirror('x', this.trackToDestinationPixel('x', pixels.x, eventName, destinationProperties, eventId, { ids, data: destinationData }));
+    }
     if (companionDeliveries.length > 0) await Promise.all(companionDeliveries);
-    return ['meta', 'google', 'tiktok', 'whop'].filter((platform) => delivered.has(platform));
+    return ['meta', 'google', 'tiktok', 'whop', 'applovin', 'x'].filter((platform) => delivered.has(platform));
   }
 
   /**

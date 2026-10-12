@@ -61,6 +61,10 @@ const RRWEB_MARKERS = ['rr_dataURL', 'rr_mediaState', 'takeFullSnapshot', 'addCu
 // Heat mode (1.9.0): its snapshot serializer (rrweb-snapshot) and click capture must also
 // stay out of dl.js; the replay bundle must carry them.
 const HEAT_MARKERS = ['mode=heat', 'y_pct_max'];
+// Destination pixels (AppLovin, X, ...): their code lives in dl.pixels.<v>.js, injected
+// only for workspaces that configure one; none of it may be in dl.js.
+const PIXELS_MARKERS = ['loader.iife.js', 's.axon.ai', 'static.ads-twitter.com', 'pixels_version'];
+const MAX_PIXELS_GZIP_BYTES = 8 * 1024; // measured 1.9.10 (AppLovin only): ~4 KB gz
 const MAX_REPLAY_GZIP_BYTES = 40 * 1024; // measured 1.8.0: ~28 KB gz; 1.9.0 (+ rrweb-snapshot for heat mode): ~37 KB gz; 1.9.1 (privacy scrub): ~38.3 KB gz; 1.9.2 (click fidelity): ~39.3 KB gz
 
 const args = process.argv.slice(2);
@@ -107,11 +111,16 @@ for (const file of files) {
     problems.push(`contains rrweb code (${rrweb.join(', ')}) — the recorder must stay in dl.replay.<v>.js`);
   }
 
+  const pixelCode = PIXELS_MARKERS.filter(m => content.includes(m));
+  if (pixelCode.length > 0) {
+    problems.push(`contains destination pixel code (${pixelCode.join(', ')}) — it must stay in dl.pixels.<v>.js`);
+  }
+
   if (problems.length > 0) {
     console.error(`✗ ${path.basename(file)} — ${problems.join('; ')}`);
     failures++;
   } else {
-    console.log(`✓ ${path.basename(file)} — ${bootstrapOptional.has(file) ? 'markers present' : 'bootstrap present'}, sdk_version ${expectedVersion}, no rrweb`);
+    console.log(`✓ ${path.basename(file)} — ${bootstrapOptional.has(file) ? 'markers present' : 'bootstrap present'}, sdk_version ${expectedVersion}, no rrweb, no destination pixels`);
   }
 }
 
@@ -137,6 +146,27 @@ if (distMode) {
     } else {
       console.log(`✓ ${path.basename(replayFile)} — replay_version ${expectedVersion}, ${raw} B min / ${gz} B gzip`);
     }
+    const pixelsFile = path.join(distDir, 'datalyr.pixels.min.js');
+    if (!fs.existsSync(pixelsFile)) {
+      console.error(`✗ ${pixelsFile} — NOT FOUND`);
+      failures++;
+    } else {
+      const pixels = fs.readFileSync(pixelsFile, 'utf8');
+      const pixelProblems = [];
+      const pv = pixels.match(/pixels_version\s*[:=]\s*["']([^"']+)["']/);
+      if (!pv) pixelProblems.push('no pixels_version literal found');
+      else if (pv[1] !== expectedVersion) pixelProblems.push(`pixels_version "${pv[1]}" !== package.json "${expectedVersion}"`);
+      const missingPixels = PIXELS_MARKERS.filter(m => !pixels.includes(m));
+      if (missingPixels.length > 0) pixelProblems.push(`markers missing (${missingPixels.join(', ')})`);
+      const pgz = require('zlib').gzipSync(pixels, { level: 9 }).length;
+      if (pgz > MAX_PIXELS_GZIP_BYTES) pixelProblems.push(`gzip ${pgz} B > ${MAX_PIXELS_GZIP_BYTES} B budget`);
+      if (pixelProblems.length > 0) {
+        console.error(`✗ ${path.basename(pixelsFile)} — ${pixelProblems.join('; ')}`);
+        failures++;
+      } else {
+        console.log(`✓ ${path.basename(pixelsFile)} — pixels_version ${expectedVersion}, ${Buffer.byteLength(pixels)} B min / ${pgz} B gzip`);
+      }
+    }
     const dl = path.join(distDir, 'datalyr.min.js');
     if (fs.existsSync(dl)) {
       const dlContent = fs.readFileSync(dl);
@@ -151,4 +181,4 @@ if (failures > 0) {
   process.exit(1);
 }
 
-console.log(`\nBundle guard passed for ${files.length + (distMode ? 1 : 0)} file(s).`);
+console.log(`\nBundle guard passed for ${files.length + (distMode ? 2 : 0)} file(s).`);
