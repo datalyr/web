@@ -211,6 +211,9 @@ describe('LinkedIn Insight Tag: another install already on the page', () => {
     ['_linkedin_partner_id set', () => { (window as any)._linkedin_partner_id = '42'; }],
     ['their insight.min.js as a script src', () => { const s = document.createElement('script'); s.src = LINKEDIN_INSIGHT_SCRIPT; document.head.appendChild(s); }],
     ["LinkedIn's base code inline, not run yet", () => inline('_linkedin_partner_id = "42"; window._linkedin_data_partner_ids = window._linkedin_data_partner_ids || []; window._linkedin_data_partner_ids.push(_linkedin_partner_id);', 'text/plain')],
+    ["Shopify's web pixel config carries the partner id as a number", () => {
+      inline(JSON.stringify({ webPixelsConfigList: [{ id: '2', type: 'APP', configuration: JSON.stringify({ partnerId: Number(PARTNER) }) }] }), 'application/json');
+    }],
     ["Shopify's web pixel config carries the partner id", () => {
       inline(JSON.stringify({ webPixelsConfigList: [{ id: '1', type: 'APP', configuration: JSON.stringify({ partnerId: PARTNER }) }] }), 'application/json');
     }],
@@ -232,6 +235,10 @@ describe('LinkedIn Insight Tag: another install already on the page', () => {
     expect(linkedInInsightTagOnPage(PARTNER)).toBe(false);
     expect(linkedInInsightTagOnPage(PARTNER, [{ configuration: { partnerId: PARTNER } }])).toBe(true);
     expect(linkedInInsightTagOnPage(PARTNER, [{ configuration: { partnerId: '42' } }])).toBe(false);
+    // A numeric partner id, as an object value or inside a JSON string.
+    expect(linkedInInsightTagOnPage(PARTNER, [{ configuration: { partnerId: Number(PARTNER) } }])).toBe(true);
+    expect(linkedInInsightTagOnPage(PARTNER, [{ configuration: JSON.stringify({ tag: { partnerId: Number(PARTNER) } }) }])).toBe(true);
+    expect(linkedInInsightTagOnPage(PARTNER, [{ configuration: { partnerId: 42 } }])).toBe(false);
   });
 
   test.each([

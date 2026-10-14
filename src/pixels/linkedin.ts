@@ -76,6 +76,32 @@ const FOREIGN_SCRIPT_SELECTOR = `script[src^="${SCRIPT_PREFIX}"]:not([data-datal
 /** LinkedIn's base code itself: the partner id assignment or push, in an inline script. */
 const SNIPPET = /\b_linkedin_partner_id\s*=|_linkedin_data_partner_ids\s*\.\s*push\s*\(/;
 
+/**
+ * Every string and finite number in a Shopify web pixel configuration, as text
+ * (configurationStrings, plus numbers): an app may store the partner id as a
+ * JSON number.
+ */
+export function linkedInConfigurationValues(value: unknown, depth = 0, out: string[] = []): string[] {
+  if (depth > 4 || value === null || value === undefined) return out;
+  if (typeof value === 'number') {
+    if (Number.isFinite(value)) out.push(String(value));
+  } else if (typeof value === 'string') {
+    configurationStrings(value, depth, out);
+    if (value.length > 1 && (value[0] === '{' || value[0] === '[')) {
+      try { collectNumbers(JSON.parse(value), depth + 1, out); } catch { /* not JSON */ }
+    }
+  } else if (typeof value === 'object') {
+    for (const key of Object.keys(value as object)) linkedInConfigurationValues((value as any)[key], depth + 1, out);
+  }
+  return out;
+}
+
+function collectNumbers(value: unknown, depth: number, out: string[]): void {
+  if (depth > 4 || value === null || value === undefined) return;
+  if (typeof value === 'number') { if (Number.isFinite(value)) out.push(String(value)); return; }
+  if (typeof value === 'object') for (const key of Object.keys(value as object)) collectNumbers((value as any)[key], depth + 1, out);
+}
+
 function partnerIds(): string[] {
   const list = (window as any)._linkedin_data_partner_ids;
   return Array.isArray(list) ? list.map((id: unknown) => String(id).trim()) : [];
@@ -102,7 +128,7 @@ export function linkedInInsightTagOnPage(partnerId: string, shopifyPixels: unkno
       }
     }
     const wanted = String(partnerId || '').trim();
-    if (wanted && shopifyPixels.some((entry: any) => configurationStrings(entry?.configuration).includes(wanted))) return true;
+    if (wanted && shopifyPixels.some((entry: any) => linkedInConfigurationValues(entry?.configuration).includes(wanted))) return true;
   } catch { /* DOM access failed: no signal */ }
   return false;
 }
