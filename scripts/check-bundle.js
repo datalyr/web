@@ -63,7 +63,7 @@ const RRWEB_MARKERS = ['rr_dataURL', 'rr_mediaState', 'takeFullSnapshot', 'addCu
 const HEAT_MARKERS = ['mode=heat', 'y_pct_max'];
 // Destination pixels (AppLovin, X, ...): their code lives in dl.pixels.<v>.js, injected
 // only for workspaces that configure one; none of it may be in dl.js.
-const PIXELS_MARKERS = ['loader.iife.js', 's.axon.ai', 'static.ads-twitter.com', 'pixels_version'];
+const PIXELS_MARKERS = ['loader.iife.js', 's.axon.ai', 'static.ads-twitter.com', 'snap.licdn.com', 'pixels_version'];
 const MAX_PIXELS_GZIP_BYTES = 8 * 1024; // measured 1.9.10 (AppLovin only): ~4 KB gz
 const MAX_REPLAY_GZIP_BYTES = 40 * 1024; // measured 1.8.0: ~28 KB gz; 1.9.0 (+ rrweb-snapshot for heat mode): ~37 KB gz; 1.9.1 (privacy scrub): ~38.3 KB gz; 1.9.2 (click fidelity): ~39.3 KB gz
 

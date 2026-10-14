@@ -5,14 +5,15 @@
  * `window.DatalyrPixels`.
  *
  * One module for every ad platform whose browser pixel runs next to a DATALYR
- * server sender, so a site pays for them only when it has one: AppLovin and the
- * X Pixel; the LinkedIn Insight Tag is meant to be added here as a further
- * `platforms` entry with the same load / track shape.
+ * server sender, so a site pays for them only when it has one: AppLovin, the
+ * X Pixel and the LinkedIn Insight Tag, each a `platforms` entry with the same
+ * load / track shape.
  */
 import { PIXELS_API, PIXELS_GLOBAL } from '../destination-pixels';
 import type { DestinationPixelsModule, PixelEvent, PixelLoadContext, PixelLoadStatus, PixelTrackContext } from '../destination-pixels';
 import { AppLovinPixel } from './applovin';
 import { XPixel } from './x';
+import { LinkedInInsightTag } from './linkedin';
 
 interface Platform {
   load(config: any, ctx: PixelLoadContext): Promise<PixelLoadStatus>;
@@ -20,7 +21,9 @@ interface Platform {
 }
 
 export function createPixelsModule(): DestinationPixelsModule & { platforms: Record<string, Platform>; pixels_version: string } {
-  const platforms: Record<string, Platform> = { applovin: new AppLovinPixel(), x: new XPixel() };
+  const platforms: Record<string, Platform> = {
+    applovin: new AppLovinPixel(), x: new XPixel(), linkedin: new LinkedInInsightTag(),
+  };
   return {
     api: PIXELS_API,
     version: '__SDK_VERSION__',
