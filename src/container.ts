@@ -382,6 +382,15 @@ export interface PixelConfig {
     purchases?: string[];
     currencies?: Record<string, string>;
   };
+  /** Present only for workspaces with an active LinkedIn connection carrying an
+   *  Insight Tag partner id while the LinkedIn destination gate is on. The tag
+   *  lives in dl.pixels.<v>.js. */
+  linkedin?: {
+    enabled: boolean;
+    partner_id: string;
+    /** DATALYR event name → Insight Tag conversion id, from active website LinkedIn rules. */
+    events?: Record<string, string>;
+  };
 }
 
 export class ContainerManager {
@@ -943,6 +952,10 @@ export class ContainerManager {
     if (this.pixels.x?.enabled === true && this.pixels.x.pixel_id) {
       this.startDestinationPixel('x', this.pixels.x);
     }
+    // The LinkedIn Insight Tag: same module, same gates; insight.min.js counts LinkedIn's page view.
+    if (this.pixels.linkedin?.enabled === true && this.pixels.linkedin.partner_id) {
+      this.startDestinationPixel('linkedin', this.pixels.linkedin);
+    }
   }
 
   /** Marketing consent (the container gate) and no DNT / GPC / US opt-out. */
@@ -1343,7 +1356,7 @@ export class ContainerManager {
     // Authorization is request-scoped, never a positive cached decision. Do not
     // execute newly returned scripts or initialize a new destination here.
     const pixels: PixelConfig = { whop: initialized.whop };
-    const platforms = ['meta', 'google', 'tiktok', 'applovin', 'x'] as const;
+    const platforms = ['meta', 'google', 'tiktok', 'applovin', 'x', 'linkedin'] as const;
     if (platforms.some(platform => initialized[platform]?.enabled === true)) {
       try {
         const data = await this.readConfiguration('pixel_forwarding');
@@ -1351,7 +1364,8 @@ export class ContainerManager {
         for (const platform of platforms) {
           const prior = initialized[platform];
           const current = data?.pixels?.[platform];
-          const id = platform === 'google' ? 'tag_id' : platform === 'applovin' ? 'event_key' : 'pixel_id';
+          const id = platform === 'google' ? 'tag_id' : platform === 'applovin' ? 'event_key'
+            : platform === 'linkedin' ? 'partner_id' : 'pixel_id';
           if (prior?.enabled === true && current?.enabled === true
             && typeof current[id] === 'string' && current[id].length > 0
             && current[id] === (prior as any)[id]) {
@@ -1493,8 +1507,13 @@ export class ContainerManager {
     if (destinations && pixels?.x?.enabled === true && !isPageEvent(eventName)) {
       mirror('x', this.trackToDestinationPixel('x', pixels.x, eventName, destinationProperties, eventId, { ids, data: destinationData }));
     }
+    // LinkedIn: conversions only (insight.min.js already counted the page view).
+    if (destinations && pixels?.linkedin?.enabled === true && !isPageEvent(eventName)) {
+      mirror('linkedin', this.trackToDestinationPixel('linkedin', pixels.linkedin, eventName, destinationProperties, eventId,
+        { ids, data: destinationData }));
+    }
     if (companionDeliveries.length > 0) await Promise.all(companionDeliveries);
-    return ['meta', 'google', 'tiktok', 'whop', 'applovin', 'x'].filter((platform) => delivered.has(platform));
+    return ['meta', 'google', 'tiktok', 'whop', 'applovin', 'x', 'linkedin'].filter((platform) => delivered.has(platform));
   }
 
   /**
