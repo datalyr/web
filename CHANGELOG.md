@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.9.12
+
+- Provisional (pre-login) ids: `identify(guestId, traits, { provisional: true })`. While the guest id is current every event carries `event_data.$provisional_user_id = true`, the marker DATALYR's identity graph uses to join the guest id to the account that signs in next on the same visitor (§2.10). The later `identify(accountId)` keeps the `visitor_id` (no account-switch `reset()`) and stops the marker. A provisional identify while a signed-in user is current is ignored (apps re-send their guest id on launch); `reset()` clears it. The kind is stored in `dl_user_id_kind` and survives a reload. No `$alias` is sent.
+- Auto-identify fix: an email captured on a page whose visitor was already identified ran `identify(email)`, which the account-switch check took for a different user: `reset()` rotated the `visitor_id` and wiped the signed-in visitor's first-touch attribution. Auto-identify now leaves an identified visitor alone (a provisional guest still takes the email), and an explicit `identify()` after an auto-identified email is a sign-in, not an account switch (no `reset()`).
+- README: the auto-identify row named `$auto_identify`, which 1.7.x stopped sending.
+
 ## 1.9.9
 
 - AppLovin click ids: `aleid` and `alart` are captured from the URL (verbatim, no format check), persisted in first and last touch, and stripped from event payloads on a marketing decline. `aleid` comes last in click-id precedence, so it never outranks an id already on the URL, and resolves `source` to `applovin`. `alart` (AppLovin's app-user id, sent with `aleid`) is not click evidence: it never becomes `clickId` / `clickIdType` (so never a paid source or `cpc`), and on its own it never stores or replaces a touch; it is still sent on the event and kept in a touch stored for another reason (only while marketing is allowed; see the consent note below).

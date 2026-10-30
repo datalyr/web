@@ -3,7 +3,7 @@
  * Modern attribution tracking for web applications
  */
 
-import { IdentityManager } from './identity';
+import { IdentityManager, UserIdKind } from './identity';
 import { SessionManager } from './session';
 import { AttributionManager } from './attribution';
 import { EventQueue } from './queue';
@@ -32,6 +32,7 @@ import type {
   DatalyrConfig,
   EventProperties,
   UserTraits,
+  IdentifyOptions,
   PageProperties,
   SessionData,
   Attribution,
@@ -576,6 +577,16 @@ class Datalyr {
     this.autoIdentify.initialize((email: string, source: string) => {
       this.log(`Auto-identified user: ${email} from ${source}`);
 
+      // An identified page keeps its user: identify(email) over identify('acct_1')
+      // used to run the account-switch reset(), rotating the visitor id and
+      // wiping first-touch attribution of a signed-in user who typed an email
+      // into a form. Only a guest (no user, or a provisional id) takes the email.
+      const currentKind = this.identity.getUserIdKind();
+      if (this.identity.getUserId() && currentKind !== 'provisional') {
+        this.log('Auto-identify skipped: a user is already identified');
+        return;
+      }
+
       // WEB-21: ONE event, not two.
       //
       // This used to emit `$auto_identify` and then call identify(),
@@ -589,7 +600,7 @@ class Datalyr {
       // — zero readers, while prod carried 6,197 of them in 30 days.
       // The only information it added over `$identify` was WHICH detector
       // found the email, so that is preserved as a trait instead.
-      this.identify(email, { email, auto_identify_source: source });
+      this.identifyAs(email, { email, auto_identify_source: source }, 'auto');
     });
   }
 
@@ -826,7 +837,7 @@ class Datalyr {
    * a ~1-in-4.3e9 chance per identity that a genuine change is suppressed;
    * acceptable for change detection, which is all this is.
    */
-  private identityFingerprint(userId: string, traits: UserTraits = {}): string {
+  private identityFingerprint(userId: string, traits: UserTraits = {}, kind: UserIdKind = null): string {
     const stableTraits = Object.keys(traits || {})
       .sort()
       .map((key) => {
@@ -842,7 +853,7 @@ class Datalyr {
       })
       .join('&');
 
-    const input = `${this.identity.getAnonymousId()}|${userId}|${stableTraits}`;
+    const input = `${this.identity.getAnonymousId()}|${userId}|${stableTraits}` + (kind ? `|${kind}` : '');
 
     // 32-bit FNV-1a. Not cryptographic — this only needs to detect change, and
     // it must be synchronous (crypto.subtle is async and identify() is not).
@@ -854,7 +865,11 @@ class Datalyr {
     return (hash >>> 0).toString(16);
   }
 
-  identify(userId: string, traits: UserTraits = {}): void {
+  identify(userId: string, traits: UserTraits = {}, options: IdentifyOptions = {}): void {
+    this.identifyAs(userId, traits, options?.provisional === true ? 'provisional' : null);
+  }
+
+  private identifyAs(userId: string, traits: UserTraits = {}, kind: UserIdKind): void {
     if (!this.initialized) {
       console.warn('[Datalyr] SDK not initialized. Call init() first.');
       return;
@@ -870,8 +885,20 @@ class Datalyr {
       // boundary. Rotate the anonymous/session identities and clear the prior
       // user's traits/attribution before creating the new link, even when the
       // integrator forgot to call reset() on logout.
+      //
+      // Only an asserted account is that boundary. A provisional (pre-login) id
+      // or an auto-identified email followed by a different id is the same
+      // visitor signing in: same browser, and the server's §2.10 conversion
+      // joins the two on this visitor id, so it must not rotate.
       const currentUserId = this.identity.getUserId();
-      if (currentUserId && currentUserId !== userId) this.reset();
+      const currentKind = this.identity.getUserIdKind();
+      if (kind === 'provisional' && currentUserId && currentKind !== 'provisional') {
+        // A guest id never replaces a signed-in user (apps re-send their
+        // pre-login id on every launch); the app calls reset() on logout.
+        this.log('Provisional identify ignored: a user is already identified:', userId);
+        return;
+      }
+      if (currentUserId && currentUserId !== userId && currentKind === null) this.reset();
 
       // FSR-53: do NOT rotate the session id on identify(). 'Session fixation' is an
       // auth-credential concept; a client-generated analytics session_id is not one.
@@ -882,7 +909,7 @@ class Datalyr {
       // analytics SDK; keeps session-scoped attribution joins intact.
 
       // Update identity
-      const identityLink = this.identity.identify(userId, traits);
+      const identityLink = this.identity.identify(userId, traits, kind);
 
       // SEC-03 Fix: Store user properties encrypted (contains PII)
       // FIXED (H2): Fail loudly instead of silent fallback to unencrypted
@@ -912,7 +939,7 @@ class Datalyr {
       // `identify` hook is a customer extension point whose semantics we cannot
       // assume, so its contract ("called when identify() is called") is
       // deliberately left intact.
-      const identityFingerprint = this.identityFingerprint(userId, traits);
+      const identityFingerprint = this.identityFingerprint(userId, traits, kind);
       const isRedundantIdentify =
         storage.getString(IDENTIFY_FINGERPRINT_KEY, null) === identityFingerprint;
 
@@ -1321,6 +1348,7 @@ class Datalyr {
     // defensible.
     storage.remove('dl_user_id');
     storage.remove('dl_user_id_pii');
+    storage.remove('dl_user_id_kind');
     storage.remove(IDENTIFY_FINGERPRINT_KEY);
     storage.remove('dl_auto_identified_email');
     storage.remove('dl_journey');
@@ -1407,6 +1435,7 @@ class Datalyr {
       // WEB-26: see optOut() — the plaintext id must go too.
       storage.remove('dl_user_id');
       storage.remove('dl_user_id_pii');
+      storage.remove('dl_user_id_kind');
       storage.remove(IDENTIFY_FINGERPRINT_KEY);
       storage.remove('dl_auto_identified_email');
       storage.remove('dl_journey');
@@ -2094,6 +2123,12 @@ class Datalyr {
         }
       }
     };
+
+    // §2.10: the current user id is the app's pre-login id. Set after the caller's
+    // properties, so it always reflects the SDK's own state.
+    if (this.identity.getUserIdKind() === 'provisional') {
+      eventData.$provisional_user_id = true;
+    }
 
     // Add attribution data (caller wins on collisions)
     const attributionData = this.attribution.getAttributionData();

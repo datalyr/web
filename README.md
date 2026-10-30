@@ -128,7 +128,7 @@ These names are reserved. Never send one through `track()` yourself.
 | `alias()` | `$alias` |
 | `screen()` | `pageview`, with a `screen` property |
 | `trackAppDownloadClick()` | `$app_download_click` |
-| Auto-identify email capture | `$auto_identify`, then `$identify` |
+| Auto-identify email capture | `$identify` (detector in the `auto_identify_source` trait) |
 
 ### Event payload
 
@@ -208,7 +208,7 @@ interface SessionData {
 ### identify()
 
 ```typescript
-identify(userId: string, traits?: UserTraits): void
+identify(userId: string, traits?: UserTraits, options?: { provisional?: boolean }): void
 ```
 
 ```javascript
@@ -222,6 +222,21 @@ datalyr.identify('user_123', {
 Call `identify()` after sign-in. Traits are encrypted with AES-GCM before storage.
 Passing a different `user_id` runs `reset()` first, so two people on one browser do not
 merge. `identify()` does not rotate the session ID.
+
+**Pre-login ids.** If your app assigns its own guest id before sign-in, mark it provisional:
+
+```javascript
+datalyr.identify(guestId, {}, { provisional: true }); // before sign-in
+datalyr.identify(accountId);                          // after sign-in: same visitor, no reset()
+```
+
+While a provisional id is current, every event carries `$provisional_user_id: true`. When
+the real account id follows, the SDK keeps the `visitor_id` (no `reset()`), and DATALYR
+joins the guest and the account into one person. A provisional id never replaces a
+signed-in user: `identify(guestId, {}, { provisional: true })` after `identify(accountId)`
+is ignored, so call `reset()` on logout. An email captured by auto-identify works the
+same way: a later `identify()` with a different id does not run `reset()`, and
+auto-identify never replaces a signed-in user.
 
 ### reset()
 
@@ -358,7 +373,7 @@ attribute. The CheckoutChamp behaviors run before the remote config arrives.
 | `init` | `(config: DatalyrConfig) => void` |
 | `ready` | `() => Promise<void>` |
 | `track` | `(eventName: string, properties?: EventProperties) => void` |
-| `identify` | `(userId: string, traits?: UserTraits) => void` |
+| `identify` | `(userId: string, traits?: UserTraits, options?: { provisional?: boolean }) => void` |
 | `page` | `(properties?: PageProperties) => void` |
 | `screen` | `(screenName: string, properties?: Record<string, any>) => void` |
 | `group` | `(groupId: string, traits?: Record<string, any>) => void` |
@@ -757,7 +772,7 @@ The SDK writes `__dl_visitor_id` on the root domain with `SameSite=Lax`, and `Se
 HTTPS. A failed root-domain write falls back to a host-only cookie.
 
 State lives in `localStorage` under a double `dl_dl_` prefix: `dl_dl_anonymous_id`,
-`dl_dl_user_id`, `dl_dl_journey`, `dl_dl_first_touch`, `dl_dl_last_touch`,
+`dl_dl_user_id`, `dl_dl_user_id_kind`, `dl_dl_journey`, `dl_dl_first_touch`, `dl_dl_last_touch`,
 `dl_dl_offline_queue`. Traits and the captured email are encrypted with AES-GCM.
 
 ---

@@ -199,6 +199,17 @@ export interface UserTraits {
   plan?: string;
 }
 
+/** Options for identify(). */
+export interface IdentifyOptions {
+  /**
+   * The id is the app's pre-login (guest) id, not an account. Every event sent
+   * while it is current carries `$provisional_user_id: true`, a later
+   * identify(realId) on this browser is the same person signing in (no
+   * account-switch reset), and a provisional id never replaces a signed-in user.
+   */
+  provisional?: boolean;
+}
+
 export interface PageProperties {
   title?: string;
   url?: string;

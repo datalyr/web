@@ -9,6 +9,8 @@ import { IN_APP_HANDOFF_PARAM, isInAppBrowser, parseInAppHandoff } from './in-ap
 
 const VISITOR_ID_RE = /^anon_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+export type UserIdKind = 'provisional' | 'auto' | null;
+
 export class IdentityManager {
   /** True when this browser continued an in-app browser's visitor (measurement only). */
   adoptedFromInAppHandoff = false;
@@ -30,12 +32,34 @@ export class IdentityManager {
    *  the handle reset()/invalidateIdentity() drop, so a read that resolves
    *  after a logout or a consent withdrawal cannot land on the new identity. */
   private inFlightHydration: Promise<void> | null = null;
+  /** How firm the current user id is (`dl_user_id_kind`). null = an account the
+   *  app asserted. 'provisional' = the app's pre-login id (identify(id, traits,
+   *  { provisional: true })). 'auto' = an email auto-identify captured. Neither
+   *  soft kind is an account switch when a different id follows. */
+  private userIdKind: UserIdKind = null;
 
   constructor(options: { persistNewId?: boolean; sessionTimeout?: number } = {}) {
     this.persistNewId = options.persistNewId !== false;
     this.sessionTimeout = options.sessionTimeout ?? 30 * 60 * 1000;
     this.anonymousId = this.getOrCreateAnonymousId();
     this.userId = this.getStoredUserId();
+    this.userIdKind = IdentityManager.readUserIdKind();
+  }
+
+  private static readUserIdKind(): UserIdKind {
+    const kind = storage.getString('dl_user_id_kind');
+    return kind === 'provisional' || kind === 'auto' ? kind : null;
+  }
+
+  private persistUserIdKind(kind: UserIdKind): void {
+    this.userIdKind = kind;
+    if (kind) storage.set('dl_user_id_kind', kind);
+    else storage.remove('dl_user_id_kind');
+  }
+
+  /** null for an asserted account (or no user); see `userIdKind`. */
+  getUserIdKind(): UserIdKind {
+    return this.userId ? this.userIdKind : null;
   }
 
   /**
@@ -372,6 +396,7 @@ export class IdentityManager {
    */
   invalidateIdentity(): void {
     this.userId = null;
+    this.persistUserIdKind(null);
     this.piiGeneration += 1;
     this.inFlightHydration = null;
   }
@@ -484,7 +509,7 @@ export class IdentityManager {
    * Identify a user
    * Links anonymous_id to user_id
    */
-  identify(userId: string, traits: Record<string, any> = {}): Record<string, any> {
+  identify(userId: string, traits: Record<string, any> = {}, kind: UserIdKind = null): Record<string, any> {
     if (!userId) {
       console.warn('[Datalyr] identify() called without userId');
       return {};
@@ -496,6 +521,7 @@ export class IdentityManager {
     // Persist for future sessions. WEB-22: encrypted when the id is PII (the
     // auto-identify path makes it the raw email); plaintext otherwise.
     this.persistUserId(userId);
+    this.persistUserIdKind(kind);
 
     // Return identity link data (will be sent as $identify event)
     return {
@@ -522,6 +548,7 @@ export class IdentityManager {
     if (!previousId || previousId === this.anonymousId) {
       this.userId = userId;
       this.persistUserId(userId);
+      this.persistUserIdKind(null);
     }
 
     return aliasData;
@@ -543,6 +570,7 @@ export class IdentityManager {
     // previous user's email at rest.
     storage.remove('dl_user_id_pii');
     storage.remove('dl_user_traits');
+    this.persistUserIdKind(null);
 
     // Generate new anonymous ID for privacy
     this.anonymousId = `anon_${generateUUID()}`;
