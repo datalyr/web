@@ -9,6 +9,18 @@ import { IN_APP_HANDOFF_PARAM, isInAppBrowser, parseInAppHandoff } from './in-ap
 
 const VISITOR_ID_RE = /^anon_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+export type UserIdKind = 'provisional' | 'auto' | null;
+
+/** 32-bit FNV-1a: ties the kind record to its user id without storing the id again. */
+function fnv1a(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16);
+}
+
 export class IdentityManager {
   /** True when this browser continued an in-app browser's visitor (measurement only). */
   adoptedFromInAppHandoff = false;
@@ -36,6 +48,87 @@ export class IdentityManager {
     this.sessionTimeout = options.sessionTimeout ?? 30 * 60 * 1000;
     this.anonymousId = this.getOrCreateAnonymousId();
     this.userId = this.getStoredUserId();
+  }
+
+  // How firm a user id is. null = an account the app asserted. 'provisional' =
+  // the app's pre-login id (identify(id, traits, { provisional: true })). 'auto'
+  // = an email auto-identify captured. A soft kind is not an account switch
+  // when a different id follows.
+  //
+  // `dl_user_id_kind` is `<kind>:<salted hash of the user id>` ('account' for
+  // an asserted id), read from storage on every call, so it can only ever
+  // describe the id it was written for: an older SDK (or another tab) that
+  // changes `dl_user_id` without touching it leaves a record that no longer
+  // matches, which reads as an asserted account. The salt is random per
+  // browser: it stops precomputed and cross-browser tests of the record, not
+  // a reader of this browser's storage (who can decrypt dl_user_id_pii anyway).
+  private static kindRecord(kind: 'provisional' | 'auto' | 'account', userId: string): string {
+    let salt = storage.getString('dl_user_id_kind_salt');
+    if (!salt) {
+      salt = generateUUID();
+      storage.set('dl_user_id_kind_salt', salt);
+    }
+    return `${kind}:${fnv1a(`${salt}|${userId}`)}`;
+  }
+
+  private static kindFor(userId: string | null): UserIdKind {
+    if (!userId) return null;
+    const record = storage.getString('dl_user_id_kind');
+    if (!record) return null;
+    for (const kind of ['provisional', 'auto'] as const) {
+      if (record === IdentityManager.kindRecord(kind, userId)) return kind;
+    }
+    return null;
+  }
+
+  private persistUserIdKind(kind: UserIdKind, userId: string | null = this.userId): void {
+    if (userId) storage.set('dl_user_id_kind', IdentityManager.kindRecord(kind ?? 'account', userId));
+    else storage.remove('dl_user_id_kind');
+  }
+
+  /** True when no kind record exists at all: an id persisted by an SDK older
+   *  than 1.9.12 (an asserted id now always writes an 'account' record). */
+  hasNoKindRecord(): boolean {
+    return storage.getString('dl_user_id_kind') == null;
+  }
+
+  /** The kind of the current user id; null for an asserted account or no user. */
+  getUserIdKind(): UserIdKind {
+    return IdentityManager.kindFor(this.userId);
+  }
+
+  /** Marks the current user id as auto-identified (a browser identified by an
+   *  SDK older than the kind record). */
+  markAutoIdentified(userId: string): void {
+    if (this.userId === userId) this.persistUserIdKind('auto', userId);
+  }
+
+  /**
+   * Whether this browser holds a user the provisional and auto-identify guards
+   * must treat as signed in although `getUserId()` cannot show it: an email id
+   * whose encrypted copy is not hydrated yet, or an id another tab wrote after
+   * this page loaded. A provisional id never counts.
+   */
+  /** Set once the encrypted user id hydration has finished or cannot run. */
+  private hydrationSettled = false;
+
+  markHydrationSettled(): void {
+    this.hydrationSettled = true;
+  }
+
+  /** The user id persisted in plaintext right now (another tab may have changed it). */
+  getPersistedUserId(): string | null {
+    return this.getStoredUserId();
+  }
+
+  hasUnloadedUser(): boolean {
+    if (this.userId) return false;
+    // Only while the encrypted copy can still load: once hydration has settled
+    // (or was never possible, e.g. no crypto.subtle) a leftover blob is not a
+    // user this page will ever see.
+    if (!this.hydrationSettled && storage.getString('dl_user_id_pii')) return true;
+    const stored = this.getStoredUserId();
+    return !!stored && IdentityManager.kindFor(stored) !== 'provisional';
   }
 
   /**
@@ -352,6 +445,7 @@ export class IdentityManager {
       await run;
     } finally {
       if (this.inFlightHydration === run) this.inFlightHydration = null;
+      this.hydrationSettled = true;
     }
   }
 
@@ -372,6 +466,7 @@ export class IdentityManager {
    */
   invalidateIdentity(): void {
     this.userId = null;
+    this.persistUserIdKind(null, null);
     this.piiGeneration += 1;
     this.inFlightHydration = null;
   }
@@ -484,7 +579,7 @@ export class IdentityManager {
    * Identify a user
    * Links anonymous_id to user_id
    */
-  identify(userId: string, traits: Record<string, any> = {}): Record<string, any> {
+  identify(userId: string, traits: Record<string, any> = {}, kind: UserIdKind = null): Record<string, any> {
     if (!userId) {
       console.warn('[Datalyr] identify() called without userId');
       return {};
@@ -496,6 +591,7 @@ export class IdentityManager {
     // Persist for future sessions. WEB-22: encrypted when the id is PII (the
     // auto-identify path makes it the raw email); plaintext otherwise.
     this.persistUserId(userId);
+    this.persistUserIdKind(kind, userId);
 
     // Return identity link data (will be sent as $identify event)
     return {
@@ -522,6 +618,7 @@ export class IdentityManager {
     if (!previousId || previousId === this.anonymousId) {
       this.userId = userId;
       this.persistUserId(userId);
+      this.persistUserIdKind(null, userId);
     }
 
     return aliasData;
@@ -543,6 +640,7 @@ export class IdentityManager {
     // previous user's email at rest.
     storage.remove('dl_user_id_pii');
     storage.remove('dl_user_traits');
+    this.persistUserIdKind(null, null);
 
     // Generate new anonymous ID for privacy
     this.anonymousId = `anon_${generateUUID()}`;
