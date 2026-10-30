@@ -382,6 +382,7 @@ class Datalyr {
           this.log('Encryption initialized, user properties loaded');
         } catch (encErr) {
           console.warn('[Datalyr] Encryption unavailable (non-secure context?); continuing WITHOUT PII-at-rest encryption:', encErr);
+          this.identity.markHydrationSettled();
           this.userProperties = storage.get('dl_user_traits', {});
         }
 
@@ -569,7 +570,7 @@ class Datalyr {
    */
   private async adoptLegacyAutoIdentified(): Promise<void> {
     const userId = this.identity.getUserId();
-    if (!userId || this.identity.getUserIdKind() !== null) return;
+    if (!userId || !this.identity.hasNoKindRecord()) return;
     const generation = this.identity.getIdentityGeneration();
     const captured = await storage.getEncrypted('dl_auto_identified_email', null);
     if (this.identity.getIdentityGeneration() !== generation) return;
@@ -917,7 +918,11 @@ class Datalyr {
         this.log('Provisional identify ignored: a user is already identified:', userId);
         return;
       }
-      if (currentUserId && currentUserId !== userId) {
+      // Another tab already made this sign-in: it rewrote the shared
+      // dl_user_id (and the kind record) under this page, so this page's stale
+      // guest no longer reads as one. Nothing to switch from.
+      const switchedElsewhere = this.identity.getPersistedUserId() === userId;
+      if (currentUserId && currentUserId !== userId && !switchedElsewhere) {
         if (currentKind === null) {
           this.reset();
         } else if (currentKind === 'auto' &&

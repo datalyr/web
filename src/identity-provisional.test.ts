@@ -291,4 +291,41 @@ describe('kind record integrity', () => {
     expect(events.find((e) => e.name === 'x')!.data.$provisional_user_id).toBeUndefined();
     sdk.destroy();
   });
+
+  it('an asserted id writes an account record, so the legacy auto adoption never touches it', async () => {
+    const sdk = await makeSdk();
+    sdk.identify('jane_account');
+    expect(localStorage.getItem('dl_dl_user_id_kind')).toMatch(/^account:/);
+    expect((sdk as any).identity.hasNoKindRecord()).toBe(false);
+    sdk.destroy();
+  });
+
+  it('the kind record does not hold an unsalted hash of the id', async () => {
+    const sdk = await makeSdk();
+    sdk.identify('guest-uuid', {}, { provisional: true });
+    const first = localStorage.getItem('dl_dl_user_id_kind');
+    sdk.destroy();
+    localStorage.clear();
+    delete (window as any).datalyr;
+    const other = await makeSdk();
+    other.identify('guest-uuid', {}, { provisional: true });
+    expect(localStorage.getItem('dl_dl_user_id_kind')).not.toBe(first);
+    other.destroy();
+  });
+
+  it('a guest tab signing in after another tab already did does not reset', async () => {
+    const sdk = await makeSdk();
+    sdk.identify('guest-uuid', {}, { provisional: true });
+    const visitor = sdk.getAnonymousId();
+    // Another tab signs in: it rewrites dl_user_id and the kind record.
+    localStorage.setItem('dl_dl_user_id', 'acct');
+    localStorage.setItem('dl_dl_user_id_kind', 'account:00000000');
+    const resetSpy = jest.spyOn(sdk, 'reset');
+    sdk.identify('acct');
+    expect(resetSpy).not.toHaveBeenCalled();
+    expect(sdk.getAnonymousId()).toBe(visitor);
+    sdk.destroy();
+  });
+
 });
+

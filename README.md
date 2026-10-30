@@ -777,7 +777,7 @@ The SDK writes `__dl_visitor_id` on the root domain with `SameSite=Lax`, and `Se
 HTTPS. A failed root-domain write falls back to a host-only cookie.
 
 State lives in `localStorage` under a double `dl_dl_` prefix: `dl_dl_anonymous_id`,
-`dl_dl_user_id`, `dl_dl_user_id_kind`, `dl_dl_journey`, `dl_dl_first_touch`, `dl_dl_last_touch`,
+`dl_dl_user_id`, `dl_dl_user_id_kind`, `dl_dl_user_id_kind_salt`, `dl_dl_journey`, `dl_dl_first_touch`, `dl_dl_last_touch`,
 `dl_dl_offline_queue`. Traits and the captured email are encrypted with AES-GCM.
 
 ---

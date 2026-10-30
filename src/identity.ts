@@ -55,12 +55,19 @@ export class IdentityManager {
   // = an email auto-identify captured. A soft kind is not an account switch
   // when a different id follows.
   //
-  // `dl_user_id_kind` is `<kind>:<hash of the user id>`, read from storage on
-  // every call, so it can only ever describe the id it was written for: an
-  // older SDK (or another tab) that changes `dl_user_id` without touching it
-  // leaves a record that no longer matches, which reads as an asserted account.
-  private static kindRecord(kind: Exclude<UserIdKind, null>, userId: string): string {
-    return `${kind}:${fnv1a(userId)}`;
+  // `dl_user_id_kind` is `<kind>:<salted hash of the user id>` ('account' for
+  // an asserted id), read from storage on every call, so it can only ever
+  // describe the id it was written for: an older SDK (or another tab) that
+  // changes `dl_user_id` without touching it leaves a record that no longer
+  // matches, which reads as an asserted account. The salt is random per
+  // browser, so the record cannot be tested against candidate emails.
+  private static kindRecord(kind: 'provisional' | 'auto' | 'account', userId: string): string {
+    let salt = storage.getString('dl_user_id_kind_salt');
+    if (!salt) {
+      salt = generateUUID();
+      storage.set('dl_user_id_kind_salt', salt);
+    }
+    return `${kind}:${fnv1a(`${salt}|${userId}`)}`;
   }
 
   private static kindFor(userId: string | null): UserIdKind {
@@ -74,8 +81,14 @@ export class IdentityManager {
   }
 
   private persistUserIdKind(kind: UserIdKind, userId: string | null = this.userId): void {
-    if (kind && userId) storage.set('dl_user_id_kind', IdentityManager.kindRecord(kind, userId));
+    if (userId) storage.set('dl_user_id_kind', IdentityManager.kindRecord(kind ?? 'account', userId));
     else storage.remove('dl_user_id_kind');
+  }
+
+  /** True when no kind record exists at all: an id persisted by an SDK older
+   *  than 1.9.12 (an asserted id now always writes an 'account' record). */
+  hasNoKindRecord(): boolean {
+    return storage.getString('dl_user_id_kind') == null;
   }
 
   /** The kind of the current user id; null for an asserted account or no user. */
@@ -95,9 +108,24 @@ export class IdentityManager {
    * whose encrypted copy is not hydrated yet, or an id another tab wrote after
    * this page loaded. A provisional id never counts.
    */
+  /** Set once the encrypted user id hydration has finished or cannot run. */
+  private hydrationSettled = false;
+
+  markHydrationSettled(): void {
+    this.hydrationSettled = true;
+  }
+
+  /** The user id persisted in plaintext right now (another tab may have changed it). */
+  getPersistedUserId(): string | null {
+    return this.getStoredUserId();
+  }
+
   hasUnloadedUser(): boolean {
     if (this.userId) return false;
-    if (storage.getString('dl_user_id_pii')) return true;
+    // Only while the encrypted copy can still load: once hydration has settled
+    // (or was never possible, e.g. no crypto.subtle) a leftover blob is not a
+    // user this page will ever see.
+    if (!this.hydrationSettled && storage.getString('dl_user_id_pii')) return true;
     const stored = this.getStoredUserId();
     return !!stored && IdentityManager.kindFor(stored) !== 'provisional';
   }
@@ -416,6 +444,7 @@ export class IdentityManager {
       await run;
     } finally {
       if (this.inFlightHydration === run) this.inFlightHydration = null;
+      this.hydrationSettled = true;
     }
   }
 
