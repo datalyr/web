@@ -60,7 +60,8 @@ export class IdentityManager {
   // describe the id it was written for: an older SDK (or another tab) that
   // changes `dl_user_id` without touching it leaves a record that no longer
   // matches, which reads as an asserted account. The salt is random per
-  // browser, so the record cannot be tested against candidate emails.
+  // browser: it stops precomputed and cross-browser tests of the record, not
+  // a reader of this browser's storage (who can decrypt dl_user_id_pii anyway).
   private static kindRecord(kind: 'provisional' | 'auto' | 'account', userId: string): string {
     let salt = storage.getString('dl_user_id_kind_salt');
     if (!salt) {

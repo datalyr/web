@@ -327,5 +327,18 @@ describe('kind record integrity', () => {
     sdk.destroy();
   });
 
+
+  it('a real account switch another tab made still resets here', async () => {
+    const sdk = await makeSdk();
+    sdk.identify('acct_1');
+    // Another tab switched acct_1 → acct_2: it reset (new visitor id) and signed in.
+    localStorage.setItem('dl_dl_anonymous_id', 'anon_other_tab');
+    localStorage.setItem('dl_dl_user_id', 'acct_2');
+    localStorage.setItem('dl_dl_user_id_kind', 'account:00000000');
+    const resetSpy = jest.spyOn(sdk, 'reset');
+    sdk.identify('acct_2');
+    expect(resetSpy).toHaveBeenCalled();
+    sdk.destroy();
+  });
 });
 

@@ -918,10 +918,13 @@ class Datalyr {
         this.log('Provisional identify ignored: a user is already identified:', userId);
         return;
       }
-      // Another tab already made this sign-in: it rewrote the shared
-      // dl_user_id (and the kind record) under this page, so this page's stale
-      // guest no longer reads as one. Nothing to switch from.
-      const switchedElsewhere = this.identity.getPersistedUserId() === userId;
+      // Another tab already made this sign-in from a guest: it rewrote the
+      // shared dl_user_id (and the kind record) under this page but kept the
+      // visitor id, so this page's stale guest no longer reads as one. If that
+      // tab reset (a real account switch), the stored visitor id moved and the
+      // switch below runs here too.
+      const switchedElsewhere = this.identity.getPersistedUserId() === userId &&
+        storage.getString('dl_anonymous_id') === this.identity.getAnonymousId();
       if (currentUserId && currentUserId !== userId && !switchedElsewhere) {
         if (currentKind === null) {
           this.reset();
