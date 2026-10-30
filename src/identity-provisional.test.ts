@@ -212,16 +212,83 @@ describe('auto-identify on an identified page', () => {
     sdk.destroy();
   });
 
-  it('a guest (provisional) visitor still takes the captured email', async () => {
+  it('a provisional guest keeps its id (an email owner would block the conversion)', async () => {
     const sdk = await makeSdk({ autoIdentify: true });
     const events = capturePayloads(sdk);
     sdk.identify('guest-uuid', {}, { provisional: true });
-    const visitor = sdk.getAnonymousId();
     autoIdentifyCallback!('lead@example.com', 'form');
-    const last = events.filter((e) => e.name === '$identify').pop()!;
-    expect(last.userId).toBe('lead@example.com');
-    expect(last.data.$provisional_user_id).toBeUndefined();
-    expect(sdk.getAnonymousId()).toBe(visitor);
+    sdk.track('after');
+    const after = events.find((e) => e.name === 'after')!;
+    expect(after.userId).toBe('guest-uuid');
+    expect(after.data.$provisional_user_id).toBe(true);
+    sdk.destroy();
+  });
+
+  it('a different account signing in after an auto-identified email drops the captured email', async () => {
+    const sdk = await makeSdk({ autoIdentify: true });
+    autoIdentifyCallback!('lead@example.com', 'form');
+    sdk.identify('acct_B', { name: 'B' });
+    expect((sdk as any).userProperties.email).toBeUndefined();
+    expect((sdk as any).userProperties.auto_identify_source).toBeUndefined();
+    expect((sdk as any).userProperties.name).toBe('B');
+    sdk.destroy();
+  });
+
+  it('the same person signing in (same email trait) keeps it', async () => {
+    const sdk = await makeSdk({ autoIdentify: true });
+    autoIdentifyCallback!('lead@example.com', 'form');
+    sdk.identify('acct_A', { email: 'Lead@example.com' });
+    expect((sdk as any).userProperties.email).toBe('Lead@example.com');
+    sdk.destroy();
+  });
+});
+
+describe('kind record integrity', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    delete (window as any).datalyr;
+  });
+
+  afterEach(() => {
+    delete (window as any).datalyr;
+    jest.restoreAllMocks();
+  });
+
+  it('a kind left behind by an older SDK does not describe the new user id', async () => {
+    const first = await makeSdk();
+    first.identify('guest-uuid', {}, { provisional: true });
+    first.destroy();
+    delete (window as any).datalyr;
+    // An older build signs the user in: it rewrites dl_user_id, never the kind.
+    localStorage.setItem('dl_dl_user_id', 'acct_real');
+
+    const second = await makeSdk();
+    const events = capturePayloads(second);
+    second.track('x');
+    expect(events[0].userId).toBe('acct_real');
+    expect(events[0].data.$provisional_user_id).toBeUndefined();
+    const visitor = second.getAnonymousId();
+    second.identify('acct_other');
+    expect(second.getAnonymousId()).not.toBe(visitor); // a real switch resets
+    second.destroy();
+  });
+
+  it('a provisional identify does not overwrite a user another tab signed in', async () => {
+    const sdk = await makeSdk();
+    // Another tab signs in after this page loaded.
+    localStorage.setItem('dl_dl_user_id', 'acct_other_tab');
+    sdk.identify('guest-uuid', {}, { provisional: true });
+    expect(localStorage.getItem('dl_dl_user_id')).toBe('acct_other_tab');
+    sdk.destroy();
+  });
+
+  it('the marker is SDK-owned: super properties and caller properties cannot set it', async () => {
+    const sdk = await makeSdk();
+    const events = capturePayloads(sdk);
+    sdk.identify('acct_1');
+    sdk.setSuperProperties({ $provisional_user_id: true });
+    sdk.track('x', { $provisional_user_id: true });
+    expect(events.find((e) => e.name === 'x')!.data.$provisional_user_id).toBeUndefined();
     sdk.destroy();
   });
 });

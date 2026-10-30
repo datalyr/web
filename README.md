@@ -231,12 +231,17 @@ datalyr.identify(accountId);                          // after sign-in: same vis
 ```
 
 While a provisional id is current, every event carries `$provisional_user_id: true`. When
-the real account id follows, the SDK keeps the `visitor_id` (no `reset()`), and DATALYR
-joins the guest and the account into one person. A provisional id never replaces a
-signed-in user: `identify(guestId, {}, { provisional: true })` after `identify(accountId)`
-is ignored, so call `reset()` on logout. An email captured by auto-identify works the
-same way: a later `identify()` with a different id does not run `reset()`, and
-auto-identify never replaces a signed-in user.
+the real account id follows, the SDK keeps the `visitor_id` (no `reset()`), so the guest
+and the account stay on one browser and DATALYR can join them where the guest-to-account
+join is turned on for the workspace. A provisional id never replaces a signed-in user:
+`identify(guestId, {}, { provisional: true })` after `identify(accountId)` is ignored
+(plugin `identify` hooks are not called for it), so call `reset()` on logout. `alias()`
+does not use this rule.
+
+Auto-identify never replaces an identified visitor (a provisional guest included). A
+later `identify()` with a different id after an auto-identified email does not run
+`reset()`; unless its traits carry the same email, the captured email is dropped from
+the traits.
 
 ### reset()
 

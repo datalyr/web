@@ -11,6 +11,16 @@ const VISITOR_ID_RE = /^anon_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 
 export type UserIdKind = 'provisional' | 'auto' | null;
 
+/** 32-bit FNV-1a: ties the kind record to its user id without storing the id again. */
+function fnv1a(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16);
+}
+
 export class IdentityManager {
   /** True when this browser continued an in-app browser's visitor (measurement only). */
   adoptedFromInAppHandoff = false;
@@ -32,34 +42,64 @@ export class IdentityManager {
    *  the handle reset()/invalidateIdentity() drop, so a read that resolves
    *  after a logout or a consent withdrawal cannot land on the new identity. */
   private inFlightHydration: Promise<void> | null = null;
-  /** How firm the current user id is (`dl_user_id_kind`). null = an account the
-   *  app asserted. 'provisional' = the app's pre-login id (identify(id, traits,
-   *  { provisional: true })). 'auto' = an email auto-identify captured. Neither
-   *  soft kind is an account switch when a different id follows. */
-  private userIdKind: UserIdKind = null;
 
   constructor(options: { persistNewId?: boolean; sessionTimeout?: number } = {}) {
     this.persistNewId = options.persistNewId !== false;
     this.sessionTimeout = options.sessionTimeout ?? 30 * 60 * 1000;
     this.anonymousId = this.getOrCreateAnonymousId();
     this.userId = this.getStoredUserId();
-    this.userIdKind = IdentityManager.readUserIdKind();
   }
 
-  private static readUserIdKind(): UserIdKind {
-    const kind = storage.getString('dl_user_id_kind');
-    return kind === 'provisional' || kind === 'auto' ? kind : null;
+  // How firm a user id is. null = an account the app asserted. 'provisional' =
+  // the app's pre-login id (identify(id, traits, { provisional: true })). 'auto'
+  // = an email auto-identify captured. A soft kind is not an account switch
+  // when a different id follows.
+  //
+  // `dl_user_id_kind` is `<kind>:<hash of the user id>`, read from storage on
+  // every call, so it can only ever describe the id it was written for: an
+  // older SDK (or another tab) that changes `dl_user_id` without touching it
+  // leaves a record that no longer matches, which reads as an asserted account.
+  private static kindRecord(kind: Exclude<UserIdKind, null>, userId: string): string {
+    return `${kind}:${fnv1a(userId)}`;
   }
 
-  private persistUserIdKind(kind: UserIdKind): void {
-    this.userIdKind = kind;
-    if (kind) storage.set('dl_user_id_kind', kind);
+  private static kindFor(userId: string | null): UserIdKind {
+    if (!userId) return null;
+    const record = storage.getString('dl_user_id_kind');
+    if (!record) return null;
+    for (const kind of ['provisional', 'auto'] as const) {
+      if (record === IdentityManager.kindRecord(kind, userId)) return kind;
+    }
+    return null;
+  }
+
+  private persistUserIdKind(kind: UserIdKind, userId: string | null = this.userId): void {
+    if (kind && userId) storage.set('dl_user_id_kind', IdentityManager.kindRecord(kind, userId));
     else storage.remove('dl_user_id_kind');
   }
 
-  /** null for an asserted account (or no user); see `userIdKind`. */
+  /** The kind of the current user id; null for an asserted account or no user. */
   getUserIdKind(): UserIdKind {
-    return this.userId ? this.userIdKind : null;
+    return IdentityManager.kindFor(this.userId);
+  }
+
+  /** Marks the current user id as auto-identified (a browser identified by an
+   *  SDK older than the kind record). */
+  markAutoIdentified(userId: string): void {
+    if (this.userId === userId) this.persistUserIdKind('auto', userId);
+  }
+
+  /**
+   * Whether this browser holds a user the provisional and auto-identify guards
+   * must treat as signed in although `getUserId()` cannot show it: an email id
+   * whose encrypted copy is not hydrated yet, or an id another tab wrote after
+   * this page loaded. A provisional id never counts.
+   */
+  hasUnloadedUser(): boolean {
+    if (this.userId) return false;
+    if (storage.getString('dl_user_id_pii')) return true;
+    const stored = this.getStoredUserId();
+    return !!stored && IdentityManager.kindFor(stored) !== 'provisional';
   }
 
   /**
@@ -396,7 +436,7 @@ export class IdentityManager {
    */
   invalidateIdentity(): void {
     this.userId = null;
-    this.persistUserIdKind(null);
+    this.persistUserIdKind(null, null);
     this.piiGeneration += 1;
     this.inFlightHydration = null;
   }
@@ -521,7 +561,7 @@ export class IdentityManager {
     // Persist for future sessions. WEB-22: encrypted when the id is PII (the
     // auto-identify path makes it the raw email); plaintext otherwise.
     this.persistUserId(userId);
-    this.persistUserIdKind(kind);
+    this.persistUserIdKind(kind, userId);
 
     // Return identity link data (will be sent as $identify event)
     return {
@@ -548,7 +588,7 @@ export class IdentityManager {
     if (!previousId || previousId === this.anonymousId) {
       this.userId = userId;
       this.persistUserId(userId);
-      this.persistUserIdKind(null);
+      this.persistUserIdKind(null, userId);
     }
 
     return aliasData;
@@ -570,7 +610,7 @@ export class IdentityManager {
     // previous user's email at rest.
     storage.remove('dl_user_id_pii');
     storage.remove('dl_user_traits');
-    this.persistUserIdKind(null);
+    this.persistUserIdKind(null, null);
 
     // Generate new anonymous ID for privacy
     this.anonymousId = `anon_${generateUUID()}`;

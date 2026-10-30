@@ -377,6 +377,7 @@ class Datalyr {
           // in the IdentityManager constructor. It never overwrites an id already
           // set by an explicit identify() earlier in this page load.
           await this.identity.hydrateEncryptedUserId();
+          await this.adoptLegacyAutoIdentified();
           await this.attribution.hydrateKlaviyoProfileBinding();
           this.log('Encryption initialized, user properties loaded');
         } catch (encErr) {
@@ -561,6 +562,22 @@ class Datalyr {
    * consent also blocks setup (incl. the /account.json polling); null = no
    * Shopify signal → unchanged.
    */
+  /**
+   * A browser auto-identified before 1.9.12 holds its captured email as the user
+   * id with no kind record, so it would count as an asserted account and a
+   * later sign-in would still reset(). Recognise it by the captured-email copy.
+   */
+  private async adoptLegacyAutoIdentified(): Promise<void> {
+    const userId = this.identity.getUserId();
+    if (!userId || this.identity.getUserIdKind() !== null) return;
+    const generation = this.identity.getIdentityGeneration();
+    const captured = await storage.getEncrypted('dl_auto_identified_email', null);
+    if (this.identity.getIdentityGeneration() !== generation) return;
+    if (typeof captured === 'string' && captured.trim().toLowerCase() === userId.trim().toLowerCase()) {
+      this.identity.markAutoIdentified(userId);
+    }
+  }
+
   private startAutoIdentify(): void {
     if (this.autoIdentify || this.autoIdentifyStopped) return;
     if (this.config.autoIdentify !== true || !this.shouldTrack() || !this.consentAllowsMarketing()) return;
@@ -580,10 +597,10 @@ class Datalyr {
       // An identified page keeps its user: identify(email) over identify('acct_1')
       // used to run the account-switch reset(), rotating the visitor id and
       // wiping first-touch attribution of a signed-in user who typed an email
-      // into a form. Only a guest (no user, or a provisional id) takes the email.
-      const currentKind = this.identity.getUserIdKind();
-      if (this.identity.getUserId() && currentKind !== 'provisional') {
-        this.log('Auto-identify skipped: a user is already identified');
+      // into a form. A provisional guest keeps its id too: an email owner next
+      // to the guest blocks the server's guest→account conversion (§2.10).
+      if (this.identity.getUserId() || this.identity.hasUnloadedUser()) {
+        this.log('Auto-identify skipped: the visitor is already identified');
         return;
       }
 
@@ -887,18 +904,32 @@ class Datalyr {
       // integrator forgot to call reset() on logout.
       //
       // Only an asserted account is that boundary. A provisional (pre-login) id
-      // or an auto-identified email followed by a different id is the same
-      // visitor signing in: same browser, and the server's §2.10 conversion
-      // joins the two on this visitor id, so it must not rotate.
+      // or an auto-identified email followed by a different id is a sign-in on
+      // the same browser, so the visitor id stays: for a provisional id that is
+      // what lets the server's §2.10 conversion join the guest to the account.
       const currentUserId = this.identity.getUserId();
       const currentKind = this.identity.getUserIdKind();
-      if (kind === 'provisional' && currentUserId && currentKind !== 'provisional') {
+      if (kind === 'provisional' &&
+          ((currentUserId && currentKind !== 'provisional') || this.identity.hasUnloadedUser())) {
         // A guest id never replaces a signed-in user (apps re-send their
         // pre-login id on every launch); the app calls reset() on logout.
+        // Plugin identify hooks are not called for an ignored identify.
         this.log('Provisional identify ignored: a user is already identified:', userId);
         return;
       }
-      if (currentUserId && currentUserId !== userId && currentKind === null) this.reset();
+      if (currentUserId && currentUserId !== userId) {
+        if (currentKind === null) {
+          this.reset();
+        } else if (currentKind === 'auto' &&
+            String(traits.email ?? '').trim().toLowerCase() !== currentUserId.trim().toLowerCase()) {
+          // A different person may be signing in on this browser: keep the
+          // visit's attribution, but not the captured email, which would
+          // otherwise reach their Meta advanced matching and checkout prefill.
+          delete this.userProperties.email;
+          delete this.userProperties.auto_identify_source;
+          storage.remove('dl_auto_identified_email');
+        }
+      }
 
       // FSR-53: do NOT rotate the session id on identify(). 'Session fixation' is an
       // auth-credential concept; a client-generated analytics session_id is not one.
@@ -2126,8 +2157,11 @@ class Datalyr {
 
     // §2.10: the current user id is the app's pre-login id. Set after the caller's
     // properties, so it always reflects the SDK's own state.
+    // SDK-owned: a caller or super property cannot set it.
     if (this.identity.getUserIdKind() === 'provisional') {
       eventData.$provisional_user_id = true;
+    } else {
+      delete eventData.$provisional_user_id;
     }
 
     // Add attribution data (caller wins on collisions)
