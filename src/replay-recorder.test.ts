@@ -349,6 +349,42 @@ describe('replay recorder', () => {
     expect(mockRrweb.full).toHaveBeenCalledWith(true);
   });
 
+  test('wheel, keys, pointer and touch count as activity: a reading visitor is not idle', async () => {
+    recorder.start(ctx);
+    for (const type of ['wheel', 'keydown', 'pointerdown', 'touchstart']) {
+      jest.setSystemTime(Date.now() + IDLE_PAUSE_MS - 1000);
+      window.dispatchEvent(new Event(type));
+    }
+    fetchMock.mockClear();
+    mockRrweb.emit!(inc(3, { id: 1, x: 0, y: 900 })); // rrweb scroll, ~20 min in
+    jest.advanceTimersByTime(FLUSH_INTERVAL_MS);
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalled();
+    expect(decode(fetchMock.mock.calls[0]).e.some((e: any) => e.type === 3 && e.data.source === 3)).toBe(true);
+  });
+
+  test('a wheel after an idle pause resumes recording with a full snapshot; programmatic scroll does not', async () => {
+    recorder.start(ctx);
+    jest.setSystemTime(Date.now() + IDLE_PAUSE_MS + 1000);
+    mockRrweb.emit!(inc(0, { adds: [{}], removes: [], texts: [], attributes: [] })); // goes idle
+    mockRrweb.full.mockClear();
+    window.dispatchEvent(new Event('scroll'));
+    jest.advanceTimersByTime(1);
+    expect(mockRrweb.full).not.toHaveBeenCalled();
+    window.dispatchEvent(new Event('wheel'));
+    jest.advanceTimersByTime(1);
+    expect(mockRrweb.full).toHaveBeenCalledWith(true);
+  });
+
+  test('stopped recorder ignores input', () => {
+    recorder.start(ctx);
+    recorder.stop(true);
+    mockRrweb.full.mockClear();
+    window.dispatchEvent(new Event('wheel'));
+    jest.advanceTimersByTime(1);
+    expect(mockRrweb.full).not.toHaveBeenCalled();
+  });
+
   test('mutation throttle: one node rewritten in a loop is capped at the bucket', async () => {
     recorder.start(ctx);
     for (let i = 0; i < 300; i++) {
