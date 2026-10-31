@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.9.13
+
+- Session replay: page scrolling, the mouse wheel and keyboard keys now count as activity. Before, a visitor who only read (wheel or keys, no mouse movement or clicks) went idle after 5 minutes: the recorder stopped sending, the replay server closed the session after 35 minutes without a chunk, and the rest of the visit under the same session id was refused. Element scrollers (auto-advancing carousels) still do not count.
+
 ## 1.9.12
 
 - Provisional (pre-login) ids: `identify(guestId, traits, { provisional: true })`. While the guest id is current every event carries `event_data.$provisional_user_id = true` (SDK-owned: caller and super properties cannot set or keep it). The later `identify(accountId)` keeps the `visitor_id` (no account-switch `reset()`) and stops the marker, so the guest and the account stay on one browser for DATALYR's guest-to-account join (§2.10; the server reads the marker in a later release, until then the join runs only where it is turned on for the workspace). A provisional identify while a signed-in user is current (including one another tab signed in, or an email id still being decrypted) is ignored; `reset()` clears it. The kind is stored in `dl_user_id_kind` as `<kind>:<hash of a per-browser salt and the user id>` (`account` for an asserted id; salt in `dl_user_id_kind_salt`), so it never describes a different id (another tab, an older SDK) and cannot be tested against candidate emails. No `$alias` is sent.

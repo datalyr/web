@@ -337,11 +337,7 @@ export class Recorder implements ReplayRecorder {
     if (event.type === EVENT_INCREMENTAL) {
       const source = (event.data as { source?: number }).source ?? -1;
       if (USER_SOURCES.has(source)) {
-        this.lastActive = now;
-        if (this.idle) {
-          this.idle = false;
-          setTimeout(() => this.fullSnapshot(), 0);
-        }
+        this.markActive(now);
       } else if (now - this.lastActive > IDLE_PAUSE_MS) {
         this.idle = true;
       }
@@ -351,6 +347,21 @@ export class Recorder implements ReplayRecorder {
       return; // no periodic snapshots of an idle tab; one is taken when activity resumes
     }
     this.push(event);
+  }
+
+  /**
+   * The visitor did something. Leaving idle takes a fresh full snapshot (the
+   * idle-time mutations were dropped). Called for rrweb's user sources and for
+   * page scroll / wheel / keys, which rrweb's sources miss: a visitor reading with
+   * the wheel or keyboard must not look idle, or the server closes the session
+   * (35 min without a chunk) while the SDK keeps its id.
+   */
+  private markActive(now: number): void {
+    this.lastActive = now;
+    if (this.idle) {
+      this.idle = false;
+      setTimeout(() => this.fullSnapshot(), 0);
+    }
   }
 
   private push(event: eventWithTime | HeatItem): void {
@@ -552,6 +563,13 @@ export class Recorder implements ReplayRecorder {
       const reason = (e as PromiseRejectionEvent).reason;
       this.error(reason && typeof reason === 'object' && 'message' in reason ? String(reason.message) : String(reason));
     });
+    // Page scroll only (no capture: element scrollers such as auto-advancing
+    // carousels do not bubble to window).
+    const active = (): void => { if (this.recording) this.markActive(Date.now()); };
+    for (const type of ['scroll', 'wheel', 'keydown']) {
+      window.addEventListener(type, active, { passive: true });
+      this.removers.push(() => window.removeEventListener(type, active));
+    }
     on(window, 'resize', () => {
       if (this.resizeTimer) return;
       this.resizeTimer = setTimeout(() => { this.resizeTimer = null; this.pageHeight(); }, RESIZE_THROTTLE_MS);
