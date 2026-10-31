@@ -352,7 +352,7 @@ export class Recorder implements ReplayRecorder {
   /**
    * The visitor did something. Leaving idle takes a fresh full snapshot (the
    * idle-time mutations were dropped). Called for rrweb's user sources and for
-   * page scroll / wheel / keys, which rrweb's sources miss: a visitor reading with
+   * wheel / keys / pointer / touch, which rrweb's sources miss: a visitor reading with
    * the wheel or keyboard must not look idle, or the server closes the session
    * (35 min without a chunk) while the SDK keeps its id.
    */
@@ -563,10 +563,10 @@ export class Recorder implements ReplayRecorder {
       const reason = (e as PromiseRejectionEvent).reason;
       this.error(reason && typeof reason === 'object' && 'message' in reason ? String(reason.message) : String(reason));
     });
-    // Page scroll only (no capture: element scrollers such as auto-advancing
-    // carousels do not bubble to window).
+    // Inputs only a person makes (wheel, keys, pointer, touch): a 'scroll' event
+    // also fires for window.scrollTo, which would keep an unattended page active.
     const active = (): void => { if (this.recording) this.markActive(Date.now()); };
-    for (const type of ['scroll', 'wheel', 'keydown']) {
+    for (const type of ['wheel', 'keydown', 'pointerdown', 'touchstart']) {
       window.addEventListener(type, active, { passive: true });
       this.removers.push(() => window.removeEventListener(type, active));
     }

@@ -2,7 +2,7 @@
 
 ## 1.9.13
 
-- Session replay: page scrolling, the mouse wheel and keyboard keys now count as activity. Before, a visitor who only read (wheel or keys, no mouse movement or clicks) went idle after 5 minutes: the recorder stopped sending, the replay server closed the session after 35 minutes without a chunk, and the rest of the visit under the same session id was refused. Element scrollers (auto-advancing carousels) still do not count.
+- Session replay: the mouse wheel, keyboard keys, pointer presses and touches now count as activity. Before, a visitor who only read (wheel or keys, no mouse movement or clicks) went idle after 5 minutes: the recorder stopped sending, the replay server closed the session after 35 minutes without a chunk, and the rest of the visit under the same session id was refused. Scroll events alone do not count, so a page that scrolls itself (`window.scrollTo` on a timer) still goes idle.
 
 ## 1.9.12
 
