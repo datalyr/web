@@ -12,6 +12,11 @@ const DEFAULT_CRITICAL_EVENTS = ['purchase', 'signup', 'subscribe', 'lead', 'con
 // Default high priority events that use faster batching
 const DEFAULT_HIGH_PRIORITY_EVENTS = ['add_to_cart', 'begin_checkout', 'view_item', 'search'];
 
+// Identity events. A critical event never leaves ahead of one of these still waiting in
+// the live queue: ingest needs the identity (e.g. the email on `$identify`) on the profile
+// before it forwards the conversion to an ad platform. See enqueue().
+const IDENTITY_EVENTS = ['$identify', '$alias'];
+
 // WEB-23: how long to stop sending after a 403 (origin not allowed). Long enough not to
 // hammer a rejecting origin, short enough that a server-side config fix is picked up
 // within the same visit. A 403 carries no Retry-After, so this is fixed.
@@ -133,20 +138,35 @@ export class EventQueue {
     // (the most plausible moment after checkout) lost the purchase permanently: forceFlush
     // / destroy never saw it. Server-side event_id dedup makes the at-least-once re-send
     // safe.
+    //
+    // Identity first: an `$identify` / `$alias` tracked just before (identify(), then
+    // track('signup')) is still waiting in the live queue for the flush timer, so the
+    // critical event used to reach ingest first and was forwarded to Meta etc. without
+    // the email. The queued events up to and including the last identity event now ride
+    // in the SAME batch, ahead of the critical event and in their original order, so they
+    // are delivered (or fail, or are parked) together. With no identity event queued the
+    // batch is just [event], as before.
     if (this.config.criticalEvents.includes(eventName)) {
       this.log('Critical event, sending immediately:', eventName);
 
-      this.persistCriticalEvent(event);
+      const batch = [...this.takeQueuedIdentityPrefix(), event];
+      if (batch.length > 1) {
+        this.log(`Sending ${batch.length - 1} queued event(s) ahead of critical event (identity first):`, eventName);
+      }
+      // The events taken from the live queue are no longer in it, so an unload during the
+      // send must find them in the offline queue, like the critical event. (FSR-16)
+      this.persistCriticalEvents(batch);
+      const ids = batch.map(e => e.event_id);
 
-      this.sendBatch([event])
+      this.sendBatch(batch)
         .then(() => {
-          // Delivered — drop the persisted copy so it isn't replayed next load.
-          this.removeFromOfflineQueue(event.event_id);
+          // Delivered — drop the persisted copies so they aren't replayed next load.
+          this.removeFromOfflineQueue(ids);
         })
         .catch((error) => {
           if (error instanceof PermanentError) {
             this.log('Critical event permanently rejected, dropping:', eventName, error);
-            this.removeFromOfflineQueue(event.event_id);
+            this.removeFromOfflineQueue(ids);
             return;
           }
           // Leave it persisted: the periodic drain + next-load drain retry it, and an
@@ -563,14 +583,34 @@ export class EventQueue {
   }
 
   /**
-   * Persist a critical event to the offline queue BEFORE its immediate send, so it
-   * survives an unload during the send/backoff window. Deduped on event_id so a
-   * re-enqueue can't double-store it. (FSR-16)
+   * Take the live-queue events that must leave no later than a critical event arriving
+   * now: everything up to and including the last queued identity event, in order. Empty
+   * when no identity event is queued. The in-flight batch at the front of the queue
+   * (already on the wire in _flush) is left alone: _flush removes exactly that front
+   * slice when its send settles, and forceFlush skips it.
    */
-  private persistCriticalEvent(event: IngestEventPayload): void {
+  private takeQueuedIdentityPrefix(): IngestEventPayload[] {
+    const start = this.inFlight.length;
+    for (let i = this.queue.length - 1; i >= start; i--) {
+      if (IDENTITY_EVENTS.includes(this.queue[i].event_name)) {
+        return this.queue.splice(start, i - start + 1);
+      }
+    }
+    return [];
+  }
+
+  /**
+   * Persist a critical event (and the identity events sent ahead of it) to the offline
+   * queue BEFORE the immediate send, so they survive an unload during the send/backoff
+   * window, in send order. Deduped on event_id so a re-enqueue can't double-store one.
+   * (FSR-16)
+   */
+  private persistCriticalEvents(events: IngestEventPayload[]): void {
     if (!this.enabled) return;
-    if (this.offlineQueue.some(e => e.event_id === event.event_id)) return;
-    this.offlineQueue.push(event);
+    for (const event of events) {
+      if (this.offlineQueue.some(e => e.event_id === event.event_id)) continue;
+      this.offlineQueue.push(event);
+    }
     if (this.offlineQueue.length > this.config.maxOfflineQueueSize) {
       this.offlineQueue.splice(0, this.offlineQueue.length - this.config.maxOfflineQueueSize);
     }
@@ -578,12 +618,13 @@ export class EventQueue {
   }
 
   /**
-   * Remove a delivered/dropped event from the offline queue by event_id, and clear the
+   * Remove delivered/dropped events from the offline queue by event_id, and clear the
    * persisted copy when the queue empties. (FSR-16)
    */
-  private removeFromOfflineQueue(eventId: string): void {
+  private removeFromOfflineQueue(eventIds: string[]): void {
     const before = this.offlineQueue.length;
-    this.offlineQueue = this.offlineQueue.filter(e => e.event_id !== eventId);
+    const drop = new Set(eventIds);
+    this.offlineQueue = this.offlineQueue.filter(e => !drop.has(e.event_id));
     if (this.offlineQueue.length === before) return;
     if (this.offlineQueue.length === 0) {
       storage.remove(this.OFFLINE_QUEUE_KEY);

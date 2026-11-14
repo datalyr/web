@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.9.14
+
+- Identity before conversions: a critical event (`criticalEvents`: `purchase`, `signup`, `subscribe`, `lead`, `conversion` by default) is sent at once, skipping the batch, but an `$identify` tracked just before it waited in the queue for the flush interval (5 s) or a full batch. So `identify(userId, { email })` followed by a critical `track()` reached ingest conversion first, and a conversion rule forwarding it to Meta (a sign-up as `CompleteRegistration`, say) could go out before the email was on the profile, lowering match quality. Now, when an `$identify` or `$alias` is still queued, the queued events up to and including the last of them are sent in the same request as the critical event, ahead of it and in their original order, so they arrive (or fail and are retried) together. Events queued after the last identity event stay in the batch as before, and with no identity event queued the critical event goes out alone, as before. The events sent ahead are persisted with the critical event before the send and removed on delivery (FSR-16), so an unload mid-send keeps them; a permanent 4xx drops the whole request (the identity events with it); 429 / 403 backoff and duplicate suppression are unchanged. An `$identify` already in flight in a batch send is not sent again, and one parked in the offline queue after a failed send is not pulled forward. Sites calling `flush()` before a critical `track()` as a workaround can drop it.
+
 ## 1.9.13
 
 - Session replay: the mouse wheel, keyboard keys, pointer presses and touches now count as activity. Before, a visitor who only read (wheel or keys, no mouse movement or clicks) went idle after 5 minutes: the recorder stopped sending, the replay server closed the session after 35 minutes without a chunk, and the rest of the visit under the same session id was refused. Scroll events alone do not count, so a page that scrolls itself (`window.scrollTo` on a timer) still goes idle.
