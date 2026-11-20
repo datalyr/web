@@ -26,7 +26,8 @@ import {
   isDoNotTrackEnabled,
   isGlobalPrivacyControlEnabled,
   getReferrerData,
-  redactUrl
+  redactUrl,
+  redactPath
 } from './utils';
 import type {
   DatalyrConfig,
@@ -1056,7 +1057,7 @@ class Datalyr {
     const pageData: PageProperties = {
       title: document.title,
       url: redactUrl(window.location.href),
-      path: window.location.pathname,
+      path: redactPath(window.location.pathname),
       search: redactUrl(window.location.search),
       referrer: redactUrl(document.referrer),
       ...properties
@@ -2208,7 +2209,7 @@ class Datalyr {
     // redacted — secret/PII query-param values must not ship on events.
     assignMissing(eventData, {
       url: redactUrl(window.location.href),
-      path: window.location.pathname,
+      path: redactPath(window.location.pathname),
       referrer: redactUrl(document.referrer),
       title: document.title,
       screen_width: screen.width,
