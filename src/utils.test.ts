@@ -3,7 +3,7 @@
  * and redactUrl (9.A.4).
  */
 
-import { getRegistrableDomain, sanitizeEventData, redactUrl } from './utils';
+import { getRegistrableDomain, sanitizeEventData, redactUrl, redactPath } from './utils';
 
 describe('getRegistrableDomain (FSR-47)', () => {
   test('plain .com host → eTLD+1', () => {
@@ -204,5 +204,35 @@ describe('redactUrl (9.A.4)', () => {
     expect(redactUrl(undefined as any)).toBe(undefined);
     expect(redactUrl(null as any)).toBe(null);
     expect(redactUrl('not a url ? %E0%A4%A but still fine')).toContain('not a url');
+  });
+});
+
+describe('redactPath (1.9.15, services-b-132)', () => {
+  test('a token after a reset marker is redacted', () => {
+    expect(redactPath('/reset/9f8a7b6c5d4e3f2a1b0c')).toBe('/reset/__redacted__');
+    expect(redactPath('/account/verify-email/abcDEF1234567890xyz')).toBe('/account/verify-email/__redacted__');
+  });
+
+  test('an email segment is redacted, raw or percent-encoded', () => {
+    expect(redactPath('/u/jane@example.com/orders')).toBe('/u/__redacted__/orders');
+    expect(redactPath('/u/jane%40example.com')).toBe('/u/__redacted__');
+  });
+
+  test('a JWT segment is redacted anywhere', () => {
+    expect(redactPath('/cb/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln')).toBe('/cb/__redacted__');
+  });
+
+  test('ordinary paths are untouched', () => {
+    for (const p of ['/', '/products/blue-shirt-2024', '/orders/1234567890123456', '/reset', '/blog/how-to-reset', '/@brand.store', '/verify/short1']) {
+      expect(redactPath(p)).toBe(p);
+    }
+  });
+
+  test('redactUrl redacts the path part of a full URL, keeps the host', () => {
+    expect(redactUrl('https://shop.com/reset/9f8a7b6c5d4e3f2a1b0c?utm_source=email')).toBe(
+      'https://shop.com/reset/__redacted__?utm_source=email'
+    );
+    expect(redactUrl('https://jane@example.com.shop.com/a')).toBe('https://jane@example.com.shop.com/a');
+    expect(redactUrl('https://shop.com/u/jane@example.com')).toBe('https://shop.com/u/__redacted__');
   });
 });

@@ -350,6 +350,8 @@ export interface IngestBatchPayload {
   events: IngestEventPayload[];
   batchId: string;
   timestamp: string;
+  /** 1.9.15: events this browser dropped since its last delivered batch (omitted when 0). */
+  dropped_since_last?: number;
 }
 
 // Network status

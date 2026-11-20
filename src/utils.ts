@@ -282,6 +282,52 @@ function redactKvPairs(s: string): { out: string; mutated: boolean } {
  * shape. Returns the input unchanged when nothing sensitive matched or on any parse
  * failure — redaction must never break tracking.
  */
+// 1.9.15 (services-b-132): path segments that name a one-time secret follow one of these
+// words (`/reset/<token>`, `/verify-email/<token>`, `/invite/<code>`).
+const SECRET_PATH_MARKERS = new Set([
+  'reset', 'reset-password', 'password-reset', 'resetpassword', 'password',
+  'verify', 'verify-email', 'email-verification', 'verification', 'confirm', 'confirmation',
+  'activate', 'activation', 'invite', 'invitation', 'magic', 'magic-link', 'magiclink',
+  'token', 'auth', 'login', 'signin', 'unsubscribe', 'recover', 'recovery'
+]);
+const JWT_RE = /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+
+function decodeSegment(seg: string): string {
+  try { return decodeURIComponent(seg); } catch { return seg; }
+}
+
+/** A segment that looks like a generated secret: 16+ token characters with a digit and a letter. */
+function looksLikeToken(seg: string): boolean {
+  return seg.length >= 16 && /^[A-Za-z0-9._~=+-]+$/.test(seg) && /[0-9]/.test(seg) && /[A-Za-z]/.test(seg);
+}
+
+/**
+ * 1.9.15 (services-b-132): redact path segments that carry personal data or one-time
+ * secrets before they leave the browser. An email (`/u/jane@x.com`), a JWT anywhere, and
+ * a token-shaped segment right after a secret marker (`/reset/<token>`) become
+ * `__redacted__`. Product, article and order paths are left as they are.
+ */
+export function redactPath(path: string): string {
+  if (!path || typeof path !== 'string') return path;
+  const segments = path.split('/');
+  let mutated = false;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (!seg) continue;
+    const decoded = decodeSegment(seg);
+    const prev = i > 0 ? decodeSegment(segments[i - 1]).toLowerCase() : '';
+    if (
+      /[^\s@/]+@[^\s@/]+\.[^\s@/]+/.test(decoded) ||
+      JWT_RE.test(decoded) ||
+      (SECRET_PATH_MARKERS.has(prev) && looksLikeToken(decoded))
+    ) {
+      segments[i] = '__redacted__';
+      mutated = true;
+    }
+  }
+  return mutated ? segments.join('/') : path;
+}
+
 export function redactUrl(url: string): string {
   if (!url || typeof url !== 'string') return url;
   const hashStart = url.indexOf('#');
@@ -289,13 +335,19 @@ export function redactUrl(url: string): string {
   // A query string exists only when '?' appears BEFORE the fragment — a '?' after '#' is
   // part of the fragment per the URL grammar (e.g. a SPA hash-route `#/reset?token=…`).
   const queryStart = (qIdx !== -1 && (hashStart === -1 || qIdx < hashStart)) ? qIdx : -1;
-  if (queryStart === -1 && hashStart === -1) return url; // nothing to redact
   try {
-    const base = url.slice(0, queryStart !== -1 ? queryStart : (hashStart !== -1 ? hashStart : url.length));
+    const rawBase = url.slice(0, queryStart !== -1 ? queryStart : (hashStart !== -1 ? hashStart : url.length));
+    // 1.9.15: redact the path part of the URL too (after the scheme and host, if any).
+    const originMatch = /^[a-z][a-z0-9+.-]*:\/\/[^/]*/i.exec(rawBase);
+    const origin = originMatch ? originMatch[0] : '';
+    const pathPart = rawBase.slice(origin.length);
+    const redactedPath = redactPath(pathPart);
+    const base = origin + redactedPath;
+    if (queryStart === -1 && hashStart === -1) return redactedPath === pathPart ? url : base;
     const query = queryStart === -1 ? '' : url.slice(queryStart + 1, hashStart === -1 ? url.length : hashStart);
     const rawFragment = hashStart === -1 ? '' : url.slice(hashStart + 1);
 
-    let mutated = false;
+    let mutated = redactedPath !== pathPart;
 
     let queryOut = query;
     if (query) {
