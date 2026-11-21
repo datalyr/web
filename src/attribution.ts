@@ -4,7 +4,7 @@
  */
 
 import { storage, cookies } from './storage';
-import { getAllQueryParams, getRegistrableDomain, isHostOrSubdomain, redactUrl } from './utils';
+import { getAllQueryParams, getRegistrableDomain, isHostOrSubdomain, redactUrl, redactPath } from './utils';
 import type { Attribution, TouchPoint } from './types';
 
 export class AttributionManager {
@@ -375,7 +375,7 @@ export class AttributionManager {
 
     // Capture landing page (redacted — see referrer note above)
     attribution.landingPage = redactUrl(window.location.href);
-    attribution.landingPath = window.location.pathname;
+    attribution.landingPath = redactPath(window.location.pathname);
 
     // Determine source if not explicitly set
     if (!attribution.source) {

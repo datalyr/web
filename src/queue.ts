@@ -22,6 +22,15 @@ const IDENTITY_EVENTS = ['$identify', '$alias'];
 // within the same visit. A 403 carries no Retry-After, so this is fixed.
 const ORIGIN_REJECTED_BACKOFF_MS = 5 * 60 * 1000;
 
+// 1.9.15 (services-b-135): a send that hangs used to hold the flush lock forever while the
+// live queue grew behind it. After this long the request is aborted and takes the normal
+// transient-failure path (fallback endpoint, backoff, then the offline queue).
+const SEND_TIMEOUT_MS = 15_000;
+
+// 1.9.15: how many event ids this tab remembers as delivered or dropped, so merging with
+// another tab's stored backlog never brings them back.
+const MAX_SETTLED_IDS = 2000;
+
 // Backpressure, not failure — routed to the offline queue WITHOUT retrying (which would
 // storm an already-overloaded server) and gated behind rateLimitedUntil. Raised for a 429
 // and, since WEB-23, for a 403: both mean "not now", not "never". See sendBatch.
@@ -73,6 +82,18 @@ export class EventQueue {
   // here and exposed via getStats() so a drop is at least observable.
   private droppedEventCount = 0;
   private lastDropStatus: number | null = null;
+  // 1.9.15: events dropped (permanent rejection, backlog overflow) and not yet reported to
+  // ingest. Sent as `dropped_since_last` on the next delivered batch, then cleared. Kept in
+  // its own storage key so a drop at unload is still reported on the next load; the stored
+  // backlog itself keeps the plain-array format older scripts read.
+  private droppedSinceLast = 0;
+  private DROPPED_KEY = 'dl_offline_dropped';
+  // 1.9.15 (services-b-127): ids this tab delivered or dropped. The stored backlog is shared
+  // by every tab of the origin, so each save merges with what is stored; these ids are left
+  // out of the merge so a delivered event is not written back.
+  private settledIds = new Set<string>();
+  // 1.9.15: false while the last backlog save was refused by the browser (quota full).
+  private offlinePersisted = true;
 
   constructor(config: any) {
     // Coerce numeric config to sane values. The old `config.X || default` both turned a
@@ -103,6 +124,8 @@ export class EventQueue {
     };
 
     this.loadOfflineQueue();
+    const storedDropped = Number(storage.get(this.DROPPED_KEY, 0));
+    this.droppedSinceLast = Number.isFinite(storedDropped) && storedDropped > 0 ? Math.floor(storedDropped) : 0;
     this.setupNetworkListeners();
     this.startPeriodicFlush();
 
@@ -166,6 +189,7 @@ export class EventQueue {
         .catch((error) => {
           if (error instanceof PermanentError) {
             this.log('Critical event permanently rejected, dropping:', eventName, error);
+            this.recordDrop(batch.length, error.status);
             this.removeFromOfflineQueue(ids);
             return;
           }
@@ -339,8 +363,7 @@ export class EventQueue {
       // FSR-55: don't park a permanently-rejected batch — it would never succeed and
       // would block the offline drain. Drop it.
       if (error instanceof PermanentError) {
-        this.droppedEventCount += events.length;
-        this.lastDropStatus = error.status;
+        this.recordDrop(events.length, error.status);
         // console.warn, not this.log: a silent drop is the failure mode that let the
         // 2026-07-13 outage run for 11 days. This must be visible without debug mode.
         console.warn(
@@ -359,10 +382,14 @@ export class EventQueue {
    * Send batch of events
    */
   private async sendBatch(events: IngestEventPayload[], retries = 0, endpointIndex = 0): Promise<void> {
+    // 1.9.15: report events this browser had to drop since the last delivered batch.
+    // Ingest ignores unknown batch-level keys, so this is safe before ingest reads it.
+    const reportedDropped = this.droppedSinceLast;
     const batchPayload: IngestBatchPayload = {
       events,
       batchId: generateUUID(),
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      ...(reportedDropped > 0 ? { dropped_since_last: reportedDropped } : {})
     };
 
     // Get current endpoint (main or fallback)
@@ -389,19 +416,33 @@ export class EventQueue {
       /* malformed endpoint — leave false */
     }
 
+    let splitAfter413 = false;
     try {
-      const response = await fetch(currentEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Batch-Size': events.length.toString()
-        },
-        body,
-        keepalive: useKeepalive,
-        ...(firstPartyEndpoint ? { credentials: 'include' as RequestCredentials } : {})
-      });
+      // 1.9.15 (services-b-135): abort a send that has not answered in SEND_TIMEOUT_MS.
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timeout = controller ? setTimeout(() => controller.abort(), SEND_TIMEOUT_MS) : null;
+      let response: Response;
+      try {
+        response = await fetch(currentEndpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Batch-Size': events.length.toString()
+          },
+          body,
+          keepalive: useKeepalive,
+          ...(firstPartyEndpoint ? { credentials: 'include' as RequestCredentials } : {}),
+          ...(controller ? { signal: controller.signal } : {})
+        });
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
 
-      if (!response.ok) {
+      if (response.status === 413 && events.length > 1) {
+        // 1.9.15 (services-b-125): a batch over ingest's size limit is not a bad batch.
+        // Send it again in two halves (below, outside this catch) instead of dropping it.
+        splitAfter413 = true;
+      } else if (!response.ok) {
         // Handle rate limiting
         if (response.status === 429) {
           const retryAfter = parseInt(response.headers.get('Retry-After') || '60');
@@ -442,7 +483,10 @@ export class EventQueue {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      this.log(`Batch sent successfully to ${currentEndpoint}: ${events.length} events`);
+      if (!splitAfter413) {
+        this.log(`Batch sent successfully to ${currentEndpoint}: ${events.length} events`);
+        if (reportedDropped > 0) this.clearReportedDrops(reportedDropped);
+      }
     } catch (error) {
       // A 429 is deliberate backpressure and a 4xx is permanent — do NOT retry either
       // (neither fallback nor backoff). Propagate so the caller routes them correctly
@@ -468,6 +512,99 @@ export class EventQueue {
 
       throw error;
     }
+
+    if (splitAfter413) {
+      const mid = Math.ceil(events.length / 2);
+      this.log(`Batch of ${events.length} too large (413); sending as ${mid} + ${events.length - mid}`);
+      await this.sendSplitHalf(events.slice(0, mid), endpointIndex);
+      await this.sendSplitHalf(events.slice(mid), endpointIndex);
+    }
+  }
+
+  /**
+   * Send one half of a batch split after a 413. A half that is itself permanently
+   * rejected (one event over the limit, a 400) is dropped and counted HERE, so the other
+   * half still goes out and the caller sees the batch as handled. Any other failure
+   * propagates: the caller parks the whole batch, and the half already delivered is sent
+   * again later under the same event_ids (ingest dedupes on event_id).
+   */
+  private async sendSplitHalf(events: IngestEventPayload[], endpointIndex: number): Promise<void> {
+    try {
+      await this.sendBatch(events, 0, endpointIndex);
+    } catch (error) {
+      if (error instanceof PermanentError) {
+        this.recordDrop(events.length, error.status);
+        console.warn(
+          `[Datalyr Queue] Dropped ${events.length} events — permanent error ${error.status}. ` +
+          `${this.droppedEventCount} dropped this session.`
+        );
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Count events this browser gave up on (permanent rejection, backlog overflow). They
+   * are reported to ingest as `dropped_since_last` on the next delivered batch.
+   */
+  private recordDrop(count: number, status: number | null = null): void {
+    if (count <= 0) return;
+    this.droppedEventCount += count;
+    if (status !== null) this.lastDropStatus = status;
+    this.droppedSinceLast += count;
+    storage.set(this.DROPPED_KEY, this.droppedSinceLast);
+  }
+
+  /** A batch carrying `dropped_since_last: n` was delivered: n drops are reported. */
+  private clearReportedDrops(reported: number): void {
+    this.droppedSinceLast = Math.max(0, this.droppedSinceLast - reported);
+    if (this.droppedSinceLast === 0) storage.remove(this.DROPPED_KEY);
+    else storage.set(this.DROPPED_KEY, this.droppedSinceLast);
+  }
+
+  private isProtectedEvent(event: IngestEventPayload): boolean {
+    return this.config.criticalEvents.includes(event.event_name) || IDENTITY_EVENTS.includes(event.event_name);
+  }
+
+  /**
+   * 1.9.15 (services-b-127): cap a backlog at maxOfflineQueueSize, dropping the OLDEST
+   * ordinary events first. Critical events (purchase, lead, …) and the identity events that
+   * travel with them are dropped only when nothing else is left to drop. Order is kept.
+   */
+  private capOffline(list: IngestEventPayload[]): { kept: IngestEventPayload[]; dropped: IngestEventPayload[] } {
+    const excess = list.length - this.config.maxOfflineQueueSize;
+    if (excess <= 0) return { kept: list, dropped: [] };
+    const drop = new Set<number>();
+    for (let i = 0; i < list.length && drop.size < excess; i++) {
+      if (!this.isProtectedEvent(list[i])) drop.add(i);
+    }
+    for (let i = 0; i < list.length && drop.size < excess; i++) {
+      drop.add(i);
+    }
+    const kept: IngestEventPayload[] = [];
+    const dropped: IngestEventPayload[] = [];
+    list.forEach((e, i) => (drop.has(i) ? dropped : kept).push(e));
+    return { kept, dropped };
+  }
+
+  private markSettled(events: IngestEventPayload[]): void {
+    for (const e of events) {
+      if (!e || !e.event_id) continue;
+      this.settledIds.delete(e.event_id);
+      this.settledIds.add(e.event_id);
+    }
+    while (this.settledIds.size > MAX_SETTLED_IDS) {
+      const oldest = this.settledIds.values().next();
+      if (oldest.done) break;
+      this.settledIds.delete(oldest.value);
+    }
+  }
+
+  /** The stored backlog, as written by any tab (or an older script). */
+  private readStoredOffline(): IngestEventPayload[] {
+    const stored = storage.get(this.OFFLINE_QUEUE_KEY, []);
+    return Array.isArray(stored) ? stored.filter(e => e && typeof e === 'object' && e.event_id) : [];
   }
 
   /**
@@ -488,6 +625,34 @@ export class EventQueue {
       this.networkStatus.lastOfflineAt = Date.now();
       this.log('Network connection lost');
     });
+
+    // 1.9.15 (services-b-127): a terminal forceFlush (pagehide) persists the backlog and
+    // empties memory. When the page comes back from the back/forward cache it is NOT
+    // reloaded, so memory stayed empty and the persisted events waited for some later
+    // page load. Reload them from storage and drain.
+    window.addEventListener('pageshow', (e: PageTransitionEvent) => {
+      if (!e || !e.persisted) return;
+      this.reloadOfflineQueue();
+    });
+  }
+
+  /**
+   * Merge the stored backlog into memory (events this tab does not hold and has not
+   * delivered or dropped), then drain. Used when a page returns from the bfcache.
+   */
+  reloadOfflineQueue(): void {
+    if (!this.enabled) return;
+    const have = new Set(this.offlineQueue.map(e => e.event_id));
+    for (const e of this.readStoredOffline()) {
+      if (have.has(e.event_id) || this.settledIds.has(e.event_id)) continue;
+      have.add(e.event_id);
+      this.offlineQueue.push(e);
+    }
+    const stored = Number(storage.get(this.DROPPED_KEY, 0));
+    if (Number.isFinite(stored) && stored > this.droppedSinceLast) this.droppedSinceLast = Math.floor(stored);
+    if (this.networkStatus.isOnline && this.offlineQueue.length > 0) {
+      setTimeout(() => this.processOfflineQueue(), 1000);
+    }
   }
 
   /**
@@ -565,15 +730,10 @@ export class EventQueue {
         this.queue = [];
       }
 
-      // Issue #33: Enforce limit here, not just in saveOfflineQueue
-      if (this.offlineQueue.length > this.config.maxOfflineQueueSize) {
-        const excess = this.offlineQueue.length - this.config.maxOfflineQueueSize;
-        this.offlineQueue.splice(0, excess); // Remove oldest events
-        // WEB-27: overflow is data loss too, and a sustained 403/park loop is
-        // exactly what produces it. Count it rather than trimming silently.
-        this.droppedEventCount += excess;
-        console.warn(`[Datalyr Queue] Offline queue full — dropped ${excess} oldest event(s).`);
-      }
+      // Issue #33: Enforce limit here, not just in saveOfflineQueue. 1.9.15: oldest
+      // ordinary events go first; critical and identity events are kept while any
+      // ordinary event is left to drop.
+      this.trimOfflineMemory();
 
       this.saveOfflineQueue();
     } finally {
@@ -611,10 +771,21 @@ export class EventQueue {
       if (this.offlineQueue.some(e => e.event_id === event.event_id)) continue;
       this.offlineQueue.push(event);
     }
-    if (this.offlineQueue.length > this.config.maxOfflineQueueSize) {
-      this.offlineQueue.splice(0, this.offlineQueue.length - this.config.maxOfflineQueueSize);
-    }
+    this.trimOfflineMemory();
     this.saveOfflineQueue();
+  }
+
+  /**
+   * Cap the in-memory backlog (critical-first eviction, see capOffline). WEB-27: overflow
+   * is data loss too, so it is counted and reported, not trimmed silently.
+   */
+  private trimOfflineMemory(): void {
+    const { kept, dropped } = this.capOffline(this.offlineQueue);
+    if (dropped.length === 0) return;
+    this.offlineQueue = kept;
+    this.markSettled(dropped);
+    this.recordDrop(dropped.length);
+    console.warn(`[Datalyr Queue] Offline queue full — dropped ${dropped.length} oldest event(s).`);
   }
 
   /**
@@ -624,13 +795,13 @@ export class EventQueue {
   private removeFromOfflineQueue(eventIds: string[]): void {
     const before = this.offlineQueue.length;
     const drop = new Set(eventIds);
+    const removed = this.offlineQueue.filter(e => drop.has(e.event_id));
     this.offlineQueue = this.offlineQueue.filter(e => !drop.has(e.event_id));
     if (this.offlineQueue.length === before) return;
-    if (this.offlineQueue.length === 0) {
-      storage.remove(this.OFFLINE_QUEUE_KEY);
-    } else {
-      this.saveOfflineQueue();
-    }
+    this.markSettled(removed);
+    // Merge-save: drops these ids from storage, keeps other tabs' events, and removes the
+    // key when nothing is left.
+    this.saveOfflineQueue();
   }
 
   /**
@@ -651,9 +822,54 @@ export class EventQueue {
     // Defense-in-depth twin of the moveToOfflineQueue gate: never write PII to disk
     // for a disabled (opted-out) queue.
     if (!this.enabled) return;
-    // Keep max events based on config
-    const toSave = this.offlineQueue.slice(-this.config.maxOfflineQueueSize);
-    storage.set(this.OFFLINE_QUEUE_KEY, toSave);
+    this.persistOffline(this.offlineQueue);
+  }
+
+  /**
+   * 1.9.15 (services-b-127): write a backlog to storage without losing another tab's.
+   *
+   * Every tab of the origin shares one stored key. A plain overwrite let the last tab to
+   * save erase the others' parked events. Now the write is the stored list (minus events
+   * this tab delivered or dropped, and minus what `events` already holds) followed by
+   * `events`, capped critical-first. The stored format is unchanged (a plain array of
+   * events), so an older script still reads it after a rollback.
+   *
+   * A refused write (quota full) used to be ignored, so a "persisted" purchase could be
+   * memory-only. Now it is retried with only critical and identity events, and
+   * getStats().offlinePersisted reports the failure.
+   */
+  private persistOffline(events: IngestEventPayload[]): void {
+    const mine = new Set(events.map(e => e.event_id));
+    const others = this.readStoredOffline().filter(
+      e => !mine.has(e.event_id) && !this.settledIds.has(e.event_id)
+    );
+    const { kept, dropped } = this.capOffline([...others, ...events]);
+    // Events of this tab trimmed here stay in memory and are still sent this visit; only
+    // another tab's events trimmed from storage are lost.
+    const lostOthers = dropped.filter(e => !mine.has(e.event_id));
+    if (lostOthers.length > 0) {
+      this.markSettled(lostOthers);
+      this.recordDrop(lostOthers.length);
+    }
+    if (kept.length === 0) {
+      storage.remove(this.OFFLINE_QUEUE_KEY);
+      this.offlinePersisted = true;
+      return;
+    }
+    if (storage.set(this.OFFLINE_QUEUE_KEY, kept)) {
+      this.offlinePersisted = true;
+      return;
+    }
+    // Not everything fits: keep the events that carry money and identity.
+    this.offlinePersisted = false;
+    const protectedOnly = kept.filter(e => this.isProtectedEvent(e));
+    if (protectedOnly.length > 0 && protectedOnly.length < kept.length) {
+      storage.set(this.OFFLINE_QUEUE_KEY, protectedOnly);
+    }
+    console.warn(
+      `[Datalyr Queue] Browser storage full — ${kept.length} unsent event(s) not fully saved; ` +
+      'they are kept in memory and sent while this page stays open.'
+    );
   }
 
   /**
@@ -691,6 +907,7 @@ export class EventQueue {
 
         try {
           await this.sendBatch(batch);
+          this.markSettled(batch);
           this.saveOfflineQueue();
         } catch (error) {
           // FSR-55: a permanently-rejected (4xx) batch must NOT go back to the head —
@@ -702,8 +919,8 @@ export class EventQueue {
             // where drops now predominantly happen. Counting only _flush left the
             // dominant loss path invisible, which is the exact failure mode the
             // counter was added to end.
-            this.droppedEventCount += batch.length;
-            this.lastDropStatus = error.status;
+            this.recordDrop(batch.length, error.status);
+            this.markSettled(batch);
             console.warn(
               `[Datalyr Queue] Dropped ${batch.length} offline events — permanent error ${error.status}. ` +
               `${this.droppedEventCount} dropped this session.`
@@ -720,9 +937,8 @@ export class EventQueue {
         }
       }
 
-      if (this.offlineQueue.length === 0) {
-        storage.remove(this.OFFLINE_QUEUE_KEY);
-      }
+      // Merge-save (removes the key when nothing is left, keeps other tabs' events).
+      if (this.offlineQueue.length === 0) this.saveOfflineQueue();
     } finally {
       this.offlineProcessing = false;
     }
@@ -756,6 +972,8 @@ export class EventQueue {
     droppedEvents: number;
     lastDropStatus: number | null;
     backoffUntil: number;
+    droppedSinceLastReport: number;
+    offlinePersisted: boolean;
   } {
     return {
       queued: this.queue.length,
@@ -763,6 +981,8 @@ export class EventQueue {
       droppedEvents: this.droppedEventCount,
       lastDropStatus: this.lastDropStatus,
       backoffUntil: this.rateLimitedUntil,
+      droppedSinceLastReport: this.droppedSinceLast,
+      offlinePersisted: this.offlinePersisted,
     };
   }
 
@@ -842,12 +1062,16 @@ export class EventQueue {
 
     // Persist the full backlog FIRST so it survives no matter what sendBeacon reports.
     // The next load's response-checked drain delivers + clears it (dedup-safe). (FSR-15)
+    // 1.9.15: merged with other tabs' stored events and capped critical-first; what the
+    // cap leaves out is counted (it is lost once this page is gone).
     if (this.enabled) {
-      const toPersist = pending.slice(-this.config.maxOfflineQueueSize);
-      if (pending.length > toPersist.length) {
-        this.log(`Offline cap dropped ${pending.length - toPersist.length} oldest events at unload`);
+      const { kept, dropped } = this.capOffline(pending);
+      if (dropped.length > 0) {
+        this.markSettled(dropped);
+        this.recordDrop(dropped.length);
+        this.log(`Offline cap dropped ${dropped.length} oldest events at unload`);
       }
-      storage.set(this.OFFLINE_QUEUE_KEY, toPersist);
+      this.persistOffline(kept);
     }
 
     // TR-13: beacon ONLY the LIVE queue (never-persisted events from THIS session). The
@@ -934,6 +1158,8 @@ export class EventQueue {
   clearOffline(): void {
     this.offlineQueue = [];
     storage.remove(this.OFFLINE_QUEUE_KEY);
+    this.droppedSinceLast = 0;
+    storage.remove(this.DROPPED_KEY);
   }
 
   /**
