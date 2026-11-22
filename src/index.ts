@@ -1703,8 +1703,8 @@ class Datalyr {
    * syncShopifyCartAttributes reports once, at page load. A cart created or
    * replaced later on the same page was never reported: an add to cart through
    * a cart drawer or widget, then straight to checkout with no further page load
-   * (dainti order 7308784500784, 2026-09-24: one page view, add to cart 8s
-   * later, checkout, order unlinked). Shopify keeps the current cart in the
+   * (for example: one page view, add to cart 8s later, checkout, order
+   * unlinked). Shopify keeps the current cart in the
    * `cart` cookie whoever changes it, so this reads the cookie, locally, on every
    * tracked event and once more before the queue flushes when the page is left
    * (the checkout navigation). reportShopifyCart sends only a cart id it has not
@@ -2463,7 +2463,7 @@ class Datalyr {
    * Best effort, for the window before the Customer Privacy API loads: did the
    * visitor decline `purpose` on an earlier page? Shopify no longer exposes its
    * consent cookie to scripts; it sends the state as the `_cmp` Server-Timing
-   * entry of the page. Observed on dainti.shop (2026-09-23): "3.AMPS_USCA_…"
+   * entry of the page. Observed on a live store: "3.AMPS_USCA_…"
    * with no answer, "3amps._USCA_…" after declining everything. Explicit
    * answers precede the '.', a lowercase letter is a decline. Undocumented, so
    * only a clear decline counts; anything unreadable is "no signal".
