@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Package entry points: `require('@datalyr/web')` returned `{}` because `main` pointed at the browser script build (`dist/datalyr.js`). `main` now points at the CommonJS build (`dist/datalyr.cjs.js`), and an `exports` map sends `import` to the ESM build and `require` to the CommonJS build, with types for both. `unpkg` and `jsdelivr` keep serving `dist/datalyr.js`, and deep imports under `dist/` (such as `@datalyr/web/dist/datalyr.js`) still work. No built file changed.
+- Release as a minor version (1.10.0). Two narrow cases change: a deep import without a file extension (`@datalyr/web/dist/datalyr.cjs`) no longer resolves in Node or webpack 5; add `.js`. A plain Node ESM `import` of this package needs Node 20.19 or later (or 22.12 or later); before, it loaded but returned an empty object. Bundlers, CommonJS and the CDN script are not affected.
 
 ## 1.9.15
 
