@@ -94,6 +94,8 @@ class Datalyr {
   // Consent preferences (setConsent). null = not set → no consent-based restriction.
   private consent: ConsentConfig | null = null;
   private initialized = false;
+  // Getters called before init() warn once, then return an empty value (W13).
+  private warnedGetterBeforeInit = false;
   private errors: ErrorInfo[] = [];
   private MAX_ERRORS = 50;
   // Store original history methods for cleanup (Issue #15)
@@ -1204,6 +1206,7 @@ class Datalyr {
    * Get the current anonymous ID
    */
   getAnonymousId(): string {
+    if (!this.identity) return this.getterBeforeInit('getAnonymousId', '');
     return this.identity.getAnonymousId();
   }
 
@@ -1214,6 +1217,7 @@ class Datalyr {
    * or webhook metadata for first-party attribution.
    */
   getVisitorId(): string {
+    if (!this.identity) return this.getterBeforeInit('getVisitorId', '');
     return this.identity.getAnonymousId();
   }
 
@@ -1238,7 +1242,7 @@ class Datalyr {
    * and `metadata.visitor_id` on every other Stripe object.
    */
   getStripeMetadata(): { client_reference_id: string; metadata: { visitor_id: string } } {
-    const visitorId = this.identity.getAnonymousId();
+    const visitorId = this.identity ? this.identity.getAnonymousId() : this.getterBeforeInit('getStripeMetadata', '');
     return {
       client_reference_id: visitorId,
       metadata: { visitor_id: visitorId },
@@ -1258,6 +1262,7 @@ class Datalyr {
    *   })
    */
   getWhopCheckoutMetadata(): { visitor_id: string } {
+    if (!this.identity) return { visitor_id: this.getterBeforeInit('getWhopCheckoutMetadata', '') };
     return { visitor_id: this.identity.getAnonymousId() };
   }
 
@@ -1265,6 +1270,7 @@ class Datalyr {
    * Get the current user ID
    */
   getUserId(): string | null {
+    if (!this.identity) return this.getterBeforeInit('getUserId', null);
     return this.identity.getUserId();
   }
 
@@ -1272,6 +1278,7 @@ class Datalyr {
    * Get the distinct ID
    */
   getDistinctId(): string {
+    if (!this.identity) return this.getterBeforeInit('getDistinctId', '');
     return this.identity.getDistinctId();
   }
 
@@ -1279,6 +1286,7 @@ class Datalyr {
    * Get the current session ID
    */
   getSessionId(): string {
+    if (!this.session) return this.getterBeforeInit('getSessionId', '');
     return this.session.getSessionId();
   }
 
@@ -1295,6 +1303,7 @@ class Datalyr {
    * Get session data
    */
   getSessionData(): SessionData | null {
+    if (!this.session) return this.getterBeforeInit('getSessionData', null);
     return this.session.getSessionData();
   }
 
@@ -1302,6 +1311,7 @@ class Datalyr {
    * Get current attribution data
    */
   getAttribution(): Attribution {
+    if (!this.attribution) return this.getterBeforeInit<Attribution>('getAttribution', {});
     return this.attribution.captureAttribution();
   }
 
@@ -1309,7 +1319,21 @@ class Datalyr {
    * Get customer journey
    */
   getJourney(): TouchPoint[] {
+    if (!this.attribution) return this.getterBeforeInit<TouchPoint[]>('getJourney', []);
     return this.attribution.getJourney();
+  }
+
+  /**
+   * Before init() the identity, session, attribution and queue managers do not exist,
+   * so the getters that read them threw a TypeError. Warn once per instance and
+   * return the empty value instead, like the tracking methods do.
+   */
+  private getterBeforeInit<T>(name: string, empty: T): T {
+    if (!this.warnedGetterBeforeInit) {
+      this.warnedGetterBeforeInit = true;
+      console.warn(`[Datalyr] ${name}() called before init(). Call init() first.`);
+    }
+    return empty;
   }
 
   /**
@@ -2928,6 +2952,13 @@ class Datalyr {
    * Get network status
    */
   getNetworkStatus(): NetworkStatus {
+    if (!this.queue) {
+      return this.getterBeforeInit<NetworkStatus>('getNetworkStatus', {
+        isOnline: typeof navigator === 'undefined' ? true : navigator.onLine,
+        lastOfflineAt: null,
+        lastOnlineAt: null,
+      });
+    }
     return this.queue.getNetworkStatus();
   }
 
