@@ -19,9 +19,11 @@ export class SessionManager {
   // to flush the old id's buffer and start the new id with a full snapshot.
   private sessionChangeListener: ((sessionId: string) => void) | null = null;
   private visitorIdProvider: (() => string | null) | null = null;
+  private debug: boolean;
 
-  constructor(timeout = 30 * 60 * 1000) { // 30 minutes since last activity (1.9.4; GA4/Mixpanel/PostHog default)
+  constructor(timeout = 30 * 60 * 1000, debug = false) { // 30 minutes since last activity (1.9.4; GA4/Mixpanel/PostHog default)
     this.sessionTimeout = timeout;
+    this.debug = debug;
     this.initSession();
     this.setupActivityMonitor();
   }
@@ -61,7 +63,7 @@ export class SessionManager {
     // FIXED (DATA-02): Check if session creation already in progress
     if (this.sessionCreationLock) {
       // Wait for ongoing session creation
-      console.log('[Datalyr Session] Session creation already in progress, returning existing ID');
+      this.log('Session creation already in progress, returning existing ID');
       return this.sessionId || '';
     }
 
@@ -118,7 +120,7 @@ export class SessionManager {
         storage.remove(`dl_session_${oldSessionId}_attribution`);
       }
 
-      console.log(`[Datalyr Session] Rotated session ID from ${oldSessionId} to ${this.sessionId}`);
+      this.log(`Rotated session ID from ${oldSessionId} to ${this.sessionId}`);
       this.notifySessionChange();
     } else {
       // No existing session, create new one
@@ -364,5 +366,14 @@ export class SessionManager {
   private incrementSessionCount(): void {
     const count = storage.get('dl_session_count', 0);
     storage.set('dl_session_count', count + 1);
+  }
+
+  /**
+   * Debug logging (only with `debug: true` in the SDK config)
+   */
+  private log(...args: any[]): void {
+    if (this.debug) {
+      console.log('[Datalyr Session]', ...args);
+    }
   }
 }

@@ -231,7 +231,7 @@ class Datalyr {
     });
 
     // Migrate legacy storage keys (fixes double-prefix issue)
-    storage.migrateFromLegacyPrefix();
+    storage.migrateFromLegacyPrefix(this.config.debug);
 
     // Check opt-out AFTER cookies configured (Issue #14)
     this.optedOut = this.cookies.get('__dl_opt_out') === 'true';
@@ -252,7 +252,7 @@ class Datalyr {
     // is opted-out / GPC / DNT at init — the id stays in memory only (events don't send
     // anyway). shouldTrack() is computable here (config/opt-out/consent are all set above).
     this.identity = new IdentityManager({ persistNewId: this.shouldTrack(), sessionTimeout: this.config.sessionTimeout });
-    this.session = new SessionManager(this.config.sessionTimeout);
+    this.session = new SessionManager(this.config.sessionTimeout, this.config.debug);
     // Only while tracking is allowed: a withdrawal / opt-out must not keep the id at rest.
     this.session.setVisitorIdProvider(() => (this.shouldTrack() ? this.identity.getPersistableAnonymousId() : null));
     this.replayDisabledAtInit = config.replay === false;
