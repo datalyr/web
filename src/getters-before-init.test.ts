@@ -4,6 +4,8 @@
  * (for example a checkout handler calling getStripeMetadata() before the snippet ran
  * init()). They now warn once and return the empty value, like the tracking methods.
  */
+export {}; // a module, so SdkModule does not clash with index.test.ts's global one
+
 type SdkModule = typeof import('./index');
 
 function freshInstance(): ReturnType<SdkModule['createDatalyrInstance']> {
