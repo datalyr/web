@@ -72,7 +72,7 @@ function stubShopifyAnswers(opts: {
   };
 }
 
-/** The `_cmp` Server-Timing value Shopify sends with the page (observed on dainti.shop). */
+/** The `_cmp` Server-Timing value Shopify sends with the page (observed on example-store.com). */
 // jsdom has no getEntriesByType; defined per test and removed in afterEach.
 function stubServerTimingConsent(description: string): void {
   Object.defineProperty(performance, 'getEntriesByType', {
@@ -287,7 +287,7 @@ describe('Shopify cart pairing report', () => {
     expect(enqueue.mock.calls.some((call: any[]) => call[0].event_name === '$shopify_cart')).toBe(false);
   });
 
-  // dainti order 7308784500784 (2026-09-24): one page view, an add to cart
+  // a real order (2026-09-24): one page view, an add to cart
   // through the store's cart widget 8s later, straight to checkout. The cart
   // reported at page load was not the cart the order came from.
   const WIDGET_CART = 'Wdgt9Y6FdVrLgn7ZJ5mpqZ0iXy';
@@ -447,8 +447,8 @@ describe('Shopify cart watch (1.7.21)', () => {
       return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
     });
     const before = updates(fetchMock).length;
-    // The widget wiped our attributes (dainti: Shopify.actions.updateCart replaces them all).
-    cartAttributes = { _dainti_upload_id: 'x' };
+    // The widget wiped our attributes (on one store, Shopify.actions.updateCart replaces them all).
+    cartAttributes = { _widget_upload_id: 'x' };
     instance.track('add_to_cart', { value: 25 });
     expect(instance.shopifyCartTagCheckTimer).not.toBeNull();
     await instance.verifyShopifyCartTag();

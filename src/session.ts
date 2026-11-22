@@ -218,7 +218,7 @@ export class SessionManager {
     if (this.sessionData) {
       // The stored record carries the visitor id so IdentityManager can
       // recover it when the browser drops the visitor id but keeps this
-      // record. Not written while the id must not persist (FSR-107).
+      // record. Not written while the id must not persist.
       const { visitorId: _stale, ...data } = this.sessionData;
       const visitorId = this.visitorIdProvider?.() ?? null;
       storage.set(this.SESSION_KEY, visitorId ? { ...data, visitorId } : data);

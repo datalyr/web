@@ -49,7 +49,7 @@ import type {
 export * from './types';
 
 /**
- * WEB-20. Fingerprint of the last identify() that actually emitted, so a host
+ * . Fingerprint of the last identify() that actually emitted, so a host
  * app calling identify() on every route change does not re-emit an unchanged
  * identity. Cleared by reset(). Mirrors iOS `datalyr_last_identity_fingerprint`
  * and RN `@datalyr/last_identity_fingerprint`.
@@ -248,7 +248,7 @@ class Datalyr {
     }
 
     // Initialize modules.
-    // FSR-107: don't write a persistent tracking cookie/localStorage id for a visitor who
+    // don't write a persistent tracking cookie/localStorage id for a visitor who
     // is opted-out / GPC / DNT at init — the id stays in memory only (events don't send
     // anyway). shouldTrack() is computable here (config/opt-out/consent are all set above).
     this.identity = new IdentityManager({ persistNewId: this.shouldTrack(), sessionTimeout: this.config.sessionTimeout });
@@ -266,7 +266,7 @@ class Datalyr {
     this.attribution = new AttributionManager({
       attributionWindow: this.config.attributionWindow,
       trackedParams: this.config.trackedParams,
-      // TR-03: gate ad-signal synthesis + shipping on LIVE marketing consent. Returns true by
+      // gate ad-signal synthesis + shipping on LIVE marketing consent. Returns true by
       // default (no consent signal) so behavior is unchanged for the common case; false only on
       // an explicit decline (Shopify marketing:false / setConsent marketing|sale=false).
       marketingAllowed: () => this.consentAllowsMarketing(),
@@ -291,7 +291,7 @@ class Datalyr {
     // Gate the queue by the FULL tracking policy (opt-out + analytics consent + DNT +
     // GPC) so a returning opted-out / DNT / GPC visitor's persisted events don't drain.
     this.queue.setEnabled(this.shouldTrack());
-    // TR-15: also give the offline drain a LIVE consent gate. setEnabled above is latched to
+    // also give the offline drain a LIVE consent gate. setEnabled above is latched to
     // a fail-open value while Shopify's customerPrivacy loads async; a returning declined
     // visitor fires no visitorConsentCollected event, so the drain must re-check per run.
     this.queue.setConsentCheck(() => this.shouldTrack());
@@ -341,7 +341,7 @@ class Datalyr {
 
     this.initializationPromise = (async () => {
       try {
-        // TR-22: capture the LANDING attribution NOW, before any await. The first read used to
+        // capture the LANDING attribution NOW, before any await. The first read used to
         // sit inside this.page() AFTER `await container.init()` (up to a ~3s budget), so a
         // router / consent tool that strips fbclid via history.replaceState within that window
         // — or a fast bounce — lost the click id entirely (nothing persisted to first/last
@@ -352,7 +352,7 @@ class Datalyr {
         // synthesizes _fbp/_fbc and persists first/last touch — which must NOT happen at page
         // load for an opted-out / DNT / GPC visitor (shouldTrack()=false), or it undoes the
         // id-less-at-init privacy invariant. For a TRACKED visitor with marketing declined,
-        // getAttributionData already strips the click-ids / marketing cookies (TR-03), so TR-22's
+        // getAttributionData already strips the click-ids / marketing cookies, so this
         // early-capture benefit is preserved for consenting/default visitors.
         this.captureLandingAttribution();
 
@@ -373,7 +373,7 @@ class Datalyr {
           if (this.identity.getIdentityGeneration() === traitGeneration) {
             this.userProperties = storedTraits;
           }
-          // WEB-22: restore a PII user id that was persisted encrypted. Must run
+          // restore a PII user id that was persisted encrypted. Must run
           // here — it needs dataEncryption to be initialized, so it cannot happen
           // in the IdentityManager constructor. It never overwrites an id already
           // set by an explicit identify() earlier in this page load.
@@ -393,7 +393,7 @@ class Datalyr {
         }
 
         // Initialize container manager if enabled.
-        // WEB-4 (privacy gate): the container loads third-party pixels (Meta/Google/
+        // (privacy gate): the container loads third-party pixels (Meta/Google/
         // TikTok) and calls fbq('init', …, advancedMatching) with the visitor's
         // SHA-256 email/id — so it must NOT initialize for opted-out / DNT / GPC
         // visitors, nor when privacyMode is explicitly 'strict'. Only local consent
@@ -508,7 +508,7 @@ class Datalyr {
     return this.initializationPromise;
   }
 
-  /** The landing attribution (TR-22), once per page and only while tracking is allowed. */
+  /** The landing attribution, once per page and only while tracking is allowed. */
   private captureLandingAttribution(): void {
     if (this.eagerAttributionCaptured || !this.shouldTrack()) return;
     this.eagerAttributionCaptured = true;
@@ -600,13 +600,13 @@ class Datalyr {
       // used to run the account-switch reset(), rotating the visitor id and
       // wiping first-touch attribution of a signed-in user who typed an email
       // into a form. A provisional guest keeps its id too: an email owner next
-      // to the guest blocks the server's guest→account conversion (§2.10).
+      // to the guest blocks the server's guest→account conversion.
       if (this.identity.getUserId() || this.identity.hasUnloadedUser()) {
         this.log('Auto-identify skipped: the visitor is already identified');
         return;
       }
 
-      // WEB-21: ONE event, not two.
+      // ONE event, not two.
       //
       // This used to emit `$auto_identify` and then call identify(),
       // which emits `$identify` — two events ~1ms apart carrying the same
@@ -625,7 +625,7 @@ class Datalyr {
 
   /**
    * Create and initialize the container (third-party pixels) at most once per
-   * page, and only while tracking and marketing consent allow it (WEB-4 gate:
+   * page, and only while tracking and marketing consent allow it (consent gate:
    * never for opted-out / DNT / GPC visitors or privacyMode 'strict').
    *
    * Called from initializeAsync() and again from onShopifyConsentChanged(): on
@@ -839,7 +839,7 @@ class Datalyr {
    * Identify a user
    */
   /**
-   * Stable fingerprint of an identity for redundant-emit suppression (WEB-20).
+   * Stable fingerprint of an identity for redundant-emit suppression.
    *
    * Keys are sorted and each value is JSON-serialized, so `{a,b}` and `{b,a}`
    * collapse to one identity while a genuinely changed nested trait does not.
@@ -908,7 +908,7 @@ class Datalyr {
       // Only an asserted account is that boundary. A provisional (pre-login) id
       // or an auto-identified email followed by a different id is a sign-in on
       // the same browser, so the visitor id stays: for a provisional id that is
-      // what lets the server's §2.10 conversion join the guest to the account.
+      // what lets the server's conversion join the guest to the account.
       const currentUserId = this.identity.getUserId();
       const currentKind = this.identity.getUserIdKind();
       if (kind === 'provisional' &&
@@ -940,7 +940,7 @@ class Datalyr {
         }
       }
 
-      // FSR-53: do NOT rotate the session id on identify(). 'Session fixation' is an
+      // do NOT rotate the session id on identify(). 'Session fixation' is an
       // auth-credential concept; a client-generated analytics session_id is not one.
       // Rotating split every identified visit (and every auto-identify form submit) into
       // two session_ids — inflating server-side uniq(session_id) counts by +1 per
@@ -963,7 +963,7 @@ class Datalyr {
         // and will be lost on page reload - but PII is NOT exposed in localStorage
       });
 
-      // WEB-20: redundant-identify suppression, matching iOS 2.1.11 / RN 1.7.16.
+      // redundant-identify suppression, matching iOS 2.1.11 / RN 1.7.16.
       //
       // identify() is host-app-driven and SPA routers commonly call it in a
       // route effect, so an unchanged identity was re-emitted on every
@@ -1013,7 +1013,7 @@ class Datalyr {
   }
 
   /**
-   * WEB-27: queue health, including events the SDK gave up on.
+   * queue health, including events the SDK gave up on.
    *
    * `getStats()` existed on EventQueue but was unreachable — `queue` is private
    * and nothing exposed it, so the observability fix could not actually be
@@ -1040,7 +1040,7 @@ class Datalyr {
     }
     if (!this.shouldTrack()) return;
 
-    // WEB-6: record one customer-journey touchpoint per session so touchpoint_count /
+    // record one customer-journey touchpoint per session so touchpoint_count /
     // days_since_first_touch become real multi-touch signals (addTouchpoint had no
     // callers before, so the journey was always empty). Dedup against the PERSISTED
     // journey (not an in-memory field) so a hard page reload within the same session
@@ -1175,7 +1175,7 @@ class Datalyr {
     // values to the next user's events (cross-user contamination on shared devices).
     this.superProperties = {};
     storage.remove('dl_user_traits');
-    // WEB-20: drop the identify fingerprint, so a logout→login (or a different
+    // drop the identify fingerprint, so a logout→login (or a different
     // user on this browser) always re-emits $identify and the link is rebuilt.
     storage.remove(IDENTIFY_FINGERPRINT_KEY);
     // Clear the auto-identify guard so a different user on the same browser is
@@ -1185,7 +1185,7 @@ class Datalyr {
     // Clear the journey too, or the next user's touchpoints append to the previous
     // user's (cross-user contamination of touchpoint_count / days_since_first_touch).
     storage.remove('dl_journey');
-    // FSR-106: clear first/last-touch attribution as well — same cross-user-contamination
+    // clear first/last-touch attribution as well — same cross-user-contamination
     // rationale as the journey. Otherwise the next anon visitor's events carry the
     // PREVIOUS user's first_touch_*/last_touch_* (via getAttributionData's fallback),
     // crediting user B's conversions to the ad click that brought user A.
@@ -1382,7 +1382,7 @@ class Datalyr {
     // generation makes that late read a no-op and drops the in-memory user id.
     this.identity.invalidateIdentity();
     storage.remove('dl_user_traits');
-    // WEB-26: remove the PLAINTEXT id as well. optOut() purged only the
+    // remove the PLAINTEXT id as well. optOut() purged only the
     // encrypted copy, so an opted-out visitor whose email was written by an
     // older build kept it at rest — the one state where that is least
     // defensible.
@@ -1392,7 +1392,7 @@ class Datalyr {
     storage.remove(IDENTIFY_FINGERPRINT_KEY);
     storage.remove('dl_auto_identified_email');
     storage.remove('dl_journey');
-    // WEB-25: first/last touch hold redacted-but-full landing URLs, referrers and
+    // first/last touch hold redacted-but-full landing URLs, referrers and
     // click ids for up to 90 days. reset() has always cleared them; optOut() did
     // not — so an opted-out visitor kept marketing attribution at rest, which is
     // the one state where it is least defensible. Same rationale as dl_journey
@@ -1417,7 +1417,7 @@ class Datalyr {
     // merely because opt-out was lifted — otherwise a GPC/DNT visitor's persisted
     // events would start draining again. (Pixels / auto-identify resume on next load.)
     this.queue.setEnabled(this.shouldTrack());
-    // TR-15 (P3): opt-in → persist the in-memory anon id now (see onShopifyConsentChanged).
+    // (P3): opt-in → persist the in-memory anon id now (see onShopifyConsentChanged).
     if (this.shouldTrack()) this.identity.enablePersistence();
     this.session.refreshStoredRecord();
     this.syncInAppHandoff();
@@ -1436,7 +1436,7 @@ class Datalyr {
    * Set consent preferences
    */
   setConsent(consent: ConsentConfig): void {
-    // Always record + persist consent FIRST, even before init(). FSR-51: a consent-
+    // Always record + persist consent FIRST, even before init(). a consent-
     // management platform commonly calls setConsent() before init() so tracking is gated
     // from the very first event. The old code then dereferenced this.queue/this.config
     // (both undefined pre-init) inside shouldTrack()/setEnabled() and threw an uncaught
@@ -1458,7 +1458,7 @@ class Datalyr {
     if (!allowed) {
       this.queue.clear();
       this.queue.clearOffline();
-      // TR-14: mirror optOut() on analytics withdrawal. Previously setConsent tore down the
+      // mirror optOut() on analytics withdrawal. Previously setConsent tore down the
       // queue + container but left autoIdentify alive — its form/fetch interceptors and
       // /account.json polling kept running and triggerIdentify persisted the captured email
       // to storage AFTER withdrawal (PII newly written at rest → GDPR/consent-audit failure
@@ -1472,20 +1472,20 @@ class Datalyr {
       // invalidated too, or it restores the user we just purged.
       this.identity.invalidateIdentity();
       storage.remove('dl_user_traits');
-      // WEB-26: see optOut() — the plaintext id must go too.
+      // see optOut() — the plaintext id must go too.
       storage.remove('dl_user_id');
       storage.remove('dl_user_id_pii');
       storage.remove('dl_user_id_kind');
       storage.remove(IDENTIFY_FINGERPRINT_KEY);
       storage.remove('dl_auto_identified_email');
       storage.remove('dl_journey');
-      // WEB-25: see optOut() — withdrawn analytics consent must not leave 90-day
+      // see optOut() — withdrawn analytics consent must not leave 90-day
       // marketing attribution at rest either.
       storage.remove('dl_first_touch');
       storage.remove('dl_last_touch');
       this.attribution?.forgetSeenTwclid();
     } else {
-      // TR-15 (P3): grant → persist the in-memory anon id now (see onShopifyConsentChanged).
+      // (P3): grant → persist the in-memory anon id now (see onShopifyConsentChanged).
       this.identity.enablePersistence();
     }
     this.session.refreshStoredRecord(); // the record's visitor id follows the decision
@@ -1624,8 +1624,8 @@ class Datalyr {
    * cart id we report ($shopify_cart). Both used to happen once, at page load.
    * A cart drawer or widget creates or replaces the cart with no page load, and
    * some rewrite the cart's attributes, so the checkout arrived with neither
-   * (dainti, 2026-09-24: two shoppers, add to cart seconds after landing, then
-   * straight to checkout, both unlinked).
+   * (for example, a shopper who adds to cart seconds after landing, then goes
+   * straight to checkout).
    *
    * So, while the page is visible, the `cart` cookie is read every 2 s; a cart
    * we have not stamped is stamped and reported (syncShopifyCartAttributes does
@@ -1703,8 +1703,8 @@ class Datalyr {
    * syncShopifyCartAttributes reports once, at page load. A cart created or
    * replaced later on the same page was never reported: an add to cart through
    * a cart drawer or widget, then straight to checkout with no further page load
-   * (dainti order 7308784500784, 2026-09-24: one page view, add to cart 8s
-   * later, checkout, order unlinked). Shopify keeps the current cart in the
+   * (for example: one page view, add to cart 8s later, checkout, order
+   * unlinked). Shopify keeps the current cart in the
    * `cart` cookie whoever changes it, so this reads the cookie, locally, on every
    * tracked event and once more before the queue flushes when the page is left
    * (the checkout navigation). reportShopifyCart sends only a cart id it has not
@@ -1798,7 +1798,7 @@ class Datalyr {
       const orderId = order.orderId;
       if (!orderId) return;
 
-      // FSR-102: only burn the once-per-order guard once the Meta Pixel is actually live.
+      // only burn the once-per-order guard once the Meta Pixel is actually live.
       // trackToPixels no-ops when the container config never arrived (pixels=null after a
       // transient /container-scripts failure); setting the guard first would permanently
       // suppress the co-fire for the rest of the funnel session even when the container
@@ -2134,9 +2134,9 @@ class Datalyr {
    * Create event payload
    */
   private createEventPayload(eventName: string, properties: Record<string, any>, eventIdArg?: string): IngestEventPayload {
-    // NEW-2: keep the identity's cached session id in lockstep with the LIVE session.
-    // The session id changes on session timeout (and previously on identify(), removed in
-    // FSR-53), but identity only synced it at init/start — so the top-level
+    // Keep the identity's cached session id in lockstep with the LIVE session.
+    // The session id changes on session timeout (and previously on identify(), since removed),
+    // but identity only synced it at init/start — so the top-level
     // payload.session_id (from identity) could disagree with event_data.session_id (from
     // session.getMetrics()). Sync here, before reading either, so every event carries a
     // single consistent session id.
@@ -2150,7 +2150,7 @@ class Datalyr {
       sanitizedProperties
     );
 
-    // FSR-105: caller-passed properties take precedence over auto-captured context.
+    // caller-passed properties take precedence over auto-captured context.
     // Previously Object.assign clobbered them — e.g. track('purchase', { source: 'pos',
     // campaign: 'spring-sale' }) shipped with the URL-derived source/campaign instead.
     // Fill ONLY the attribution/browser-context keys the caller didn't set. (session
@@ -2164,7 +2164,7 @@ class Datalyr {
       }
     };
 
-    // §2.10: the current user id is the app's pre-login id. Set after the caller's
+    // : the current user id is the app's pre-login id. Set after the caller's
     // properties, so it always reflects the SDK's own state.
     // SDK-owned: a caller or super property cannot set it.
     if (this.identity.getUserIdKind() === 'provisional') {
@@ -2265,10 +2265,10 @@ class Datalyr {
       // time (rollup.config.js injectSdkVersion — 9.A.3), so the literal can never
       // drift from the package again (it sat at 1.7.4 across the 1.7.5 release). The
       // build guard (scripts/check-bundle.js, run by build:check) still verifies the
-      // deployable bundles carry the package.json version. (FSR-103)
+      // deployable bundles carry the package.json version.
       sdk_version: '__SDK_VERSION__',
       sdk_name: 'datalyr-web-sdk',
-      // A3-25: versioned-envelope stamp. Every SDK emits schema_version so the ingest/contract
+      // versioned-envelope stamp. Every SDK emits schema_version so the ingest/contract
       // layer can key on ONE canonical envelope version (snake_case fields, event_name/event_data
       // keys, canonical click-ids, clamped client timestamp — all now converged across SDKs).
       schema_version: 1
@@ -2365,7 +2365,7 @@ class Datalyr {
   }
 
   /**
-   * TR-15 refinement: fail closed ONLY while the Customer Privacy API can still
+   * refinement: fail closed ONLY while the Customer Privacy API can still
    * arrive (Shopify.loadFeatures exists and hasn't failed). A storefront with no
    * loadFeatures (headless installs, `platform:'shopify'` on a non-Shopify page)
    * has NO path to a consent answer — blocking there is not a pre-load window,
@@ -2463,7 +2463,7 @@ class Datalyr {
    * Best effort, for the window before the Customer Privacy API loads: did the
    * visitor decline `purpose` on an earlier page? Shopify no longer exposes its
    * consent cookie to scripts; it sends the state as the `_cmp` Server-Timing
-   * entry of the page. Observed on dainti.shop (2026-09-23): "3.AMPS_USCA_…"
+   * entry of the page. Observed on a live store: "3.AMPS_USCA_…"
    * with no answer, "3amps._USCA_…" after declining everything. Explicit
    * answers precede the '.', a lowercase letter is a decline. Undocumented, so
    * only a clear decline counts; anything unreadable is "no signal".
@@ -2589,7 +2589,7 @@ class Datalyr {
       };
       document.addEventListener('visitorConsentCollected', this.shopifyConsentHandler);
 
-      // TR-15: customerPrivacy loads ASYNCHRONOUSLY. Until it's present shopifyAnalyticsConsent()
+      // customerPrivacy loads ASYNCHRONOUSLY. Until it's present shopifyAnalyticsConsent()
       // returns null (fail-open → events send in the pre-load window). Force the feature to load
       // and re-run the full consent evaluation in the callback so a declined visitor is gated
       // (queue disabled + purged) as soon as the API answers, without waiting for a reload or a
@@ -2623,7 +2623,7 @@ class Datalyr {
   private onShopifyConsentChanged(): void {
     const allowed = this.shouldTrack();
     this.queue.setEnabled(allowed);
-    // TR-15 (P3): a mid-session grant must persist the in-memory anon id NOW — otherwise a
+    // (P3): a mid-session grant must persist the in-memory anon id NOW — otherwise a
     // visitor declined at init keeps a memory-only id and this session's events land under a
     // visitor_id that vanishes on the next page load. Idempotent.
     if (allowed) this.identity.enablePersistence();
@@ -2842,7 +2842,7 @@ class Datalyr {
   private setupUnloadHandler(): void {
     // Store refs so destroy() can remove these — otherwise a destroy()+re-init() cycle
     // leaks listeners that keep firing forceFlush() on the OLD (destroyed) queue. (H2)
-    // FSR-15: pagehide/beforeunload are TERMINAL (beacon both queues, keep the persisted
+    // pagehide/beforeunload are TERMINAL (beacon both queues, keep the persisted
     // copy); a visibilitychange:hidden is just a tab switch / background, so use the
     // non-terminal path (response-checked fetch drain that never erases the backlog).
     // The Shopify cart report goes first so the flush carries it (leaving for
@@ -2954,7 +2954,7 @@ class Datalyr {
    * Debug logging
    */
   private log(...args: any[]): void {
-    // FSR-51: optional-chain config — log() is reachable before init() (e.g.
+    // optional-chain config — log() is reachable before init() (e.g.
     // setSuperProperties() called pre-init), where this.config is undefined; the bare
     // `this.config.debug` threw an uncaught TypeError into the caller.
     if (this.config?.debug) {
@@ -3101,7 +3101,7 @@ export function createDatalyrInstance(): Datalyr {
   return new Datalyr();
 }
 
-// Create the default singleton. TR-23: reuse an existing window.datalyr (a
+// Create the default singleton. reuse an existing window.datalyr (a
 // prior tag's instance or a package singleton) so npm/ESM/CJS consumers retain
 // the established one-global behavior. Workspace conflict resolution belongs
 // to the CDN bootstrap, which has the authoritative script-tag configuration.

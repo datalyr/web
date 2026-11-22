@@ -12,7 +12,7 @@
  * opens the page in their real browser, the URL already carries it and that browser
  * continues as the same visitor. No banner, no prompt, nothing visible on the page.
  *
- * This is NOT the old raw `_dl_vid` (removed in FSR-50 because a shared link merged
+ * This is NOT the old raw `_dl_vid` (removed  because a shared link merged
  * unrelated people). What makes it safe:
  *   - it expires: both browsers are on the same device and clock, so a token older than
  *     IN_APP_HANDOFF_MAX_AGE_MS (2 minutes) is refused. A link pasted into a chat later does
@@ -30,7 +30,7 @@ export const IN_APP_HANDOFF_PARAM = '_dl_h';
 // The token is rewritten every 30s while the page is open, so it is at most ~30s old when
 // the URL leaves the webview, and "Open in Safari" is near-instant. Two minutes covers a slow
 // cold start; anything longer only widens the window in which a shared link could merge
-// two people (the FSR-50 failure this design exists to avoid).
+// two people (failure this design exists to avoid).
 export const IN_APP_HANDOFF_MAX_AGE_MS = 2 * 60 * 1000;
 export const IN_APP_HANDOFF_REFRESH_MS = 30 * 1000;
 const IN_APP_HANDOFF_CLOCK_SKEW_MS = 60 * 1000;

@@ -73,7 +73,7 @@ class SafeStorage implements StorageWrapper {
   /**
    * Get a value as a RAW string, skipping the JSON.parse that get() applies.
    *
-   * FSR-17: get() blindly JSON.parses, so a stored user_id like '12345' comes back as
+   * get() blindly JSON.parses, so a stored user_id like '12345' comes back as
    * the NUMBER 12345 after reload, and a 16+-digit snowflake id ('1234567890123456789')
    * is silently precision-corrupted (→ 1234567890123456800) — permanent identity
    * fragmentation. Identifiers (dl_user_id, dl_anonymous_id, dl_auto_identified_email)
@@ -193,7 +193,7 @@ class SafeStorage implements StorageWrapper {
           // Get value from legacy key
           const value = this.storage!.getItem(legacyKey);
           if (value) {
-            // WEB-29: strip ONLY the leading '__'.
+            // strip ONLY the leading '__'.
             //
             // This used to strip '__dl_', producing 'dl_anonymous_id' — but that
             // is the LOGICAL key callers pass to get(), not the key it reads.
@@ -317,7 +317,7 @@ class CookieStorage {
   }
 
   get(name: string): string | null {
-    // FSR-56: parse document.cookie into name=value pairs and return the FIRST match.
+    // parse document.cookie into name=value pairs and return the FIRST match.
     // The old `split('; ' + name + '=')` returned null whenever the same cookie name
     // appeared more than once (3+ parts) — extremely common for ad cookies set at both
     // the registrable domain and a subdomain (_fbp/_fbc/_ga), and producible by this SDK

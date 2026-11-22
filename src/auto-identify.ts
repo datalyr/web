@@ -34,10 +34,10 @@ export class AutoIdentifyManager {
   private lastIdentifyTime = 0;
   private RATE_LIMIT_MS = 5000; // Don't auto-identify more than once per 5 seconds
   private shopifyCheckInterval?: ReturnType<typeof setInterval>;
-  private formObserver?: MutationObserver; // FSR-101: stored so destroy() can disconnect it
+  private formObserver?: MutationObserver; // stored so destroy() can disconnect it
   private destroyed = false; // set by destroy() (e.g. on opt-out) — stops any in-flight capture from re-persisting email
 
-  // FSR-49: email fields that belong to a THIRD PARTY, not the visitor — gift/recipient/
+  // email fields that belong to a THIRD PARTY, not the visitor — gift/recipient/
   // refer-a-friend/"email this to" forms. Capturing these identifies the visitor as
   // someone else (and feeds that person's email to Meta advanced matching).
   private static THIRD_PARTY_EMAIL_FIELD =
@@ -66,7 +66,7 @@ export class AutoIdentifyManager {
     this.identifyCallback = identifyCallback;
 
     // Check if already identified.
-    // WEB-5: the captured email is PII — store it AES-GCM-encrypted (consistent with
+    // the captured email is PII — store it AES-GCM-encrypted (consistent with
     // dl_user_traits), not plaintext localStorage.
     const existingEmail = await storage.getEncrypted('dl_auto_identified_email');
     if (existingEmail) {
@@ -113,7 +113,7 @@ export class AutoIdentifyManager {
     // Monitor existing forms
     this.scanForEmailForms();
 
-    // Watch for new forms (SPAs). FSR-101: store the observer so destroy() (opt-out / SDK
+    // Watch for new forms (SPAs). store the observer so destroy() (opt-out / SDK
     // destroy) can disconnect it — previously it was a local and leaked for the page
     // lifetime, re-scanning + re-attaching listeners on every DOM mutation after opt-out.
     this.formObserver = new MutationObserver(() => {
@@ -130,7 +130,7 @@ export class AutoIdentifyManager {
 
   /**
    * The form's email input that belongs to the VISITOR (not a gift/recipient field), or
-   * null when there's no usable / unambiguous one. (FSR-49)
+   * null when there's no usable / unambiguous one.
    */
   private findVisitorEmailInput(form: HTMLFormElement): HTMLInputElement | null {
     const all = Array.from(form.querySelectorAll<HTMLInputElement>(
@@ -162,7 +162,7 @@ export class AutoIdentifyManager {
    * Scan DOM for forms with email inputs
    */
   private scanForEmailForms(): void {
-    if (this.destroyed) return; // FSR-101: defense-in-depth after disconnect
+    if (this.destroyed) return; // defense-in-depth after disconnect
     const forms = document.querySelectorAll('form');
 
     forms.forEach(form => {
@@ -171,7 +171,7 @@ export class AutoIdentifyManager {
         return;
       }
 
-      // Only monitor forms with a capturable VISITOR email field (FSR-49).
+      // Only monitor forms with a capturable VISITOR email field.
       const emailInput = this.findVisitorEmailInput(form);
 
       if (emailInput) {
@@ -188,7 +188,7 @@ export class AutoIdentifyManager {
    */
   private handleFormSubmit(_event: Event, form: HTMLFormElement): void {
     try {
-      // Find the visitor's own email input (excludes gift/recipient fields — FSR-49).
+      // Find the visitor's own email input (excludes gift/recipient fields).
       const emailInput = this.findVisitorEmailInput(form);
 
       if (!emailInput) return;
@@ -318,7 +318,7 @@ export class AutoIdentifyManager {
     // Check periodically (in case the customer logs in later), but CAP the attempts so a
     // visitor who never logs in — the vast majority of storefront traffic — doesn't poll
     // /account.json forever (it used to run every 10s for the whole session). A logged-in
-    // customer surfaces well within ~2 minutes. (WEB-10)
+    // customer surfaces well within ~2 minutes.
     let checks = 0;
     const MAX_CHECKS = 12; // ~2 minutes at 10s
     this.shopifyCheckInterval = setInterval(() => {
@@ -513,7 +513,7 @@ export class AutoIdentifyManager {
     this.lastIdentifyTime = now;
 
     // Check if already identified.
-    // WEB-5: encrypted store (the email is PII at rest).
+    // encrypted store (the email is PII at rest).
     const existingEmail = await storage.getEncrypted('dl_auto_identified_email');
     if (existingEmail === email) {
       this.log('Already identified with this email');
@@ -563,7 +563,7 @@ export class AutoIdentifyManager {
       this.originalXHRSend = undefined;
     }
 
-    // Disconnect the form MutationObserver (FSR-101) — otherwise it keeps firing
+    // Disconnect the form MutationObserver — otherwise it keeps firing
     // scanForEmailForms on every DOM mutation after opt-out, re-attaching listeners.
     if (this.formObserver) {
       this.formObserver.disconnect();

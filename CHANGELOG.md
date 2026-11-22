@@ -13,7 +13,7 @@
 
 ## 1.9.14
 
-- Identity before conversions: a critical event (`criticalEvents`: `purchase`, `signup`, `subscribe`, `lead`, `conversion` by default) is sent at once, skipping the batch, but an `$identify` tracked just before it waited in the queue for the flush interval (5 s) or a full batch. So `identify(userId, { email })` followed by a critical `track()` reached ingest conversion first, and a conversion rule forwarding it to Meta (a sign-up as `CompleteRegistration`, say) could go out before the email was on the profile, lowering match quality. Now, when an `$identify` or `$alias` is still queued, the queued events up to and including the last of them are sent in the same request as the critical event, ahead of it and in their original order, so they arrive (or fail and are retried) together. Events queued after the last identity event stay in the batch as before, and with no identity event queued the critical event goes out alone, as before. The events sent ahead are persisted with the critical event before the send and removed on delivery (FSR-16), so an unload mid-send keeps them; a permanent 4xx drops the whole request (the identity events with it); 429 / 403 backoff and duplicate suppression are unchanged. An `$identify` already in flight in a batch send is not sent again, and one parked in the offline queue after a failed send is not pulled forward. Sites calling `flush()` before a critical `track()` as a workaround can drop it.
+- Identity before conversions: a critical event (`criticalEvents`: `purchase`, `signup`, `subscribe`, `lead`, `conversion` by default) is sent at once, skipping the batch, but an `$identify` tracked just before it waited in the queue for the flush interval (5 s) or a full batch. So `identify(userId, { email })` followed by a critical `track()` reached ingest conversion first, and a conversion rule forwarding it to Meta (a sign-up as `CompleteRegistration`, say) could go out before the email was on the profile, lowering match quality. Now, when an `$identify` or `$alias` is still queued, the queued events up to and including the last of them are sent in the same request as the critical event, ahead of it and in their original order, so they arrive (or fail and are retried) together. Events queued after the last identity event stay in the batch as before, and with no identity event queued the critical event goes out alone, as before. The events sent ahead are persisted with the critical event before the send and removed on delivery, so an unload mid-send keeps them; a permanent 4xx drops the whole request (the identity events with it); 429 / 403 backoff and duplicate suppression are unchanged. An `$identify` already in flight in a batch send is not sent again, and one parked in the offline queue after a failed send is not pulled forward. Sites calling `flush()` before a critical `track()` as a workaround can drop it.
 
 ## 1.9.13
 
@@ -21,7 +21,7 @@
 
 ## 1.9.12
 
-- Provisional (pre-login) ids: `identify(guestId, traits, { provisional: true })`. While the guest id is current every event carries `event_data.$provisional_user_id = true` (SDK-owned: caller and super properties cannot set or keep it). The later `identify(accountId)` keeps the `visitor_id` (no account-switch `reset()`) and stops the marker, so the guest and the account stay on one browser for DATALYR's guest-to-account join (§2.10; the server reads the marker in a later release, until then the join runs only where it is turned on for the workspace). A provisional identify while a signed-in user is current (including one another tab signed in, or an email id still being decrypted) is ignored; `reset()` clears it. The kind is stored in `dl_user_id_kind` as `<kind>:<hash of a per-browser salt and the user id>` (`account` for an asserted id; salt in `dl_user_id_kind_salt`), so it never describes a different id (another tab, an older SDK) and cannot be tested against candidate emails. No `$alias` is sent.
+- Provisional (pre-login) ids: `identify(guestId, traits, { provisional: true })`. While the guest id is current every event carries `event_data.$provisional_user_id = true` (SDK-owned: caller and super properties cannot set or keep it). The later `identify(accountId)` keeps the `visitor_id` (no account-switch `reset()`) and stops the marker, so the guest and the account stay on one browser for DATALYR's guest-to-account join. A provisional identify while a signed-in user is current (including one another tab signed in, or an email id still being decrypted) is ignored; `reset()` clears it. The kind is stored in `dl_user_id_kind` as `<kind>:<hash of a per-browser salt and the user id>` (`account` for an asserted id; salt in `dl_user_id_kind_salt`), so it never describes a different id (another tab, an older SDK) and cannot be tested against candidate emails. No `$alias` is sent.
 - Auto-identify fix: an email captured on a page whose visitor was already identified ran `identify(email)`, which the account-switch check took for a different user: `reset()` rotated the `visitor_id` and wiped the signed-in visitor's first-touch attribution. Auto-identify now leaves any identified visitor alone (a provisional guest included). An explicit `identify()` after an auto-identified email is a sign-in, not an account switch (no `reset()`); unless its traits carry the same email, the captured email and `auto_identify_source` are dropped from the traits. Browsers auto-identified by an older SDK (no kind record) are recognised from their captured-email copy. A sign-in another tab already made is not an account switch here.
 - README: the auto-identify row named `$auto_identify`, which 1.7.x stopped sending.
 
@@ -36,7 +36,7 @@
 - X: `twclid` is also read from `document.referrer`'s query string when the page URL has none (X's own pixel order: URL, referrer, cookie). Decided once per page load: a recovered value then counts exactly like a URL `twclid` for every event on that page. It never outranks a click id on the URL. Applied only while marketing is allowed. The last `twclid` taken from a URL or a referrer is kept in `dl_seen_twclid` (`{ v, expires_at }`, expiring with the attribution window, 90 days by default), and a referrer carrying that same value is not recovered again, so the next page after the landing, a reload, back navigation or a restored tab never re-counts the click or overwrites a newer touch. It is written only while marketing is allowed, and removed by a marketing or sale withdrawal (`setConsent`, a Shopify decline), by any event tracked while marketing is declined, and by `reset()`, `optOut()` and an analytics-consent withdrawal.
 - What a marketing decline keeps at rest, for the identifiers in this release:
   - **Not stored:** `alart` (never written to `dl_first_touch` / `dl_last_touch`); a `twclid` recovered from the referrer (not applied at all, so it reaches no touch, no payload and no storage, and the visit's `source` / `medium` are what they were before 1.9.9); `dl_seen_twclid`. The five new cookies are only ever read, never written.
-  - **Stored as before (TR-03, unchanged):** URL click ids, including `aleid` and a URL `twclid`, stay in the first / last touch for the attribution window and are stripped from every event payload while the decline lasts.
+  - **Stored as before (unchanged):** URL click ids, including `aleid` and a URL `twclid`, stay in the first / last touch for the attribution window and are stripped from every event payload while the decline lasts.
 - Referrer source fix: X and LinkedIn referrers are matched on the exact host or a subdomain (`t.co`, `x.com`, `twitter.com`, `linkedin.com`, `lnkd.in`). A substring test labelled reddit.com, pinterest.com and microsoft.com (`t.co`) and xbox.com, netflix.com, box.com, dropbox.com, fedex.com (`x.com`) as `twitter`, in both `source` and `referrer_source`. **Behaviour change:** those referrers now resolve to `reddit`, `pinterest`, or `referral` / `other`.
 - Session replay and heatmaps: the landing-attribution marker's `click` can also name `twclid`, `li_fat_id` and `aleid` (the kind only, never the value).
 
@@ -219,7 +219,7 @@ All notable changes to this project will be documented in this file.
 
 
 ### Fixed
-- **TR-23 compatibility: an explicit CDN workspace can no longer inherit a stale global SDK.**
+- **Compatibility: an explicit CDN workspace can no longer inherit a stale global SDK.**
   The CDN bootstrap can now compare the requested workspace through the stable public
   `getWorkspaceId()` accessor and replace a mismatched global with a side-effect-free
   `createDatalyrInstance()`. This restores the explicit tag as the tenant authority without
@@ -241,7 +241,7 @@ All notable changes to this project will be documented in this file.
 ## [1.7.6] - 2026-07-12
 
 ### Added
-- **A3-25: `schema_version` envelope stamp.** Every event now carries `schema_version: 1`, so
+- **`schema_version` envelope stamp.** Every event now carries `schema_version: 1`, so
   the ingest/contract layer can key on one canonical envelope version. The envelope's other
   guarantees (snake_case fields, canonical click-ids, clamped client timestamp, unified
   event-name charset) converged across the SDKs via the TR-* fixes.
@@ -262,19 +262,19 @@ All notable changes to this project will be documented in this file.
   and `prefilled_email=<email>` — and the server still reads the stamped `client_reference_id`, so
   attribution continued post-withdrawal. A new `disposeMarketingLinkDecorators()` is invoked on all
   three withdrawal paths (decorators re-init on the next load if consent returns).
-- **Track-3 review P2: web now captures Impact's real `irclickid` param.** The click-id alias map
+- **Web now captures Impact's real `irclickid` param.** The click-id alias map
   only carried canonical `irclid`, but Impact appends `&irclickid=` to the landing URL — so real
   Impact affiliate clicks were dark on web end-to-end (server + RN captured them; web didn't), and
   the `irclid→impact` source map was dead for real traffic. Added `irclickid → irclid` to
   `CLICK_ID_ALIASES` (mirrors `ScCid → sclid`). Corrects an earlier "no-op for web" call. **Requires
   a dl.js R2 rebuild to reach the CDN bundle.**
-- **Track-3 review P1: the TR-22 eager attribution capture now respects consent.** `getAttributionData()`
+- **The eager attribution capture now respects consent.** `getAttributionData()`
   ran as the first statement of `initializeAsync` with no `shouldTrack()` gate, so a returning
   GPC / DNT / opted-out visitor landing on a `?fbclid=` URL had `_fbp`/`_fbc` synthesized and
   first/last-touch persisted at page load — undoing the id-less-at-init privacy invariant. The eager
-  call is now gated on `shouldTrack()`; TR-22's early-capture benefit is preserved for consenting /
+  call is now gated on `shouldTrack()`; The early-capture benefit is preserved for consenting /
   default visitors (and a tracked-but-marketing-declined visitor already has the click-ids / marketing
-  cookies stripped by TR-03).
+  cookies stripped on a marketing decline).
 - **BATCH-2(e): `code` URL redaction is now OAuth-context-aware — coupon/referral codes survive.**
   `code` was in the always-redact URL denylist, so `redactUrl` replaced EVERY `code=` value with
   `__redacted__` — protecting OAuth authorization codes but silently destroying coupon / referral /
@@ -285,14 +285,14 @@ All notable changes to this project will be documented in this file.
   ONLY when such a marker is present in the SAME `k=v` string (evaluated per-string, so a query
   coupon survives even if the fragment carries an OAuth code); every other denylisted param
   (`token`/`access_token`/`email`/…) is still redacted unconditionally. +6 tests.
-- **TR-23: two coexisting script tags no longer double-init (duplicate pageviews).** The IIFE
+- **two coexisting script tags no longer double-init (duplicate pageviews).** The IIFE
   unconditionally overwrote `window.datalyr` with a fresh instance, so a Shopify App Embed + a
   manual snippet (or a double-included bundle) created two instances — each patching
   `history.pushState` and firing its own pageviews (distinct event_ids → no server dedup). The
   singleton now REUSES an existing `window.datalyr` instead of constructing a second one; the
   shared instance's `initialized` guard makes the second tag's bootstrap `init()` a no-op. (The
   CDN bootstrap also gains a `window.__datalyr_booted` sentinel — in the dl.js build artifact.)
-- **TR-22: landing attribution is captured eagerly, before the container fetch.** The first
+- **landing attribution is captured eagerly, before the container fetch.** The first
   attribution read sat inside the initial `page()` — *after* `await container.init()` (a ~3s
   budget) — so a router / consent tool that strips `fbclid` via `history.replaceState` within
   that window, or a fast bounce, lost the click id entirely. `initializeAsync` now calls
@@ -301,15 +301,15 @@ All notable changes to this project will be documented in this file.
 - **9.A.6: `gbraid`/`wbraid`/`rdt_cid`/`obclid`/`irclid`/`ko_click_id` now map to their real
   source** (google/google/reddit/outbrain/impact/klaviyo) in `determineSource` instead of the
   generic `paid` fallback.
-- **TR-13: terminal unload no longer beacons the already-persisted offline backlog (duplicate
+- **terminal unload no longer beacons the already-persisted offline backlog (duplicate
   purchases).** `forceFlush(terminal)` beaconed `live + offlineQueue` and persisted the same
   set; the backlog then re-drained on the next page load, so a purchase parked during an outage
   was delivered at tab-close AND re-drained later — and when those land >6h apart, ingest's
   dedup window has expired → a duplicate purchase row + double conversion. It now beacons ONLY
   the live queue (created this session; its beacon + next-load drain both land <6h, so dedup
   absorbs them) while still persisting the whole backlog for the next-load drain to deliver
-  exactly once. FSR-15 persist-first semantics unchanged.
-- **TR-03: marketing-declined visitors no longer have Meta/Google ad signals captured,
+  exactly once. Persist-first behaviour is unchanged.
+- **marketing-declined visitors no longer have Meta/Google ad signals captured,
   cookie-written, or shipped.** `consentAllowsMarketing()` gated only container init / cart
   attrs / auto-identify — never the event path — so a granular "analytics yes, marketing no"
   shopper still had `fbclid`/`gclid`/`_fbp`/`_fbc` on every event and `captureAdCookies()`
@@ -320,7 +320,7 @@ All notable changes to this project will be documented in this file.
   `utm_*` / source / medium / campaign / first-last-touch / `_ga` / `_gid`. The predicate is
   re-evaluated per event, so a later grant restores capture with no reload. Default (no consent
   signal) is unchanged — signals are stripped only on an explicit decline.
-- **TR-15: Shopify Customer Privacy consent is enforced during its async load + at drain time.**
+- **Shopify Customer Privacy consent is enforced during its async load + at drain time.**
   `customerPrivacy` loads asynchronously, so the pre-load window failed open (events sent) and
   the offline drain ran on a fail-open latched flag — a returning *declined* visitor fires no
   `visitorConsentCollected` event, so their persisted backlog drained before the decline was
@@ -330,7 +330,7 @@ All notable changes to this project will be documented in this file.
   backlog instead of sending), and (c) persists the in-memory anon id on a mid-session grant
   (opt-in / consent) so that session's events don't land under a visitor_id that vanishes on
   the next page load.
-- **TR-14: `setConsent({analytics:false})` now fully tears down auto-identify + purges PII.**
+- **`setConsent({analytics:false})` now fully tears down auto-identify + purges PII.**
   On analytics withdrawal `setConsent` gated the queue and container but — unlike `optOut()`
   — left `autoIdentify` alive: its form/fetch interceptors and `/account.json` polling kept
   running, and `triggerIdentify` persisted the captured email to storage **after** withdrawal
@@ -338,7 +338,7 @@ All notable changes to this project will be documented in this file.
   now mirrors `optOut()`: destroys `autoIdentify` and purges `dl_user_traits` /
   `dl_auto_identified_email` / `dl_journey` (auto-identify resumes on the next load if consent
   is re-granted).
-- **TR-04: URL fragment tokens are now redacted.** `redactUrl` only rewrote the query
+- **URL fragment tokens are now redacted.** `redactUrl` only rewrote the query
   string and returned early when there was no `?`, reattaching the fragment verbatim — so
   OAuth-implicit / Supabase magic-link sessions (`/welcome#access_token=eyJ…`), which carry
   the JWT in the **fragment** with no query string at all, shipped the full token in `url` /
@@ -375,60 +375,60 @@ Fixes from the 2026-06-10 full-stack review (Web SDK section). FSR ids reference
 `docs-v2/FULL_STACK_REVIEW_2026-06-10.md`.
 
 ### Fixed — attribution (HIGH)
-- **UTM attribution restored (FSR-13).** `captureAttribution()` stripped the `utm_`
+- **UTM attribution restored.** `captureAttribution()` stripped the `utm_`
   prefix, so events carried `source`/`campaign` while ingest and every attribution
   MV/lookup pipe key on `utm_source`/`utm_campaign` — the UTM leg of web attribution was
   dead. We now emit BOTH the canonical `utm_*` keys (what the server reads) and the
   stripped aliases (dashboards / `determineSource`). (`src/attribution.ts`)
-- **Stale `_fbc` for repeat ad clicks (FSR-14).** A new `fbclid` over an existing 90-day
+- **Stale `_fbc` for repeat ad clicks.** A new `fbclid` over an existing 90-day
   `_fbc` never refreshed it, so Meta received the old campaign's click id / creation time.
   We now detect a new click (compare the URL `fbclid` to the one embedded in `_fbc`) and
   regenerate `_fbc` with the new id + current time. (`src/attribution.ts`)
 
 ### Fixed — delivery / reliability (HIGH)
-- **Tab-switch no longer destroys the offline backlog (FSR-15).** `forceFlush` on every
+- **Tab-switch no longer destroys the offline backlog.** `forceFlush` on every
   `visibilitychange` beacon-drained the persisted offline queue and erased it on
   beacon-enqueue (not delivery), losing the backlog during an outage. Now: tab switches
   use response-checked fetch drains; only terminal unload beacons, and it never erases the
   persisted copy on a mere `sendBeacon`=true (next-load drain clears it, dedup-safe). It
   also honors the 429 backoff window. (`src/queue.ts`, `src/index.ts`)
-- **Critical events survive an unload mid-retry (FSR-16).** Purchase/signup/lead events
+- **Critical events survive an unload mid-retry.** Purchase/signup/lead events
   lived only in the in-memory retry closure during backoff. They're now persisted to the
   offline queue before the first send and removed on confirmed delivery. (`src/queue.ts`)
 
 ### Fixed — identity (HIGH)
-- **`user_id` no longer corrupted on reload (FSR-17).** Identifiers are read via a new
+- **`user_id` no longer corrupted on reload.** Identifiers are read via a new
   `storage.getString()` that skips `JSON.parse`, so numeric ids don't change type and
   16+-digit snowflake ids aren't precision-truncated. (`src/storage.ts`, `src/identity.ts`)
 
 ### Fixed — MEDIUM
-- ccTLD same-site referrer classification now uses a real eTLD+1 helper (FSR-47).
-- Internal-nav attribution fallback uses the fresher last-touch, not stale first-touch (FSR-48).
-- Auto-identify form capture skips gift/recipient/refer-a-friend email fields (FSR-49).
+- ccTLD same-site referrer classification now uses a real eTLD+1 helper.
+- Internal-nav attribution fallback uses the fresher last-touch, not stale first-touch.
+- Auto-identify form capture skips gift/recipient/refer-a-friend email fields.
 - `_dl_vid` cross-domain bridge param is validated (`anon_<uuid>`), stripped from the URL,
-  and never overwrites an existing visitor id — closing an identity-takeover footgun (FSR-50).
-- `setConsent()` is safe before `init()` (FSR-51).
-- `/container-scripts` fetch is time-boxed (3s) so it can't block the initial pageview (FSR-52).
-- `identify()` no longer rotates the session id mid-session (FSR-53).
-- Oversized batches drop `keepalive` so the 64KB cap can't permanently wedge the queue (FSR-54).
-- Permanent 4xx batches are dropped instead of head-of-line-blocking the offline queue forever (FSR-55).
-- `CookieStorage.get()` handles duplicate cookie names (returns the first) (FSR-56).
+  and never overwrites an existing visitor id — closing an identity-takeover footgun.
+- `setConsent()` is safe before `init()`.
+- `/container-scripts` fetch is time-boxed (3s) so it can't block the initial pageview.
+- `identify()` no longer rotates the session id mid-session.
+- Oversized batches drop `keepalive` so the 64KB cap can't permanently wedge the queue.
+- Permanent 4xx batches are dropped instead of head-of-line-blocking the offline queue forever.
+- `CookieStorage.get()` handles duplicate cookie names (returns the first).
 - `sanitizeEventData` key/value redaction anchored — stops dropping `author`/`session_*` and
-  redacting `referrer_host`/semver/hex order ids/`$alias` user ids (FSR-57).
+  redacting `referrer_host`/semver/hex order ids/`$alias` user ids.
 
 ### Fixed — LOW
-- CC purchase-pixel guard set only after the Meta pixel is confirmed live (FSR-102).
-- `sdk_version` synced to package.json + a build-time guard (`build:check`) enforces it (FSR-103, FSR-46).
-- Cross-domain CC bridge forwards both `gclid` and `fbclid` when present (FSR-104).
-- Caller-passed event properties take precedence over auto-captured attribution/context (FSR-105).
-- `reset()` clears first/last-touch attribution (cross-user contamination) (FSR-106).
-- Visitor id is not persisted at init for opted-out / GPC / DNT visitors (FSR-107).
-- Auto-identify form `MutationObserver` is disconnected on `destroy()`/opt-out (FSR-101).
+- CC purchase-pixel guard set only after the Meta pixel is confirmed live.
+- `sdk_version` synced to package.json + a build-time guard (`build:check`) enforces it.
+- Cross-domain CC bridge forwards both `gclid` and `fbclid` when present.
+- Caller-passed event properties take precedence over auto-captured attribution/context.
+- `reset()` clears first/last-touch attribution (cross-user contamination).
+- Visitor id is not persisted at init for opted-out / GPC / DNT visitors.
+- Auto-identify form `MutationObserver` is disconnected on `destroy()`/opt-out.
 
 ### Build
 - `scripts/check-bundle.js` (`npm run build:check`) fails the build unless the output
   bundles contain the `data-workspace-id` bootstrap + a current feature literal and the
-  `sdk_version` matches package.json — guarding the 2026-05-26 outage mode (FSR-46).
+  `sdk_version` matches package.json.
 
 ## [1.7.1] - 2026-06-02
 

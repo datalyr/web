@@ -343,7 +343,7 @@ export interface IngestEventPayload {
   // SDK info
   sdk_version?: string;
   sdk_name?: string;
-  schema_version?: number; // A3-25: versioned-envelope stamp
+  schema_version?: number; // versioned-envelope stamp
 }
 
 export interface IngestBatchPayload {
