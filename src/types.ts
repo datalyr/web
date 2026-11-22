@@ -13,15 +13,17 @@ export interface DatalyrConfig {
   // Batching
   batchSize?: number;                   // Default: 10
   flushInterval?: number;               // Default: 5000ms
-  flushAt?: number;                     // Default: 10 (events)
+  /** @deprecated Has no effect; the queue flushes at `batchSize`. Still accepted. */
+  flushAt?: number;
   
   // Critical events (bypass batching)
   criticalEvents?: string[];           // Default: ['purchase', 'signup', 'subscribe', 'lead', 'conversion']
   highPriorityEvents?: string[];       // Default: ['add_to_cart', 'begin_checkout', 'view_item', 'search']
   
   // Session
-  sessionTimeout?: number;              // Default: 60 minutes (increased from 30 for OAuth flows)
-  trackSessions?: boolean;              // Default: true
+  sessionTimeout?: number;              // Default: 30 minutes since last activity (ms; since 1.9.4)
+  /** @deprecated Has no effect; sessions are always tracked. Still accepted. */
+  trackSessions?: boolean;
   
   // Attribution
   attributionWindow?: number;           // Default: 90 days (increased from 30 for B2B sales cycles)
@@ -44,7 +46,8 @@ export interface DatalyrConfig {
   cookieExpires?: number;               // Default: 365 days
   secureCookie?: boolean | 'auto';      // Default: 'auto'
   sameSite?: 'Strict' | 'Lax' | 'None'; // Default: 'Lax'
-  cookiePrefix?: string;                // Default: '__dl_'
+  /** @deprecated Has no effect; storage and cookie key names are fixed. Still accepted. */
+  cookiePrefix?: string;
   
   // Performance
   enablePerformanceTracking?: boolean;  // Default: true

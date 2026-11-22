@@ -167,9 +167,10 @@ class SafeStorage implements StorageWrapper {
    * This fixes the double-prefix issue from earlier SDK versions.
    * Called automatically during SDK initialization.
    *
+   * @param debug Log the migrated count (SDK `debug` config)
    * @returns Number of keys migrated
    */
-  migrateFromLegacyPrefix(): number {
+  migrateFromLegacyPrefix(debug = false): number {
     if (!this.storage) {
       return 0; // Can't migrate in memory-only mode
     }
@@ -225,7 +226,7 @@ class SafeStorage implements StorageWrapper {
         }
       });
 
-      if (migratedCount > 0) {
+      if (migratedCount > 0 && debug) {
         console.log(`[Datalyr Storage] Migrated ${migratedCount} keys from legacy prefix`);
       }
 
