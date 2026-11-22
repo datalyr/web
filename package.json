@@ -2,9 +2,21 @@
   "name": "@datalyr/web",
   "version": "1.9.15",
   "description": "DATALYR Web SDK: attribution and analytics for websites, tied to revenue",
-  "main": "dist/datalyr.js",
+  "main": "dist/datalyr.cjs.js",
   "module": "dist/datalyr.esm.js",
   "types": "dist/index.d.ts",
+  "unpkg": "dist/datalyr.js",
+  "jsdelivr": "dist/datalyr.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/datalyr.esm.js",
+      "require": "./dist/datalyr.cjs.js",
+      "default": "./dist/datalyr.esm.js"
+    },
+    "./package.json": "./package.json",
+    "./dist/*": "./dist/*"
+  },
   "files": [
     "dist"
   ],

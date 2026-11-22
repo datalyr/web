@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Package entry points: `require('@datalyr/web')` returned `{}` because `main` pointed at the browser script build (`dist/datalyr.js`). `main` now points at the CommonJS build (`dist/datalyr.cjs.js`), and an `exports` map sends `import` to the ESM build and `require` to the CommonJS build, with types for both. `unpkg` and `jsdelivr` keep serving `dist/datalyr.js`, and deep imports under `dist/` (such as `@datalyr/web/dist/datalyr.js`) still work. No built file changed.
+
 ## 1.9.15
 
 - Offline backlog shared safely across tabs: every tab of a site shares one stored backlog (`dl_dl_offline_queue`). A save used to overwrite it, so the last tab to save erased the events other tabs had parked. A save now merges with what is stored, leaving out events this tab delivered or dropped. The stored format is unchanged (a plain array of events), so a rollback to an older script still reads and drains it.
