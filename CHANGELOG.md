@@ -2,10 +2,10 @@
 
 ## Unreleased
 
-- npm package: ships only the built bundles and the public type declarations. The 43 `*.test.d.ts` files (and their maps) and every `.map` file are left out; the declaration build uses `tsconfig.build.json`, which excludes tests. `.npmignore` is removed (`files` in package.json already decided what ships).
+- npm package: ships only the built bundles and the public type declarations. The 43 `*.test.d.ts` files and every declaration map (`.d.ts.map`) are left out; the JavaScript source maps still ship, because the bundles point to them; the declaration build uses `tsconfig.build.json`, which excludes tests. `.npmignore` is removed (`files` in package.json already decided what ships).
 - Session rotation and the legacy storage-key migration no longer print `console.log` lines unless `debug: true`.
 - `flushAt`, `trackSessions` and `cookiePrefix` are marked `@deprecated`: they have no effect and are still accepted. The `sessionTimeout` comment now gives the real default, 30 minutes (since 1.9.4).
-- Getters called before `init()` (`getAnonymousId`, `getVisitorId`, `getDistinctId`, `getUserId`, `getSessionId`, `getSessionData`, `getStripeMetadata`, `getWhopCheckoutMetadata`, `getAttribution`, `getJourney`, `getNetworkStatus`) no longer throw a `TypeError`. They log one warning and return an empty value: `''` for ids typed `string`, `null` for `getUserId` / `getSessionData`, `{}` / `[]` for attribution and journey. Return types are unchanged.
+- Getters called before `init()` (`getAnonymousId`, `getVisitorId`, `getDistinctId`, `getUserId`, `getSessionId`, `getSessionData`, `getStripeMetadata`, `getWhopCheckoutMetadata`, `getAttribution`, `getJourney`, `getNetworkStatus`) no longer throw a `TypeError`. They log one warning and return an empty value: `''` for ids typed `string`, `null` for `getUserId` / `getSessionData`, `{}` / `[]` for attribution and journey. Return types are unchanged. Note for checkout code: `getStripeMetadata()` before `init()` used to throw; it now returns empty `client_reference_id` and `visitor_id`, so call it after `init()`.
 - Changelog: added the missing 1.9.10 and 1.9.11 entries and a note on versions that shipped only through the CDN.
 
 ## Versions not published to npm
