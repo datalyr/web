@@ -54,7 +54,7 @@ export default [
       }),
       commonjs(),
       typescript({
-        tsconfig: './tsconfig.json',
+        tsconfig: './tsconfig.build.json',
         declaration: false,
         declarationMap: false
       })
@@ -87,7 +87,7 @@ export default [
       }),
       commonjs(),
       typescript({
-        tsconfig: './tsconfig.json',
+        tsconfig: './tsconfig.build.json',
         declaration: true,
         declarationDir: 'dist',
         declarationMap: true
@@ -121,7 +121,7 @@ export default [
       }),
       commonjs(),
       typescript({
-        tsconfig: './tsconfig.json',
+        tsconfig: './tsconfig.build.json',
         declaration: false,
         declarationMap: false
       })
@@ -152,7 +152,7 @@ export default [
       }),
       commonjs(),
       typescript({
-        tsconfig: './tsconfig.json',
+        tsconfig: './tsconfig.build.json',
         declaration: false,
         declarationMap: false
       })
@@ -178,7 +178,7 @@ export default [
       }),
       commonjs(),
       typescript({
-        tsconfig: './tsconfig.json',
+        tsconfig: './tsconfig.build.json',
         declaration: false,
         declarationMap: false
       })

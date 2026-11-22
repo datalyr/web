@@ -6,7 +6,9 @@
   "module": "dist/datalyr.esm.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.map",
+    "!dist/**/*.test.d.ts"
   ],
   "scripts": {
     "build": "rollup -c",
