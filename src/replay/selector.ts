@@ -2,7 +2,7 @@
  * Click fidelity (1.9.2): the shared click selector, target resolution, position class
  * and element box used by heat items AND the replay-mode `clk` companion event. The
  * worker (distill / heat rollups) is built against exactly this algorithm; change both
- * together. Contract: heatmaps-backend-handoff.md §1–§3.
+ * together. Contract: heatmaps-backend-handoff.md –
  */
 
 export const SEL_MAX = 200;

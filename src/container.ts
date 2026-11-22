@@ -1316,7 +1316,7 @@ export class ContainerManager {
    * Whether the Meta Pixel is configured AND loaded (fbq present) — i.e. a Purchase
    * co-fire via trackToPixels() would actually reach Meta rather than silently no-op.
    * Used by the CC purchase-pixel dedup so its once-per-order guard isn't burned before
-   * the pixel is live. (FSR-102)
+   * the pixel is live.
    */
   hasMetaPixel(): boolean {
     return !!(this.pixels?.meta?.enabled && (window as any).fbq);

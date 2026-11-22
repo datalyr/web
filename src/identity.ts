@@ -29,12 +29,12 @@ export class IdentityManager {
   private anonymousId: string;
   private userId: string | null = null;
   private sessionId: string | null = null;
-  // FSR-107: when tracking is disallowed at init (opt-out / GPC / DNT), a freshly
+  // when tracking is disallowed at init (opt-out / GPC / DNT), a freshly
   // generated id is kept in MEMORY only — no cookie / localStorage write. Events don't
   // send anyway; a later optIn()/consent grant persists on the next identify/reset.
   private persistNewId: boolean;
   private sessionTimeout: number;
-  /** WEB-26: bumps whenever the persisted identity changes, so an in-flight
+  /** bumps whenever the persisted identity changes, so an in-flight
    *  encrypted write — or read (D01) — can tell it has been superseded. */
   private piiGeneration = 0;
   /** D01: the hydration currently awaiting an encrypted read. It is both the
@@ -136,7 +136,7 @@ export class IdentityManager {
    */
   private getOrCreateAnonymousId(): string {
     // 1. An EXISTING identity always wins — check the root-domain cookie (works across
-    //    subdomains) then localStorage. FSR-50: a persisted visitor must NEVER be
+    //    subdomains) then localStorage. a persisted visitor must NEVER be
     //    silently overwritten by a ?_dl_vid in the URL, or shared links would merge
     //    unrelated visitors (identity takeover). The CC bridge (restoreFromURL) writes
     //    this cookie BEFORE us, so the storefront visitor_id still wins there.
@@ -148,7 +148,7 @@ export class IdentityManager {
       storage.set('dl_anonymous_id', anonymousId); // sync to localStorage
       return anonymousId;
     }
-    anonymousId = storage.getString('dl_anonymous_id'); // FSR-17: raw string, no JSON.parse
+    anonymousId = storage.getString('dl_anonymous_id'); // raw string, no JSON.parse
     if (anonymousId) {
       this.setRootDomainCookie('__dl_visitor_id', anonymousId);
       return anonymousId;
@@ -175,7 +175,7 @@ export class IdentityManager {
     // browser's own storage (never the URL), only a LIVE session counts (an
     // expired record means the visit is over: a fresh id, as before 1.9.6), the
     // record carries the id only while tracking is allowed, and reset() always
-    // starts a new session. While ids must stay in memory (FSR-107; on Shopify
+    // starts a new session. While ids must stay in memory (on Shopify
     // that is also every page load before the Customer Privacy API answers) the
     // id is recovered into memory only and written on a grant.
     const fromSession = this.visitorIdFromSessionRecord();
@@ -193,7 +193,7 @@ export class IdentityManager {
       return handedOffId;
     }
 
-    // 3. Generate a new ID (persisted unless tracking is disallowed at init — FSR-107).
+    // 3. Generate a new ID (persisted unless tracking is disallowed at init).
     anonymousId = `anon_${generateUUID()}`;
     this.persistAnonymousId(anonymousId);
     return anonymousId;
@@ -241,7 +241,7 @@ export class IdentityManager {
 
   /**
    * The visitor id for the session record's recovery copy, or null while ids
-   * must stay in memory only (FSR-107).
+   * must stay in memory only.
    */
   getPersistableAnonymousId(): string | null {
     if (!this.persistNewId) return null;
@@ -258,7 +258,7 @@ export class IdentityManager {
 
   /**
    * Persist a freshly-adopted/generated anonymous id to the root-domain cookie +
-   * localStorage. Gated by persistNewId (FSR-107: don't write a tracking identifier for
+   * localStorage. Gated by persistNewId (don't write a tracking identifier for
    * an opted-out / GPC / DNT visitor at init).
    */
   private persistAnonymousId(id: string): void {
@@ -268,7 +268,7 @@ export class IdentityManager {
   }
 
   /**
-   * TR-15 / FSR-107: tracking became allowed mid-session (optIn / consent grant). Start
+   * / tracking became allowed mid-session (optIn / consent grant). Start
    * persisting AND flush the current in-memory anon id to the cookie + localStorage now.
    * Without this, a visitor declined at init keeps a memory-only id, so that session's
    * events land under a visitor_id that vanishes on the next page load (attribution
@@ -283,7 +283,7 @@ export class IdentityManager {
   /**
    * Remove a query param from the current URL via history.replaceState (best-effort).
    * Used so a consumed `_dl_vid` doesn't linger in the address bar and get re-shared.
-   * (FSR-50)
+   *
    */
   private stripUrlParam(param: string): void {
     try {
@@ -334,14 +334,14 @@ export class IdentityManager {
    * Get stored user ID from previous session
    */
   private getStoredUserId(): string | null {
-    // FSR-17: getString (not get) so a numeric-looking user_id ('12345') doesn't come
+    // getString (not get) so a numeric-looking user_id ('12345') doesn't come
     // back as a JS number after reload, and a 16+-digit snowflake id isn't precision-
     // corrupted by JSON.parse — both would fragment identity from the second page on.
     return storage.getString('dl_user_id');
   }
 
   /**
-   * WEB-22 — is this user id personally identifying, and therefore not
+   * — is this user id personally identifying, and therefore not
    * something we may write to localStorage in the clear?
    *
    * The auto-identify path calls `identify(email, { email })`, so the raw
@@ -379,7 +379,7 @@ export class IdentityManager {
   private persistUserId(userId: string): void {
     if (!IdentityManager.looksLikePII(userId)) {
       storage.set('dl_user_id', userId);
-      // WEB-26: a previous PII user's encrypted id must not linger once an
+      // a previous PII user's encrypted id must not linger once an
       // opaque id takes over. Reachable when identify('opaque') runs before
       // hydrateEncryptedUserId() has populated this.userId, so index.ts sees no
       // current user and skips its account-switch reset().
@@ -392,7 +392,7 @@ export class IdentityManager {
     // SDK version before this fix existed.
     storage.remove('dl_user_id');
 
-    // WEB-26: the encrypted write is async, and reset()/optOut()/consent
+    // the encrypted write is async, and reset()/optOut()/consent
     // withdrawal are not. Without a generation guard this sequence resurrects a
     // logged-out user's email: identify(email) → write pending →
     // remove('dl_user_id_pii') deletes NOTHING because the write has not landed
@@ -486,7 +486,7 @@ export class IdentityManager {
   }
 
   private async runHydration(generation: number): Promise<void> {
-    // WEB-26 (a) — migrate a plaintext address written by <= 1.7.7.
+    // (a) — migrate a plaintext address written by <= 1.7.7.
     //
     // persistUserId() only removes `dl_user_id` when identify() runs again, and
     // for the exact population this fix targets it never does:
@@ -501,7 +501,7 @@ export class IdentityManager {
       return;
     }
 
-    // WEB-26 (b) — recover a write that was dropped because encryption was not
+    // (b) — recover a write that was dropped because encryption was not
     // keyed yet. index.ts sets `initialized = true` before initializeAsync()
     // finishes, so the documented `init(); identify(email)` pattern can reach
     // persistUserId() before dataEncryption has a key; that write rejects and
@@ -588,7 +588,7 @@ export class IdentityManager {
     const previousUserId = this.userId;
     this.userId = userId;
 
-    // Persist for future sessions. WEB-22: encrypted when the id is PII (the
+    // Persist for future sessions. encrypted when the id is PII (the
     // auto-identify path makes it the raw email); plaintext otherwise.
     this.persistUserId(userId);
     this.persistUserIdKind(kind, userId);
@@ -629,14 +629,14 @@ export class IdentityManager {
    * Clears user_id but keeps anonymous_id
    */
   reset(): void {
-    // WEB-26: invalidate any encrypted write still in flight.
+    // invalidate any encrypted write still in flight.
     // D01: the same bump invalidates an in-flight encrypted *read* — a hydration
     // that resolves after this point must not restore the logged-out user onto
     // the new anonymous id generated below. Dropping the handle as well means a
     // late resolution cannot be mistaken for the current one.
     this.invalidateIdentity();
     storage.remove('dl_user_id');
-    // WEB-22: the encrypted PII copy must go too, or a logout would leave the
+    // the encrypted PII copy must go too, or a logout would leave the
     // previous user's email at rest.
     storage.remove('dl_user_id_pii');
     storage.remove('dl_user_traits');

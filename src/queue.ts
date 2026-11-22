@@ -17,7 +17,7 @@ const DEFAULT_HIGH_PRIORITY_EVENTS = ['add_to_cart', 'begin_checkout', 'view_ite
 // before it forwards the conversion to an ad platform. See enqueue().
 const IDENTITY_EVENTS = ['$identify', '$alias'];
 
-// WEB-23: how long to stop sending after a 403 (origin not allowed). Long enough not to
+// how long to stop sending after a 403 (origin not allowed). Long enough not to
 // hammer a rejecting origin, short enough that a server-side config fix is picked up
 // within the same visit. A 403 carries no Retry-After, so this is fixed.
 const ORIGIN_REJECTED_BACKOFF_MS = 5 * 60 * 1000;
@@ -33,13 +33,13 @@ const MAX_SETTLED_IDS = 2000;
 
 // Backpressure, not failure — routed to the offline queue WITHOUT retrying (which would
 // storm an already-overloaded server) and gated behind rateLimitedUntil. Raised for a 429
-// and, since WEB-23, for a 403: both mean "not now", not "never". See sendBatch.
+// and also for a 403: both mean "not now", not "never". See sendBatch.
 class RateLimitError extends Error {}
 
 // A permanent (non-retryable) failure — a 4xx other than 403/408/429, i.e. an invalid
 // event shape (400) or bad auth (401). Retrying or parking it just head-of-line-blocks
 // the offline queue forever and hammers ingest. Tagged so the send paths DROP the batch
-// instead of unshifting it back to the head. (FSR-55, narrowed by WEB-23 — a 403 is
+// instead of unshifting it back to the head. (Narrowed later: a 403 is
 // server *configuration* state and does change, so it is no longer in this class.)
 class PermanentError extends Error {
   constructor(public status: number, message?: string) {
@@ -72,12 +72,12 @@ export class EventQueue {
   private OFFLINE_QUEUE_KEY = 'dl_offline_queue';
   private flushLock = false; // FIXED (DATA-03): Mutex to prevent race conditions
   private offlineQueueLock = false; // FIXED (DATA-03): Separate lock for offline queue operations
-  private offlineProcessing = false; // FIXED (WEB-1): re-entrancy guard for processOfflineQueue
-  private inFlight: IngestEventPayload[] = []; // FIXED (WEB-3): batch currently in _flight's keepalive fetch — forceFlush must NOT re-beacon it
+  private offlineProcessing = false; // FIXED: re-entrancy guard for processOfflineQueue
+  private inFlight: IngestEventPayload[] = []; // FIXED: batch currently in _flight's keepalive fetch — forceFlush must NOT re-beacon it
   private enabled = true; // FIXED (consent): when false (opt-out / withdrawn analytics consent) all enqueue/flush/drain is a no-op
-  private consentCheck?: () => boolean; // TR-15: live consent gate re-evaluated at DRAIN time (not just the latched `enabled`)
+  private consentCheck?: () => boolean; // live consent gate re-evaluated at DRAIN time (not just the latched `enabled`)
   private rateLimitedUntil = 0; // FIXED (429): skip flush/drain until the server's Retry-After window passes
-  // WEB-23: permanent drops used to be invisible — a debug-gated log line and
+  // permanent drops used to be invisible — a debug-gated log line and
   // nothing else, so 11 days of 403s looked identical to a healthy queue. Counted
   // here and exposed via getStats() so a drop is at least observable.
   private droppedEventCount = 0;
@@ -129,7 +129,7 @@ export class EventQueue {
     this.setupNetworkListeners();
     this.startPeriodicFlush();
 
-    // WEB-1: a previous session may have left events in the persisted offline queue.
+    // a previous session may have left events in the persisted offline queue.
     // The 'online' listener only fires on an offline→online TRANSITION, which never
     // happens for a visitor who returns already-online — so drain on startup too,
     // otherwise those events (incl. failed revenue conversions) just age out.
@@ -155,7 +155,7 @@ export class EventQueue {
     }
 
     // Critical events (purchase/signup/lead/…) send immediately, bypassing the batch.
-    // FSR-16: persist the event to the offline queue BEFORE the first send and remove it
+    // persist the event to the offline queue BEFORE the first send and remove it
     // on confirmed delivery. Previously the event existed ONLY inside the sendBatch retry
     // closure during backoff (~31s) — not in any tracked queue — so a tab close mid-retry
     // (the most plausible moment after checkout) lost the purchase permanently: forceFlush
@@ -177,7 +177,7 @@ export class EventQueue {
         this.log(`Sending ${batch.length - 1} queued event(s) ahead of critical event (identity first):`, eventName);
       }
       // The events taken from the live queue are no longer in it, so an unload during the
-      // send must find them in the offline queue, like the critical event. (FSR-16)
+      // send must find them in the offline queue, like the critical event.
       this.persistCriticalEvents(batch);
       const ids = batch.map(e => e.event_id);
 
@@ -194,7 +194,7 @@ export class EventQueue {
             return;
           }
           // Leave it persisted: the periodic drain + next-load drain retry it, and an
-          // unload mid-retry can now beacon it (it's in the offline queue). (FSR-16)
+          // unload mid-retry can now beacon it (it's in the offline queue).
           this.log('Critical event send failed, retained in offline queue:', eventName, error);
         });
 
@@ -340,7 +340,7 @@ export class EventQueue {
     const batchSize = Math.min(this.config.batchSize, this.queue.length);
     const events = this.queue.slice(0, batchSize);
 
-    // WEB-3 (HIGH-1): mark this batch as in-flight. sendBatch's fetch uses
+    // (HIGH-1): mark this batch as in-flight. sendBatch's fetch uses
     // keepalive:true, so it survives an unload that fires mid-flush — forceFlush
     // reads `inFlight` to avoid re-beaconing the very events this fetch is sending.
     // `inFlight` is always the FRONT `batchSize` of this.queue while flushLock holds
@@ -354,13 +354,13 @@ export class EventQueue {
       this.log(`Successfully sent and removed ${batchSize} events from queue`);
     } catch (error) {
       this.log('Failed to send batch:', error);
-      // WEB-8: make the offline queue the SINGLE owner of these events. Previously
+      // make the offline queue the SINGLE owner of these events. Previously
       // they stayed in the live queue AND were copied to the offline queue, so a
       // later success on both paths double-sent (relying on server-side dedup).
       // Remove the same slice from the live queue; the offline queue now drains on
-      // every periodic tick (WEB-1/WEB-2), so they are still retried, not stranded.
+      // every periodic tick, so they are still retried, not stranded.
       this.queue.splice(0, batchSize);
-      // FSR-55: don't park a permanently-rejected batch — it would never succeed and
+      // don't park a permanently-rejected batch — it would never succeed and
       // would block the offline drain. Drop it.
       if (error instanceof PermanentError) {
         this.recordDrop(events.length, error.status);
@@ -397,7 +397,7 @@ export class EventQueue {
     const currentEndpoint = endpoints[endpointIndex] || this.config.endpoint;
 
     const body = JSON.stringify(batchPayload);
-    // FSR-54: keepalive requests share a 64KB in-flight quota (Fetch spec) — a larger
+    // keepalive requests share a 64KB in-flight quota (Fetch spec) — a larger
     // body fails INSTANTLY with a network error, then retries through every fallback +
     // backoff (all failing the same way) and parks in the offline queue, where it
     // head-of-line-blocks the drain forever. keepalive only matters for unload survival,
@@ -457,14 +457,14 @@ export class EventQueue {
           throw new RateLimitError('Rate limited (429)');
         }
 
-        // WEB-23: a 403 is NOT permanent — it is server *configuration* state, and it
+        // a 403 is NOT permanent — it is server *configuration* state, and it
         // changes. On 2026-07-13 an allowed_origins regression made ingest reject three
         // workspaces with 403; the config was fixed 11 days later, but every event sent
-        // in between had already been dropped on the floor by the FSR-55 rule below.
+        // in between had already been dropped on the floor by rule below.
         // Eleven days of data, unrecoverable, with only a debug log to show for it.
         //
         // Treated like 429 instead: park the events offline behind a backoff window, so
-        // we neither hammer a rejecting origin (FSR-55's real concern) nor discard data
+        // we neither hammer a rejecting origin ('s real concern) nor discard data
         // that would have been accepted an hour later. The window is fixed because a 403
         // carries no Retry-After.
         if (response.status === 403) {
@@ -473,7 +473,7 @@ export class EventQueue {
           throw new RateLimitError('Origin rejected (403)');
         }
 
-        // FSR-55: a 4xx other than 403/408 (timeout) is PERMANENT — invalid event shape
+        // a 4xx other than 403/408 (timeout) is PERMANENT — invalid event shape
         // (400) or auth (401). Retrying / parking it just blocks the queue and hammers
         // ingest forever. Tag it so the caller drops the batch.
         if (response.status >= 400 && response.status < 500 && response.status !== 408) {
@@ -663,7 +663,7 @@ export class EventQueue {
       if (this.queue.length > 0) {
         this.flush();
       }
-      // WEB-1/WEB-2: also drain persisted offline events (including failed critical
+      // also drain persisted offline events (including failed critical
       // events that enqueue() parked here) on every tick — not only on an 'online'
       // transition that may never fire. This is what gives parked purchase/lead
       // events a retry path while the user stays online.
@@ -696,7 +696,7 @@ export class EventQueue {
     // purge. Gating here (a persistence sink, not just the send sinks) closes it.
     if (!this.enabled) return;
 
-    // WEB-24. This early return used to `return` outright — losing the batch, because
+    // This early return used to `return` outright — losing the batch, because
     // _flush() has ALREADY spliced these events out of the live queue before calling
     // here, so they would exist in neither queue.
     //
@@ -763,7 +763,7 @@ export class EventQueue {
    * Persist a critical event (and the identity events sent ahead of it) to the offline
    * queue BEFORE the immediate send, so they survive an unload during the send/backoff
    * window, in send order. Deduped on event_id so a re-enqueue can't double-store one.
-   * (FSR-16)
+   *
    */
   private persistCriticalEvents(events: IngestEventPayload[]): void {
     if (!this.enabled) return;
@@ -776,7 +776,7 @@ export class EventQueue {
   }
 
   /**
-   * Cap the in-memory backlog (critical-first eviction, see capOffline). WEB-27: overflow
+   * Cap the in-memory backlog (critical-first eviction, see capOffline). overflow
    * is data loss too, so it is counted and reported, not trimmed silently.
    */
   private trimOfflineMemory(): void {
@@ -790,7 +790,7 @@ export class EventQueue {
 
   /**
    * Remove delivered/dropped events from the offline queue by event_id, and clear the
-   * persisted copy when the queue empties. (FSR-16)
+   * persisted copy when the queue empties.
    */
   private removeFromOfflineQueue(eventIds: string[]): void {
     const before = this.offlineQueue.length;
@@ -876,11 +876,11 @@ export class EventQueue {
    * Process offline queue
    */
   private async processOfflineQueue(): Promise<void> {
-    // WEB-1: guard against re-entrancy. This is now driven from three places (the
+    // guard against re-entrancy. This is now driven from three places (the
     // 'online' listener, the periodic flush, and the on-load kick); without a guard
     // two of them could splice the same offlineQueue concurrently and double-send.
     if (!this.enabled) return;
-    // TR-15: re-check consent at DRAIN time. A returning DECLINED visitor whose consent
+    // re-check consent at DRAIN time. A returning DECLINED visitor whose consent
     // signal loads asynchronously (Shopify customerPrivacy) fires no visitorConsentCollected
     // event, so `enabled` stayed at its fail-open init value. If consent now says no, latch
     // off and PURGE the persisted backlog instead of draining it (a later grant re-enables
@@ -910,11 +910,11 @@ export class EventQueue {
           this.markSettled(batch);
           this.saveOfflineQueue();
         } catch (error) {
-          // FSR-55: a permanently-rejected (4xx) batch must NOT go back to the head —
+          // a permanently-rejected (4xx) batch must NOT go back to the head —
           // that would block every event behind it forever and hammer ingest every tick.
           // Drop it (already spliced off the front) and keep draining the rest.
           if (error instanceof PermanentError) {
-            // WEB-27: count and surface these too. WEB-23's whole effect is to
+            // count and surface these too. Treating 403 as retryable has the effect to
             // PARK more batches offline, so the drain — not the live flush — is
             // where drops now predominantly happen. Counting only _flush left the
             // dominant loss path invisible, which is the exact failure mode the
@@ -959,7 +959,7 @@ export class EventQueue {
   }
 
   /**
-   * WEB-23: queue health, including events the SDK gave up on.
+   * queue health, including events the SDK gave up on.
    *
    * `droppedEvents` is the number this session discarded as permanently rejected
    * (a 400/401). It exists because a silent drop is precisely the failure mode
@@ -1008,7 +1008,7 @@ export class EventQueue {
    * Force flush. Called on visibilitychange:hidden (NON-terminal — an ordinary tab
    * switch / mobile background) and on pagehide+beforeunload (terminal unload).
    *
-   * FSR-15: the old single path beaconed BOTH queues on EVERY visibilitychange and then
+   * the old single path beaconed BOTH queues on EVERY visibilitychange and then
    * storage.remove()'d the persisted offline copy on sendBeacon()===true. But sendBeacon
    * true only means the browser ENQUEUED the request — not that it was delivered. The
    * offline queue exists precisely because earlier sends failed (ingest down / 5xx / 429);
@@ -1022,7 +1022,7 @@ export class EventQueue {
    *    neither erases the backlog on failure. The destructive beacon path is not used.
    *  - Terminal (unload): PERSIST everything first (live + the already-persisted offline
    *    backlog) and NEVER storage.remove() on a mere beacon enqueue. Beacon ONLY the LIVE
-   *    queue best-effort — NOT the offline backlog (TR-13): the backlog is already durable and
+   *    queue best-effort — NOT the offline backlog: the backlog is already durable and
    *    the next-load drain delivers it exactly once, so beaconing it here too risked a
    *    delivered-now-AND-re-drained-next-load double-send that, when >6h apart, outlives
    *    ingest's dedup window → a duplicate purchase. The next page load's response-checked
@@ -1054,14 +1054,14 @@ export class EventQueue {
 
     // Detach the IN-MEMORY queues synchronously so a second unload event this lifecycle
     // finds nothing to re-beacon (HIGH-2). The persisted STORAGE copy below is the
-    // durable record and is deliberately NOT removed on a successful beacon. (FSR-15)
+    // durable record and is deliberately NOT removed on a successful beacon.
     this.queue = this.queue.slice(0, this.inFlight.length);
     this.offlineQueue = [];
 
     if (pending.length === 0) return;
 
     // Persist the full backlog FIRST so it survives no matter what sendBeacon reports.
-    // The next load's response-checked drain delivers + clears it (dedup-safe). (FSR-15)
+    // The next load's response-checked drain delivers + clears it (dedup-safe).
     // 1.9.15: merged with other tabs' stored events and capped critical-first; what the
     // cap leaves out is counted (it is lost once this page is gone).
     if (this.enabled) {
@@ -1074,7 +1074,7 @@ export class EventQueue {
       this.persistOffline(kept);
     }
 
-    // TR-13: beacon ONLY the LIVE queue (never-persisted events from THIS session). The
+    // beacon ONLY the LIVE queue (never-persisted events from THIS session). The
     // offline backlog is already durable and the next-load drain delivers it once, so
     // beaconing it here would double-send it — and a stale backlog event (e.g. a purchase
     // parked during an outage) re-drained on a later day lands >6h from the beacon, past
@@ -1142,7 +1142,7 @@ export class EventQueue {
   }
 
   /**
-   * TR-15: register a live consent predicate the offline drain re-evaluates at drain time.
+   * register a live consent predicate the offline drain re-evaluates at drain time.
    * `enabled` is latched at init to a fail-open value (Shopify's customerPrivacy loads
    * async), and a returning DECLINED visitor fires no visitorConsentCollected event — so
    * without this, their persisted backlog would drain before the decline is known.

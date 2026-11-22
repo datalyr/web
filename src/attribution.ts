@@ -32,7 +32,7 @@ export class AttributionManager {
     'gbraid',     // Google Ads (iOS)
     'wbraid',     // Google Ads (web)
     'ttclid',     // TikTok
-    // WEB-28: OpenAI Ads. Captured by iOS and React Native since launch but
+    // OpenAI Ads. Captured by iOS and React Native since launch but
     // never by the web SDK, so every OpenAI Ads *web* conversion delivered with
     // attribution_type: none unless the customer passed the value by hand.
     // Placed after the Google block to match the mobile SDKs' ordering — the
@@ -99,7 +99,7 @@ export class AttributionManager {
     'dl_kmessage_id'
   ];
 
-  // TR-03: ad-cookie fields (Meta/Google Ads/TikTok/Snap) that are MARKETING-scoped. When
+  // ad-cookie fields (Meta/Google Ads/TikTok/Snap) that are MARKETING-scoped. When
   // marketing consent is declined these are neither synthesized/written nor shipped. Google
   // Analytics cookies (_ga/_gid) and utm_* stay — they're analytics-scoped.
   // These are the event_data KEYS captureAdCookies() emits, which for LinkedIn is the
@@ -110,7 +110,7 @@ export class AttributionManager {
     '_fbp', '_fbc', '_gcl_aw', '_gcl_dc', '_gcl_gb', '_gcl_ha', '_gac', '_ttp', '_ttc', '_scid',
     '_twclid', '_twpid', '_axeid', '_axwrt', 'axwrt', '_axart', '_li_fat_id',
   ];
-  // TR-03: live marketing-consent predicate. Absent = allowed (preserves today's behavior);
+  // live marketing-consent predicate. Absent = allowed (preserves today's behavior);
   // returns false ONLY on an explicit decline (Shopify marketing:false / setConsent
   // marketing|sale=false), and is re-evaluated per event so a later grant restores capture.
   private marketingAllowedFn?: () => boolean;
@@ -185,7 +185,7 @@ export class AttributionManager {
     return profileId;
   }
 
-  // TR-03: default (no predicate / no signal) = allowed → byte-identical to prior behavior.
+  // default (no predicate / no signal) = allowed → byte-identical to prior behavior.
   private isMarketingAllowed(): boolean {
     return this.marketingAllowedFn ? this.marketingAllowedFn() !== false : true;
   }
@@ -291,7 +291,7 @@ export class AttributionManager {
 
     // Capture UTM parameters.
     // Emit BOTH the canonical `utm_*` key AND the stripped alias (source/medium/...).
-    // FSR-13: ingest (event_data.utm_source ?? utmSource) and EVERY attribution MV /
+    // ingest (event_data.utm_source ?? utmSource) and EVERY attribution MV /
     // lookup pipe key on the prefixed `utm_source`/`utm_campaign` names with no fallback —
     // stripping the prefix left the UTM leg of the attribution read path dead for all web
     // events. The stripped alias is still emitted because the dashboard analytics MVs and
@@ -314,7 +314,7 @@ export class AttributionManager {
     // clickId/clickIdType, but ALSO capture every present click ID as its own named
     // field — a single URL can carry both fbclid and gclid (redirect chains, forwarded
     // / re-shared links), and keeping only the first dropped the others' platform
-    // attribution entirely. (WEB NEW-3)
+    // attribution entirely.
     for (const clickId of this.CLICK_IDS) {
       const value = params[clickId];
       if (value) {
@@ -493,7 +493,7 @@ export class AttributionManager {
    */
   private captureAdCookies(): Record<string, string | null> {
     const adCookies: Record<string, string | null> = {};
-    // TR-03: when marketing consent is declined, do NOT synthesize/write the Meta/Google ad
+    // when marketing consent is declined, do NOT synthesize/write the Meta/Google ad
     // cookies below (writing _fbp/_fbc is active marketing use). Existing cookies are still
     // read here but stripped from the event payload in getAttributionData().
     const marketingAllowed = this.isMarketingAllowed();
@@ -540,12 +540,12 @@ export class AttributionManager {
     // as `_li_fat_id` and never overwrites (or poses as) a URL-captured li_fat_id.
     adCookies._li_fat_id = cookies.get('li_fat_id');
     
-    // Generate _fbp if missing (Facebook browser ID). TR-03: only when marketing is allowed.
+    // Generate _fbp if missing (Facebook browser ID). only when marketing is allowed.
     if (marketingAllowed && !adCookies._fbp && (this.hasClickId('fbclid') || adCookies._fbc)) {
       const timestamp = Date.now();
       // Meta's _fbp format is fb.1.<creationTimeMs>.<randomNumber> where the last
       // segment MUST be a decimal integer. The old base36 string was non-conformant —
-      // Meta ignores it (and it can shadow a real _fbp), degrading EMQ. (WEB-17)
+      // Meta ignores it (and it can shadow a real _fbp), degrading EMQ.
       const randomId = Math.floor(Math.random() * 1e10).toString();
       adCookies._fbp = `fb.1.${timestamp}.${randomId}`;
       // Optionally set the cookie for future use
@@ -556,7 +556,7 @@ export class AttributionManager {
     // creationTime is UNIX time in MILLISECONDS (matches the _fbp generation above
     // and the real _fbc cookie the Meta Pixel writes). Do NOT use seconds here.
     //
-    // FSR-14: a returning visitor who clicks a NEW ad must get a FRESH _fbc. The old
+    // a returning visitor who clicks a NEW ad must get a FRESH _fbc. The old
     // once-only guards (`!_dl_fbclid_at`, `!_fbc`) meant a new fbclid never refreshed
     // _fbc while a prior 90-day _fbc still existed — Meta then received the OLD
     // campaign's fbc (and an old creationTime that can push the conversion outside the
@@ -566,7 +566,7 @@ export class AttributionManager {
     // Shopify cart / server-side rebuild forward it as a time, so its format must not
     // change.
     const fbclid = this.getCurrentFbclid();
-    // TR-03: skip _fbc synthesis/refresh (cookie write) when marketing is declined.
+    // skip _fbc synthesis/refresh (cookie write) when marketing is declined.
     if (marketingAllowed && fbclid) {
       const existingFbc = adCookies._fbc; // captured above (cookies.get('_fbc'))
       const embeddedFbclid = this.extractFbclidFromFbc(existingFbc);
@@ -628,7 +628,7 @@ export class AttributionManager {
    * Extract the fbclid embedded in an `_fbc` cookie value
    * (`fb.{subdomainIndex}.{creationTime}.{fbclid}` → the 4th dot-segment), or null if
    * the value is missing/malformed. Used to detect whether a NEW fbclid in the URL
-   * differs from the one a prior _fbc was built for. (FSR-14)
+   * differs from the one a prior _fbc was built for.
    */
   private extractFbclidFromFbc(fbc: string | null | undefined): string | null {
     if (!fbc) return null;
@@ -640,7 +640,7 @@ export class AttributionManager {
 
   /**
    * What a touch may keep at rest. Under a marketing decline the touch is stored exactly as
-   * before 1.9.9 (TR-03: existing click ids stay in touches, stripped from payloads), except
+   * before 1.9.9 (existing click ids stay in touches, stripped from payloads), except
    * `alart`, a persistent AppLovin user id, which is not stored at all. (A referrer-recovered
    * twclid never gets here under a decline: captureAttribution does not apply it.)
    */
@@ -673,7 +673,7 @@ export class AttributionManager {
     // 'direct'/'none', so the mere presence of current.source/medium is NOT a signal.
     // The old `hasCurrentAttribution` (truthy because source is always at least 'direct')
     // made the fallback below dead code AND caused storeLastTouch to overwrite a real
-    // paid last-touch with 'direct'/'none' on the next internal navigation. (WEB NEW-1)
+    // paid last-touch with 'direct'/'none' on the next internal navigation.
     // `lyr` counts as a real signal. It is the Datalyr tracking-link tag — the one
     // attribution parameter the product itself tells customers to put on a URL — and
     // omitting it meant a bare `?lyr=X` landing (no UTMs, no click id) scored FALSE:
@@ -694,7 +694,7 @@ export class AttributionManager {
     );
 
     // Direct / internal navigation: fall back to persisted attribution so the event
-    // isn't mis-attributed to 'direct'. FSR-48: prefer the LAST touch (the most recent
+    // isn't mis-attributed to 'direct'. prefer the LAST touch (the most recent
     // real signal, e.g. a May Meta click) over the FIRST touch (e.g. a January gclid) —
     // spreading firstTouch carried its stale clickId top-level and credited the older
     // campaign for last-click. Also fall back to whichever of last/first touch is still
@@ -780,7 +780,7 @@ export class AttributionManager {
         : 0
     };
 
-    // TR-03: strip MARKETING-scoped signals (click IDs + ad cookies) from the event payload
+    // strip MARKETING-scoped signals (click IDs + ad cookies) from the event payload
     // when marketing consent is declined — analytics-scoped fields (utm_*, source/medium/
     // campaign, first/last touch, _ga/_gid) stay. Ad ENTITY ids (campaign_id/adset_id/
     // ad_id/placement/site_source_name) stay too, deliberately: they identify the AD, not
@@ -903,7 +903,7 @@ export class AttributionManager {
    * internal navs from being mis-classified as referral.
    */
   private isSameRootDomain(a: string, b: string): boolean {
-    // FSR-47: use the real eTLD+1 (public-suffix-aware) so a ccTLD merchant
+    // use the real eTLD+1 (public-suffix-aware) so a ccTLD merchant
     // (shop.example.co.uk) doesn't collapse every external referrer that merely shares
     // the suffix (google.co.uk → root 'co.uk') into 'direct'.
     return getRegistrableDomain(a) === getRegistrableDomain(b);

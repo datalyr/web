@@ -108,7 +108,7 @@ export function getAllQueryParams(search = window.location.search): Record<strin
   return params;
 }
 
-// FSR-57: credential detection that matches whole TOKENS (after splitting a key on
+// credential detection that matches whole TOKENS (after splitting a key on
 // camelCase + separators), not substrings. The old substring regex deleted innocent
 // keys — `author`/`authority` (contains 'auth'), `passenger_count`/`passport_number`
 // (contains 'pass'), `session_type`/`cookie_consent` — silently dropping customer event
@@ -185,7 +185,7 @@ export function sanitizeEventData(data: any, maxDepth = 5, currentDepth = 0): an
       return data.slice(0, 1000) + '...[truncated]';
     }
 
-    // FSR-57: redact only UNAMBIGUOUS JWTs — base64url '{"...' header always starts with
+    // redact only UNAMBIGUOUS JWTs — base64url '{"...' header always starts with
     // 'eyJ'. The old rules redacted ANY 3-dot-segment string ('www.google.com' → so every
     // 3-label referrer_host became '[Redacted]'; '1.7.1' semver too) and ANY 32+-char hex
     // string (md5/order IDs, pre-hashed emails, and — critically — 32-hex customer user
@@ -274,7 +274,7 @@ function redactKvPairs(s: string): { out: string; mutated: boolean } {
  * Redact secret/PII param VALUES in a URL (9.A.4). The param NAME is kept
  * (value → `__redacted__`) so funnel steps that match on the param's presence still
  * work; every other param — click IDs (fbclid/gclid/…) and utm_* — survives untouched.
- * Both the query string AND a k=v fragment are rewritten: TR-04 — OAuth-implicit /
+ * Both the query string AND a k=v fragment are rewritten: — OAuth-implicit /
  * Supabase magic links carry the session in the FRAGMENT (`/welcome#access_token=eyJ…`),
  * with no query string at all; the old code returned early on a missing `?` and reattached
  * the fragment verbatim, leaking the full JWT into `url` / `landingPage` / `dl_first_touch`
@@ -355,7 +355,7 @@ export function redactUrl(url: string): string {
       if (r.mutated) { queryOut = r.out; mutated = true; }
     }
 
-    // TR-04: redact the fragment when it carries k=v pairs. Two shapes: a pure implicit-flow
+    // redact the fragment when it carries k=v pairs. Two shapes: a pure implicit-flow
     // fragment (`#access_token=…&refresh_token=…`) and a SPA hash-route with its own query
     // (`#/reset?access_token=…`). Leave non-k=v fragments (`#section`, `#/route`) untouched.
     let fragmentOut = rawFragment;
@@ -484,7 +484,7 @@ const TWO_PART_TLDS = new Set([
  *   www.example.com    → example.com
  *   localhost / IPs    → returned unchanged
  * Returns a bare host (no leading dot) — getRootDomain() adds the cookie-domain dot.
- * (FSR-47: same-site referrer classification must use this, not naive last-two-labels.)
+ * (same-site referrer classification must use this, not naive last-two-labels.)
  */
 export function getRegistrableDomain(hostname: string): string {
   if (!hostname) return hostname;
