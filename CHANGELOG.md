@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- npm package: ships only the built bundles and the public type declarations. The 43 `*.test.d.ts` files (and their maps) and every `.map` file are left out; the declaration build uses `tsconfig.build.json`, which excludes tests. `.npmignore` is removed (`files` in package.json already decided what ships).
+- Session rotation and the legacy storage-key migration no longer print `console.log` lines unless `debug: true`.
+- `flushAt`, `trackSessions` and `cookiePrefix` are marked `@deprecated`: they have no effect and are still accepted. The `sessionTimeout` comment now gives the real default, 30 minutes (since 1.9.4).
+- Getters called before `init()` (`getAnonymousId`, `getVisitorId`, `getDistinctId`, `getUserId`, `getSessionId`, `getSessionData`, `getStripeMetadata`, `getWhopCheckoutMetadata`, `getAttribution`, `getJourney`, `getNetworkStatus`) no longer throw a `TypeError`. They log one warning and return an empty value: `''` for ids typed `string`, `null` for `getUserId` / `getSessionData`, `{}` / `[]` for attribution and journey. Return types are unchanged.
+- Changelog: added the missing 1.9.10 and 1.9.11 entries and a note on versions that shipped only through the CDN.
+
+## Versions not published to npm
+
+These versions shipped only through the CDN (`dl.js`) and were never published to npm: 1.8.0, 1.8.1, 1.8.2, 1.9.0, 1.9.1, 1.9.3, 1.9.6 and 1.9.7. In the 1.8.0 to 1.9.7 range only 1.9.2, 1.9.4 and 1.9.5 are on npm. Older versions missing from npm: 1.7.7, 1.7.10 and 1.7.11. (entry added later)
+
 ## 1.9.15
 
 - Offline backlog shared safely across tabs: every tab of a site shares one stored backlog (`dl_dl_offline_queue`). A save used to overwrite it, so the last tab to save erased the events other tabs had parked. A save now merges with what is stored, leaving out events this tab delivered or dropped. The stored format is unchanged (a plain array of events), so a rollback to an older script still reads and drains it.
@@ -24,6 +36,19 @@
 - Provisional (pre-login) ids: `identify(guestId, traits, { provisional: true })`. While the guest id is current every event carries `event_data.$provisional_user_id = true` (SDK-owned: caller and super properties cannot set or keep it). The later `identify(accountId)` keeps the `visitor_id` (no account-switch `reset()`) and stops the marker, so the guest and the account stay on one browser for DATALYR's guest-to-account join. A provisional identify while a signed-in user is current (including one another tab signed in, or an email id still being decrypted) is ignored; `reset()` clears it. The kind is stored in `dl_user_id_kind` as `<kind>:<hash of a per-browser salt and the user id>` (`account` for an asserted id; salt in `dl_user_id_kind_salt`), so it never describes a different id (another tab, an older SDK) and cannot be tested against candidate emails. No `$alias` is sent.
 - Auto-identify fix: an email captured on a page whose visitor was already identified ran `identify(email)`, which the account-switch check took for a different user: `reset()` rotated the `visitor_id` and wiped the signed-in visitor's first-touch attribution. Auto-identify now leaves any identified visitor alone (a provisional guest included). An explicit `identify()` after an auto-identified email is a sign-in, not an account switch (no `reset()`); unless its traits carry the same email, the captured email and `auto_identify_source` are dropped from the traits. Browsers auto-identified by an older SDK (no kind record) are recognised from their captured-email copy. A sign-in another tab already made is not an account switch here.
 - README: the auto-identify row named `$auto_identify`, which 1.7.x stopped sending.
+
+## 1.9.11
+
+(entry added later; npm 2026-10-15)
+
+- Container: the LinkedIn Insight Tag joins AppLovin and X in the destination pixels module (`dl.pixels.<v>.js`), under the same gates as X (marketing consent, Shopify Customer Privacy included; no DNT / GPC / US opt-out). It is never loaded next to another Insight Tag install. Conversions are sent only for events ingest lists, as `lintrk('track', { conversion_id, event_id })` with the DATALYR event id; never a value, currency, personal data or page views.
+
+## 1.9.10
+
+(entry added later; npm 2026-10-12)
+
+- Container: AppLovin and X browser pixels, loaded from a separate lazy module (`dist/datalyr.pixels.min.js`, CDN `dl.pixels.<v>.js`, registering `window.DatalyrPixels`) only when `/container-scripts` configures one, so `dl.js` carries only the gate and loader. Loaded only after marketing consent (Shopify Customer Privacy included) and never with DNT, GPC or a US privacy opt-out; never next to another install of the same pixel, re-checked before every send.
+- Only events the workspace has an active rule for are sent, under the rule's name; every send carries the dedup id the server sender uses (a purchase's order / transaction id, otherwise the DATALYR event id). AppLovin gets the landing page view of each page load once (SPA page views only when AppLovin's own pixel will not send them); X's base code sends X's page view. The landing page view is never held waiting for a pixel.
 
 ## 1.9.9
 
@@ -146,8 +171,6 @@ Security and privacy fixes to session replay (1.8.0 was never published to the C
 
 
 All notable changes to this project will be documented in this file.
-
-## [Unreleased]
 
 ## [1.7.13] - 2026-08-25
 
