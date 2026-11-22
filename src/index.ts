@@ -1624,8 +1624,8 @@ class Datalyr {
    * cart id we report ($shopify_cart). Both used to happen once, at page load.
    * A cart drawer or widget creates or replaces the cart with no page load, and
    * some rewrite the cart's attributes, so the checkout arrived with neither
-   * (dainti, 2026-09-24: two shoppers, add to cart seconds after landing, then
-   * straight to checkout, both unlinked).
+   * (for example, a shopper who adds to cart seconds after landing, then goes
+   * straight to checkout).
    *
    * So, while the page is visible, the `cart` cookie is read every 2 s; a cart
    * we have not stamped is stamped and reported (syncShopifyCartAttributes does
