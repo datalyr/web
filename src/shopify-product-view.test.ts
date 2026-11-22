@@ -31,13 +31,13 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 25; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-// The product page data Shopify inlines on dainti.shop/products/photo-necklace.
+// The product page data Shopify inlines on example-store.com/products/sample-product.
 const PRODUCT_META = {
   page: { pageType: 'product', resourceType: 'product', resourceId: 8087288315952, requestId: 'req-1' },
   product: {
     id: 8087288315952,
     gid: 'gid://shopify/Product/8087288315952',
-    vendor: 'dainti',
+    vendor: 'Example Store',
     type: 'Necklace',
     variants: [
       { id: 50624903118896, price: 3500, name: 'PHOTO PRINTED NECKLACE - Silver', public_title: 'Silver', sku: '' },
@@ -93,7 +93,7 @@ describe('dl.js view_item on Shopify product pages', () => {
   beforeEach(() => {
     jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
-    window.history.replaceState({}, '', '/products/photo-necklace');
+    window.history.replaceState({}, '', '/products/sample-product');
   });
 
   afterEach(() => {
@@ -137,7 +137,7 @@ describe('dl.js view_item on Shopify product pages', () => {
       line_value: null,
       price: 35,
       currency: 'USD',
-      product_url: '/products/photo-necklace',
+      product_url: '/products/sample-product',
       categories: ['Necklace'],
       tracked_via: 'dl_storefront',
     }));
@@ -197,7 +197,7 @@ describe('dl.js view_item on Shopify product pages', () => {
   });
 
   test('the ?variant= in the URL picks the variant', async () => {
-    window.history.replaceState({}, '', '/products/photo-necklace?variant=50624903151664');
+    window.history.replaceState({}, '', '/products/sample-product?variant=50624903151664');
     mockNetwork({ waitForShopifyConsent: false });
     stubShopify({});
     const enqueue = await boot();
@@ -251,7 +251,7 @@ describe('dl.js view_item on Shopify product pages', () => {
     stubShopify({});
     const enqueue = await boot();
     document.dispatchEvent(new Event('visitorConsentCollected'));
-    window.history.replaceState({}, '', '/products/photo-necklace?variant=50624903151664');
+    window.history.replaceState({}, '', '/products/sample-product?variant=50624903151664');
     document.dispatchEvent(new Event('visitorConsentCollected'));
     await settle();
     expect(named(enqueue, 'view_item')).toHaveLength(1);
@@ -439,14 +439,14 @@ describe('shopifyPixelWillRun', () => {
 describe('readShopifyProductView', () => {
   test('falls back to og:title and window.meta, and reads og:image', () => {
     const doc = document.implementation.createHTMLDocument('x');
-    doc.head.innerHTML = '<meta property="og:title" content="Photo Necklace"><meta property="og:image" content="//dainti.shop/cdn/a.png">';
+    doc.head.innerHTML = '<meta property="og:title" content="Sample Product"><meta property="og:image" content="//example-store.com/cdn/a.png">';
     const view = readShopifyProductView({
-      location: { pathname: '/products/photo-necklace', search: '' },
+      location: { pathname: '/products/sample-product', search: '' },
       meta: { product: { id: 1, variants: [{ id: 2, price: 1000 }] }, currency: 'GBP' },
     }, doc);
     expect(view).toEqual(expect.objectContaining({
-      product_id: '1', product_title: 'Photo Necklace', variant_id: '2', price: 10, currency: 'GBP',
-      image_url: 'https://dainti.shop/cdn/a.png',
+      product_id: '1', product_title: 'Sample Product', variant_id: '2', price: 10, currency: 'GBP',
+      image_url: 'https://example-store.com/cdn/a.png',
     }));
   });
 
