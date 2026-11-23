@@ -41,6 +41,10 @@ function tokenCalls(): any[] {
   return fetchMock.mock.calls.filter(([url]) => String(url).includes('/v1/visitor-token'));
 }
 
+function callsTo(path: string): any[] {
+  return fetchMock.mock.calls.filter(([url]) => String(url).includes(path));
+}
+
 async function settle(): Promise<void> {
   for (let i = 0; i < 25; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -330,5 +334,69 @@ describe('C18: consent signal for first-party requests', () => {
     expect(sdk.consentSignal()).toBe('granted');
     sdk.optOut();
     expect(sdk.consentSignal()).toBe('denied');
+  });
+});
+
+describe('C19 (script side): opt-out and consent withdrawal', () => {
+  test('optOut(): stamped links go back to their original href, the token is forgotten', async () => {
+    const stripe = addLink('https://buy.stripe.com/test_1?x=1');
+    const cal = addLink('https://calendly.com/team/intro');
+    const sdk = await boot({ visitorToken: { stripe: true, calendly: true } });
+    await settle();
+    expect(stripe.getAttribute('href')).toContain('client_reference_id=');
+    expect(sessionStorage.getItem('dl_vt')).not.toBeNull();
+    sdk.optOut();
+    expect(stripe.getAttribute('href')).toBe('https://buy.stripe.com/test_1?x=1');
+    expect(cal.getAttribute('href')).toBe('https://calendly.com/team/intro');
+    expect(sessionStorage.getItem('dl_vt')).toBeNull();
+    await expect(sdk.getVisitorToken()).resolves.toBeNull();
+    // A link added after the opt-out is not stamped.
+    const later = addLink('https://calendly.com/team/later');
+    await new Promise((r) => setTimeout(r, 200));
+    expect(later.getAttribute('href')).toBe('https://calendly.com/team/later');
+    expect(callsTo('/v/clear')).toHaveLength(0); // edgeCookieV2 off
+  });
+
+  test('marketing withdrawal strips the links too', async () => {
+    const cal = addLink('https://calendly.com/team/intro');
+    const sdk = await boot({ visitorToken: { calendly: true } });
+    await settle();
+    expect(cal.getAttribute('href')).toContain('salesforce_uuid=');
+    sdk.setConsent({ marketing: false });
+    expect(cal.getAttribute('href')).toBe('https://calendly.com/team/intro');
+  });
+
+  test('edgeCookieV2 on, own-domain endpoint: optOut() calls POST /v/clear once', async () => {
+    const sdk = await boot({ endpoint: 'https://t.shop.example', edgeCookieV2: true });
+    sdk.optOut();
+    sdk.setConsent({ analytics: false });
+    await settle();
+    const calls = callsTo('/v/clear');
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe('https://t.shop.example/v/clear');
+    expect(calls[0][1]).toEqual({ method: 'POST', credentials: 'include', keepalive: true });
+  });
+
+  test('edgeCookieV2 on, consent withdrawn: POST /v/clear', async () => {
+    const sdk = await boot({ endpoint: 'https://t.shop.example', edgeCookieV2: true });
+    sdk.setConsent({ marketing: false });
+    await settle();
+    expect(callsTo('/v/clear')).toHaveLength(1);
+  });
+
+  test('edgeCookieV2 on, DATALYR endpoint (no edge): no call', async () => {
+    const sdk = await boot({ edgeCookieV2: true });
+    sdk.optOut();
+    await settle();
+    expect(callsTo('/v/clear')).toHaveLength(0);
+  });
+
+  test('all off: optOut() and withdrawal make no new request', async () => {
+    const sdk = await boot({ endpoint: 'https://t.shop.example' });
+    const before = fetchMock.mock.calls.length;
+    sdk.setConsent({ marketing: false });
+    sdk.optOut();
+    await settle();
+    expect(fetchMock.mock.calls.length).toBe(before);
   });
 });

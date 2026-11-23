@@ -19,7 +19,7 @@ import { shopifyCartId } from './shopify-cart';
 import { readShopifyProductView, readShopifySearch, shopifyPixelWillRun } from './shopify-product-view';
 import { ReplayLoader, REPLAY_ENDPOINT, replayMode, replayAttribution, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
-import { TokenLinkDecorator, VisitorTokenClient, VISITOR_TOKEN_KEY, anyTokenEnabled, rawIdsAccepted, tokenEnabled, type TokenLinkRule } from './visitor-token';
+import { TokenLinkDecorator, VisitorTokenClient, VISITOR_TOKEN_KEY, anyTokenEnabled, endpointUrl, isFirstPartyEndpoint, rawIdsAccepted, tokenEnabled, type TokenLinkRule } from './visitor-token';
 import {
   generateUUID,
   sanitizeEventData,
@@ -113,6 +113,7 @@ class Datalyr {
   private stripeSessionWatcher?: StripeSessionWatcher; // observes Checkout Session ids (server-created sessions)
   private visitorTokenClient?: VisitorTokenClient;     // FX-083: created on first use, only with a provider switched on
   private tokenDecorator?: TokenLinkDecorator;         // FX-083: puts the token on checkout / booking links
+  private edgeCookieCleared = false;                   // FX-083 C19: POST /v/clear at most once per withdrawal
   private inAppHandoffTimer: ReturnType<typeof setInterval> | null = null;
   private inAppHandoffWrite: (() => void) | null = null;
   private inAppHandoffReported = false;
@@ -1424,6 +1425,32 @@ class Datalyr {
   }
 
   /**
+   * FX-083 C19 (opt-out, consent withdrawn): stop decorating, put every link stamped on
+   * this page back to its original href (tokens already at a provider live out their
+   * 2 hours), forget the cached token, and with the edgeCookieV2 setting ask the edge on
+   * the customer's own domain to clear its HttpOnly copy of the visitor id.
+   */
+  private withdrawVisitorToken(): void {
+    this.tokenDecorator?.stop(true);
+    this.tokenDecorator = undefined;
+    this.visitorTokenClient?.clear();
+    this.clearEdgeCookie();
+  }
+
+  private clearEdgeCookie(): void {
+    const endpoint = this.config?.endpoint;
+    if (this.config?.edgeCookieV2 !== true || this.edgeCookieCleared || !endpoint || !isFirstPartyEndpoint(endpoint)) return;
+    this.edgeCookieCleared = true;
+    try {
+      // Clears, forwards nothing. No body and no custom header: no CORS preflight.
+      void fetch(endpointUrl(endpoint, '/v/clear'), { method: 'POST', credentials: 'include', keepalive: true })
+        .catch(() => undefined);
+    } catch {
+      // best-effort
+    }
+  }
+
+  /**
    * Get the current user ID
    */
   getUserId(): string | null {
@@ -1555,6 +1582,8 @@ class Datalyr {
     }
     // X-1: stop stamping Stripe/CC outbound links with the visitor id / email.
     this.disposeMarketingLinkDecorators();
+    // FX-083 C19: stop decorating, take tokens off stamped links, forget the token.
+    this.withdrawVisitorToken();
     // Purge PII at rest.
     this.userProperties = {};
     // D02: deleting the keys is not enough on its own — an encrypted hydration
@@ -1593,6 +1622,7 @@ class Datalyr {
       return;
     }
     this.optedOut = false;
+    this.edgeCookieCleared = false;
     this.cookies.set('__dl_opt_out', 'false', this.config.cookieExpires);
     // Re-enable only if the full policy now allows (analytics consent + DNT/GPC), not
     // merely because opt-out was lifted — otherwise a GPC/DNT visitor's persisted
@@ -1688,6 +1718,10 @@ class Datalyr {
       this.disposeMarketingLinkDecorators();
       this.attribution?.forgetSeenTwclid();
     }
+    // FX-083 C19: analytics or marketing withdrawn: stop decorating, take tokens off the
+    // links already stamped, forget the token and ask the edge to clear its copy.
+    if (!allowed || !this.consentAllowsMarketing()) this.withdrawVisitorToken();
+    else this.edgeCookieCleared = false;
 
     this.log('Consent updated:', consent);
   }
@@ -2861,6 +2895,8 @@ class Datalyr {
       this.disposeMarketingLinkDecorators();
       this.attribution?.forgetSeenTwclid();
     }
+    // FX-083 C19: same as setConsent() withdrawal.
+    if (!allowed || !this.consentAllowsMarketing()) this.withdrawVisitorToken();
 
     // Grant direction: cart-attribute stamping is cheap and idempotent (merges via
     // /cart/update.js), so run it now instead of waiting for the next page load.
