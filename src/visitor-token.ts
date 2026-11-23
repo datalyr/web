@@ -81,6 +81,11 @@ export interface VisitorTokenClientOptions {
   getVisitorId: () => string | null | undefined;
   /** Tracking allowed AND marketing consent not denied. Re-checked on every use. */
   allowed: () => boolean;
+  /**
+   * True while the visitor id is not settled yet (C19: the edge may still answer with the
+   * id it kept): no token is minted or handed out for an id the server may never see.
+   */
+  waiting?: () => boolean;
 }
 
 function session(): Storage | undefined {
@@ -110,7 +115,7 @@ export class VisitorTokenClient {
 
   /** A token for the current visitor that has not expired, or null. Never calls the network. */
   peek(): string | null {
-    if (!this.opts.allowed()) return null;
+    if (!this.opts.allowed() || this.isWaiting()) return null;
     const cached = this.read();
     return cached ? cached.t : null;
   }
@@ -128,7 +133,7 @@ export class VisitorTokenClient {
    * for the rest of the tab session once ingest showed it has no mint route.
    */
   get(): Promise<string | null> {
-    if (!this.opts.allowed()) return Promise.resolve(null);
+    if (!this.opts.allowed() || this.isWaiting()) return Promise.resolve(null);
     const visitorId = this.opts.getVisitorId();
     if (!visitorId || !MINTABLE_VISITOR_ID_RE.test(visitorId)) return Promise.resolve(null);
     const cached = this.read();
@@ -141,7 +146,7 @@ export class VisitorTokenClient {
     const request = this.mint(visitorId).then((result) => {
       if (result === 'stop') this.stopMinting();
       // reset(), opt-out or a withdrawal while the request was out: drop the answer.
-      if (generation !== this.generation || !this.opts.allowed() || this.opts.getVisitorId() !== visitorId) return null;
+      if (generation !== this.generation || !this.opts.allowed() || this.isWaiting() || this.opts.getVisitorId() !== visitorId) return null;
       if (result === 'stop' || result === 'retry') {
         if (result === 'retry') this.lastFailureAt = Date.now();
         const stillValid = this.read();
@@ -168,6 +173,14 @@ export class VisitorTokenClient {
       session()?.removeItem(VISITOR_TOKEN_KEY);
     } catch {
       // blocked storage
+    }
+  }
+
+  private isWaiting(): boolean {
+    try {
+      return !!this.opts.waiting?.();
+    } catch {
+      return false;
     }
   }
 

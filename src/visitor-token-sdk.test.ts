@@ -543,4 +543,39 @@ describe('C19 (script side): adopt the edge visitor when nothing is stored (edge
     expect(collectBodies()[0].events[0].visitor_id).toBe(local);
     expect(sdk.getVisitorId()).toBe(local);
   });
+
+  test('while the edge id is pending: no mint, getters fall back; after adoption: the token names the edge id', async () => {
+    collectVisitor = EDGE;
+    const a = addLink('https://buy.stripe.com/test_1');
+    const sdk = await boot({ endpoint: 'https://t.shop.example', edgeCookieV2: true, visitorToken: { stripe: true, whop: true } });
+    const minted = sdk.getVisitorId();
+    expect(sdk.getStripeMetadata()).toEqual({ client_reference_id: minted, metadata: { visitor_id: minted } });
+    expect(sdk.getWhopCheckoutMetadata()).toEqual({ visitor_id: minted });
+    await expect(sdk.getVisitorToken()).resolves.toBeNull();
+    await settle();
+    expect(tokenCalls()).toHaveLength(0);
+    expect(a.getAttribute('href')).toBe('https://buy.stripe.com/test_1');
+
+    sdk.track('signup_started');
+    await sdk.flush();
+    await settle();
+    expect(sdk.getVisitorId()).toBe(EDGE);
+    expect(tokenCalls()).toHaveLength(1);
+    expect(JSON.parse(tokenCalls()[0][1].body).visitor_id).toBe(EDGE);
+    expect(new URL(a.href).searchParams.get('client_reference_id')).toBe(T1);
+    await expect(sdk.getVisitorToken()).resolves.toBe(T1);
+  });
+
+  test('the edge answers without an id: the token is minted for the local id, then links are decorated', async () => {
+    const a = addLink('https://buy.stripe.com/test_1');
+    const sdk = await boot({ endpoint: 'https://t.shop.example', edgeCookieV2: true, visitorToken: { stripe: true } });
+    const minted = sdk.getVisitorId();
+    await settle();
+    expect(tokenCalls()).toHaveLength(0);
+    sdk.track('signup_started');
+    await sdk.flush();
+    await settle();
+    expect(JSON.parse(tokenCalls()[0][1].body).visitor_id).toBe(minted);
+    expect(new URL(a.href).searchParams.get('client_reference_id')).toBe(T1);
+  });
 });

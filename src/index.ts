@@ -309,7 +309,10 @@ class Datalyr {
       pending: () => (this.config.edgeCookieV2 === true && this.shouldTrack() ? this.identity.pendingEdgeVisitorId() : null),
       replaced: () => (this.config.edgeCookieV2 === true ? this.identity.getReplacedVisitor() : null),
       adopt: (id) => this.adoptEdgeVisitor(id),
-      giveUp: () => this.identity.cancelEdgeAdoption(),
+      giveUp: () => {
+        this.identity.cancelEdgeAdoption();
+        this.tokenDecorator?.reissue(); // the local id is settled: decorate now
+      },
     });
     // A browser that ever opted out (the __dl_opt_out cookie, either value) never adopts
     // the edge's id: that id is the opted-out visitor's.
@@ -1419,6 +1422,9 @@ class Datalyr {
         workspaceId: this.config.workspaceId,
         getVisitorId: () => this.identity?.getAnonymousId(),
         allowed: () => this.tokenAllowed(),
+        // C19: while the edge may still answer with the visitor it kept, the page's own
+        // id may never reach the server: no token for it until adopted or given up.
+        waiting: () => this.edgeVisitorPending(),
       });
     }
     return this.visitorTokenClient;
@@ -1454,6 +1460,13 @@ class Datalyr {
    * survives a browser that wiped the script's storage), only while the id minted on
    * this page with nothing stored is still pending. Everything keyed on the id follows.
    */
+  /** C19: the page's minted id is waiting for the edge's answer (same test as the queue's). */
+  private edgeVisitorPending(): boolean {
+    const endpoint = this.config?.endpoint;
+    return this.config?.edgeCookieV2 === true && !!endpoint && isFirstPartyEndpoint(endpoint)
+      && this.shouldTrack() && !!this.identity?.pendingEdgeVisitorId();
+  }
+
   private adoptEdgeVisitor(id: string): void {
     if (this.config?.edgeCookieV2 !== true || !this.shouldTrack()) return;
     if (!this.identity.adoptEdgeVisitorId(id)) return;
