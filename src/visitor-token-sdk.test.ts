@@ -54,6 +54,7 @@ const baseConfig = {
   trackSPA: false,
   stripeCheckoutSessions: false,
   inAppHandoff: false,
+  autoIdentify: false,
 };
 
 const originalFetch = global.fetch;
@@ -280,5 +281,36 @@ describe('C15: Calendly and iClosed links and embeds', () => {
     // Stripe stays on the raw id: its own switch is off.
     expect(new URL(stripe.href).searchParams.get('client_reference_id')).toBe(sdk.getVisitorId());
     expect(tokenCalls()).toHaveLength(1);
+  });
+});
+
+describe('C16: CheckoutChamp outbound links carry dl_vt', () => {
+  test('off: links to the funnel are untouched (the raw bridge stays off)', async () => {
+    const a = addLink('https://checkout.brand.example/step1');
+    await boot({ checkoutChampDomains: ['checkout.brand.example'] });
+    expect(a.getAttribute('href')).toBe('https://checkout.brand.example/step1');
+    expect(tokenCalls()).toHaveLength(0);
+  });
+
+  test('on: dl_vt only on links to the listed domains', async () => {
+    const funnel = addLink('https://checkout.brand.example/step1?aff=1');
+    const sub = addLink('https://www.checkout.brand.example/step1');
+    const other = addLink('https://brand.example/about');
+    const own = addLink('https://checkout.brand.example/step2?dl_vt=SET');
+    await boot({ checkoutChampDomains: ['https://checkout.brand.example/'], visitorToken: { checkoutchamp: true } });
+    await settle();
+    expect(new URL(funnel.href).searchParams.get('dl_vt')).toBe(T1);
+    expect(new URL(funnel.href).searchParams.get('aff')).toBe('1');
+    expect(new URL(sub.href).searchParams.get('dl_vt')).toBe(T1);
+    expect(other.getAttribute('href')).toBe('https://brand.example/about');
+    expect(new URL(own.href).searchParams.get('dl_vt')).toBe('SET');
+    expect(funnel.href).not.toContain('_dl_vid');
+  });
+
+  test('on, but no checkoutChampDomains: nothing', async () => {
+    const a = addLink('https://checkout.brand.example/step1');
+    await boot({ visitorToken: { checkoutchamp: true } });
+    expect(a.getAttribute('href')).toBe('https://checkout.brand.example/step1');
+    expect(tokenCalls()).toHaveLength(0);
   });
 });

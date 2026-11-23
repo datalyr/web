@@ -591,6 +591,19 @@ class Datalyr {
         matchHost: (host) => host === 'iclosed.io' || host.endsWith('.iclosed.io'),
       });
     }
+    // C16: the CheckoutChamp bridge, signed: dl_vt on outbound links to the listed
+    // checkoutChampDomains (each domain and its subdomains). The funnel stores it in a
+    // custom field; the raw _dl_* bridge stays off.
+    const ccDomains = (Array.isArray(this.config.checkoutChampDomains) ? this.config.checkoutChampDomains : [])
+      .map((d) => String(d).trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/[/:?#].*$/, '').replace(/^\.+/, ''))
+      .filter(Boolean);
+    if (tokenEnabled(settings, 'checkoutchamp') && ccDomains.length > 0) {
+      rules.push({
+        provider: 'checkoutchamp',
+        param: VISITOR_TOKEN_KEY,
+        matchHost: (host) => ccDomains.some((d) => host === d || host.endsWith('.' + d)),
+      });
+    }
     return rules;
   }
 
