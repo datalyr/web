@@ -19,6 +19,7 @@ import { shopifyCartId } from './shopify-cart';
 import { readShopifyProductView, readShopifySearch, shopifyPixelWillRun } from './shopify-product-view';
 import { ReplayLoader, REPLAY_ENDPOINT, replayMode, replayAttribution, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
+import { VisitorTokenClient, anyTokenEnabled } from './visitor-token';
 import {
   generateUUID,
   sanitizeEventData,
@@ -110,6 +111,7 @@ class Datalyr {
   private outboundDisposer?: () => void;        // tears down the CC outbound-link observer/listener
   private stripeLinksDisposer?: () => void;     // tears down the Stripe Payment Link observer/listener
   private stripeSessionWatcher?: StripeSessionWatcher; // observes Checkout Session ids (server-created sessions)
+  private visitorTokenClient?: VisitorTokenClient;     // FX-083: created on first use, only with a provider switched on
   private inAppHandoffTimer: ReturnType<typeof setInterval> | null = null;
   private inAppHandoffWrite: (() => void) | null = null;
   private inAppHandoffReported = false;
@@ -1167,6 +1169,8 @@ class Datalyr {
       return;
     }
     this.identity.reset();
+    // FX-083: the cached token names the previous visitor; the next one names the new id.
+    this.visitorTokenClient?.clear();
     this.syncInAppHandoff(); // the URL must not keep the pre-reset visitor id
     // Replay: drop what was recorded for the previous user now; the new recording (new
     // page load id, new visitor id, new session id) starts below, after the session
@@ -1264,6 +1268,45 @@ class Datalyr {
   getWhopCheckoutMetadata(): { visitor_id: string } {
     if (!this.identity) return { visitor_id: this.getterBeforeInit('getWhopCheckoutMetadata', '') };
     return { visitor_id: this.identity.getAnonymousId() };
+  }
+
+  /**
+   * FX-083: the signed visitor token for this visit: a short, expiring value only
+   * DATALYR can make (57 characters, `[A-Za-z0-9_-]`). Pass it where you pass the
+   * visitor id today (Stripe `client_reference_id` or `metadata.dl_vt`, Whop
+   * checkout metadata `dl_vt`); it cannot merge two people if a link is shared.
+   *
+   * Resolves null when no provider is switched on (`visitorToken` setting), before
+   * init(), while tracking or marketing consent is off, or when the request fails.
+   * Cached for the page and the tab session; a new one is fetched after 15 minutes.
+   */
+  async getVisitorToken(): Promise<string | null> {
+    const client = this.tokenClient();
+    if (!client) return null;
+    try {
+      return await client.get();
+    } catch {
+      return null;
+    }
+  }
+
+  /** The token client, only when a provider is switched on (else nothing is created or sent). */
+  private tokenClient(): VisitorTokenClient | undefined {
+    if (!this.initialized || !this.identity || !anyTokenEnabled(this.config.visitorToken)) return undefined;
+    if (!this.visitorTokenClient) {
+      this.visitorTokenClient = new VisitorTokenClient({
+        endpoint: this.config.endpoint || 'https://ingest.datalyr.com',
+        workspaceId: this.config.workspaceId,
+        getVisitorId: () => this.identity?.getAnonymousId(),
+        allowed: () => this.tokenAllowed(),
+      });
+    }
+    return this.visitorTokenClient;
+  }
+
+  /** The gate Stripe link decoration uses today: tracking allowed and marketing not denied. */
+  private tokenAllowed(): boolean {
+    return !!this.config && this.shouldTrack() && this.consentAllowsMarketing();
   }
 
   /**
@@ -3068,6 +3111,7 @@ class Datalyr {
       this.stripeSessionWatcher.stop();
       this.stripeSessionWatcher = undefined;
     }
+    this.visitorTokenClient = undefined;
 
     // Clean up queue
     if (this.queue) {
