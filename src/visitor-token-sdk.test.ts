@@ -400,3 +400,37 @@ describe('C19 (script side): opt-out and consent withdrawal', () => {
     expect(fetchMock.mock.calls.length).toBe(before);
   });
 });
+
+describe('C21: optOut() deletes the stored visitor id (optOutDeletesVisitorId)', () => {
+  function storedIds(): { cookie: string | null; local: string | null } {
+    const m = document.cookie.match(/(?:^|;\s*)__dl_visitor_id=([^;]*)/);
+    return { cookie: m ? decodeURIComponent(m[1]) : null, local: localStorage.getItem('dl_dl_anonymous_id') };
+  }
+
+  test('off: the id is kept through opt-out and opt-in (today)', async () => {
+    const sdk = await boot();
+    const vid = sdk.getVisitorId();
+    sdk.optOut();
+    expect(sdk.getVisitorId()).toBe(vid);
+    sdk.optIn();
+    expect(sdk.getVisitorId()).toBe(vid);
+  });
+
+  test('on: cookie and storage copies are deleted; opting in again persists a new id', async () => {
+    const sdk = await boot({ optOutDeletesVisitorId: true });
+    const vid = sdk.getVisitorId();
+    const before = storedIds();
+    expect(before.cookie === vid || (before.local || '').includes(vid)).toBe(true);
+    sdk.optOut();
+    const gone = storedIds();
+    expect(gone.cookie).toBeNull();
+    expect(gone.local).toBeNull();
+    const fresh = sdk.getVisitorId();
+    expect(fresh).not.toBe(vid);
+    expect(fresh).toMatch(/^anon_[0-9a-f-]{36}$/);
+    sdk.optIn();
+    const after = storedIds();
+    expect(after.cookie === fresh || (after.local || '').includes(fresh)).toBe(true);
+    expect(sdk.getVisitorId()).toBe(fresh);
+  });
+});

@@ -281,6 +281,25 @@ export class IdentityManager {
   }
 
   /**
+   * FX-083 C21 (optOut with optOutDeletesVisitorId): delete the stored visitor id (the
+   * root-domain cookie and localStorage) and stop persisting. A new id is kept in memory
+   * only; optIn() / a consent grant persists it (enablePersistence), so a visitor who
+   * opts in again starts as a new visitor instead of the one they opted out as.
+   */
+  forgetAnonymousId(): void {
+    try {
+      const secure = location.protocol === 'https:' ? '; Secure' : '';
+      document.cookie = `__dl_visitor_id=; domain=${getRootDomain()}; path=/; max-age=0; SameSite=Lax${secure}`;
+    } catch {
+      // best-effort; cookies.remove below covers the other domain forms
+    }
+    cookies.remove('__dl_visitor_id');
+    storage.remove('dl_anonymous_id');
+    this.persistNewId = false;
+    this.anonymousId = `anon_${generateUUID()}`;
+  }
+
+  /**
    * Remove a query param from the current URL via history.replaceState (best-effort).
    * Used so a consumed `_dl_vid` doesn't linger in the address bar and get re-shared.
    *

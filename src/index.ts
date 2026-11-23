@@ -1562,6 +1562,9 @@ class Datalyr {
       return;
     }
     this.optedOut = true;
+    // FX-083 C21 (owner answer 9, setting optOutDeletesVisitorId, off): delete the stored
+    // visitor id too, so opting in again starts a new visitor.
+    if (this.config.optOutDeletesVisitorId === true) this.identity.forgetAnonymousId();
     this.session.refreshStoredRecord(); // drop the visitor id from the session record
     this.syncInAppHandoff(); // remove the visitor id from the address bar now, not in 30s
     this.syncReplay(); // stop and discard the recording
