@@ -337,6 +337,13 @@ describe('C18: consent signal for first-party requests', () => {
     expect(sdk.consentSignal()).toBeNull();
   });
 
+  test('edgeCookieV2 on implies the signal (the edge clears its copy only when it sees denied)', async () => {
+    const sdk = await boot({ endpoint: 'https://t.shop.example', edgeCookieV2: true });
+    expect(sdk.consentSignal()).toBe('granted');
+    sdk.setConsent({ marketing: false });
+    expect(sdk.consentSignal()).toBe('denied');
+  });
+
   test('on: granted, then denied after a marketing withdrawal or opt-out', async () => {
     const sdk = await boot({ endpoint: 'https://t.shop.example', consentHeader: true });
     expect(sdk.consentSignal()).toBe('granted');

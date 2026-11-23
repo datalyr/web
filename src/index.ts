@@ -1422,7 +1422,8 @@ class Datalyr {
 
   /** FX-083 C18: 'granted' / 'denied' for first-party requests; null while the setting is off. */
   private consentSignal(): 'granted' | 'denied' | null {
-    if (this.config?.consentHeader !== true) return null;
+    // edgeCookieV2 implies the header: the edge clears __dl_vid_h only when it sees denied.
+    if (this.config?.consentHeader !== true && this.config?.edgeCookieV2 !== true) return null;
     return this.shouldTrack() && this.consentAllowsMarketing() ? 'granted' : 'denied';
   }
 
