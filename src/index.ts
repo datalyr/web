@@ -303,6 +303,13 @@ class Datalyr {
     this.queue.setConsentCheck(() => this.shouldTrack());
     // FX-083 C18: X-DL-Consent on first-party requests, only with the consentHeader setting.
     this.queue.setConsentSignal(() => this.consentSignal());
+    // FX-083 C19 (edgeCookieV2, off): with no stored visitor id, the first event request to
+    // the customer's own domain names none, and the id the edge kept is adopted.
+    this.queue.setEdgeVisitor({
+      pending: () => (this.config.edgeCookieV2 === true && this.shouldTrack() ? this.identity.pendingEdgeVisitorId() : null),
+      replaced: () => (this.config.edgeCookieV2 === true ? this.identity.getReplacedVisitor() : null),
+      adopt: (id) => this.adoptEdgeVisitor(id),
+    });
 
     // FIXED (ISSUE-01): Start async initialization immediately but don't block constructor
     // This allows encryption to initialize before any events are tracked
@@ -1435,6 +1442,21 @@ class Datalyr {
     this.tokenDecorator = undefined;
     this.visitorTokenClient?.clear();
     this.clearEdgeCookie();
+  }
+
+  /**
+   * FX-083 C19: take the visitor id the edge answered with (its HttpOnly `__dl_vid_h`
+   * survives a browser that wiped the script's storage), only while the id minted on
+   * this page with nothing stored is still pending. Everything keyed on the id follows.
+   */
+  private adoptEdgeVisitor(id: string): void {
+    if (this.config?.edgeCookieV2 !== true || !this.shouldTrack()) return;
+    if (!this.identity.adoptEdgeVisitorId(id)) return;
+    this.session.refreshStoredRecord();
+    this.visitorTokenClient?.clear();
+    this.tokenDecorator?.reissue();
+    this.syncInAppHandoff();
+    this.log('Visitor id adopted from the edge');
   }
 
   private clearEdgeCookie(): void {

@@ -20,6 +20,7 @@ function loadSdk(): SdkModule {
 }
 
 let tokens: string[];
+let collectVisitor: string | null = null;
 let fetchMock: jest.Mock;
 
 function mockNetwork(): jest.Mock {
@@ -30,6 +31,9 @@ function mockNetwork(): jest.Mock {
       return token
         ? { ok: true, status: 200, json: async () => ({ token, expires_in: 7200 }) }
         : { ok: false, status: 500, json: async () => ({}) };
+    }
+    if (collectVisitor && target.startsWith('https://t.shop.example') && new URL(target).pathname === '/') {
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ success: true, visitor_id: collectVisitor }) };
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
   });
@@ -86,6 +90,7 @@ afterAll(() => document.removeEventListener('click', cancelNav));
 
 beforeEach(() => {
   tokens = [T1, T2];
+  collectVisitor = null;
   mockNetwork();
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -433,5 +438,59 @@ describe('C21: optOut() deletes the stored visitor id (optOutDeletesVisitorId)',
     const after = storedIds();
     expect(after.cookie === fresh || (after.local || '').includes(fresh)).toBe(true);
     expect(sdk.getVisitorId()).toBe(fresh);
+  });
+});
+
+describe('C19 (script side): adopt the edge visitor when nothing is stored (edgeCookieV2)', () => {
+  const EDGE = 'anon_11111111-2222-4333-8444-555555555555';
+
+  function collectBodies(): any[] {
+    return fetchMock.mock.calls
+      .filter(([url]) => String(url).startsWith('https://t.shop.example') && new URL(String(url)).pathname === '/')
+      .map(([, init]) => JSON.parse(init.body));
+  }
+
+  test('storage empty + edge answer: the first collect names no id, then the SDK uses the edge id', async () => {
+    collectVisitor = EDGE;
+    const sdk = await boot({ endpoint: 'https://t.shop.example', edgeCookieV2: true });
+    const minted = sdk.getVisitorId();
+    expect(minted).not.toBe(EDGE);
+    sdk.track('signup_started');
+    await sdk.flush();
+    await settle();
+    const first = collectBodies()[0].events[0];
+    expect(first).not.toHaveProperty('visitor_id');
+    expect(first).not.toHaveProperty('anonymous_id');
+    expect(sdk.getVisitorId()).toBe(EDGE);
+    expect(localStorage.getItem('dl_dl_anonymous_id') || '').toContain(EDGE);
+    sdk.track('next_step');
+    await sdk.flush();
+    expect(collectBodies()[1].events[0].visitor_id).toBe(EDGE);
+  });
+
+  test('a stored id is never replaced by the edge answer', async () => {
+    collectVisitor = EDGE;
+    let sdk = await boot({ endpoint: 'https://t.shop.example' });
+    const stored = sdk.getVisitorId();
+    sdk.destroy();
+    instance = undefined;
+    sdk = await boot({ endpoint: 'https://t.shop.example', edgeCookieV2: true });
+    expect(sdk.getVisitorId()).toBe(stored);
+    sdk.track('signup_started');
+    await sdk.flush();
+    await settle();
+    expect(sdk.getVisitorId()).toBe(stored);
+    expect(collectBodies().pop().events[0].visitor_id).toBe(stored);
+  });
+
+  test('setting off: today\'s behaviour (the minted id is sent and kept)', async () => {
+    collectVisitor = EDGE;
+    const sdk = await boot({ endpoint: 'https://t.shop.example' });
+    const minted = sdk.getVisitorId();
+    sdk.track('signup_started');
+    await sdk.flush();
+    await settle();
+    expect(collectBodies()[0].events[0].visitor_id).toBe(minted);
+    expect(sdk.getVisitorId()).toBe(minted);
   });
 });

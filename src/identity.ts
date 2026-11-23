@@ -26,6 +26,11 @@ export class IdentityManager {
   adoptedFromInAppHandoff = false;
   /** True when the visitor id came back from the stored session record (measurement only). */
   recoveredFromSession = false;
+  // FX-083 C19: the id was minted on this page because the browser had none stored
+  // (no cookie, no storage, no live session record, no handoff). While true, the edge on
+  // the customer's own domain may answer with the id it kept (adoptEdgeVisitorId).
+  private mintedFresh = false;
+  private replacedVisitor: { from: string; to: string } | null = null;
   private anonymousId: string;
   private userId: string | null = null;
   private sessionId: string | null = null;
@@ -195,6 +200,7 @@ export class IdentityManager {
 
     // 3. Generate a new ID (persisted unless tracking is disallowed at init).
     anonymousId = `anon_${generateUUID()}`;
+    this.mintedFresh = true;
     this.persistAnonymousId(anonymousId);
     return anonymousId;
   }
@@ -297,6 +303,35 @@ export class IdentityManager {
     storage.remove('dl_anonymous_id');
     this.persistNewId = false;
     this.anonymousId = `anon_${generateUUID()}`;
+    this.mintedFresh = false;
+  }
+
+  /**
+   * FX-083 C19 (edgeCookieV2): the id minted on this page with nothing stored, while the
+   * edge may still answer with the visitor it kept for this browser (`__dl_vid_h`); null
+   * once adopted, after reset()/opt-out, or when the id came from storage.
+   */
+  pendingEdgeVisitorId(): string | null {
+    return this.mintedFresh && this.persistNewId ? this.anonymousId : null;
+  }
+
+  /** The minted id an adopted edge id replaced (events queued with it are rewritten). */
+  getReplacedVisitor(): { from: string; to: string } | null {
+    return this.replacedVisitor;
+  }
+
+  /**
+   * Adopt the visitor id the edge answered with, only while the minted id is pending
+   * (never over a stored id, never after reset()). Persists it like any id.
+   */
+  adoptEdgeVisitorId(id: string): boolean {
+    if (!this.pendingEdgeVisitorId() || !/^[A-Za-z0-9_-]{8,128}$/.test(id)) return false;
+    this.mintedFresh = false;
+    if (id === this.anonymousId) return false;
+    this.replacedVisitor = { from: this.anonymousId, to: id };
+    this.anonymousId = id;
+    this.persistAnonymousId(id);
+    return true;
   }
 
   /**
@@ -663,6 +698,9 @@ export class IdentityManager {
 
     // Generate new anonymous ID for privacy
     this.anonymousId = `anon_${generateUUID()}`;
+    // A reset is a new visitor on purpose: never take the edge's (previous) id back.
+    this.mintedFresh = false;
+    this.replacedVisitor = null;
     storage.set('dl_anonymous_id', this.anonymousId);
 
     // Update root domain cookie with new ID

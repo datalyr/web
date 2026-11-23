@@ -72,3 +72,68 @@ describe('EventQueue consent signal (C18)', () => {
     expect(beacon.mock.calls[0][0]).toBe('https://ingest.datalyr.com');
   });
 });
+
+describe('EventQueue edge visitor adoption (C19, edgeCookieV2)', () => {
+  const P = 'anon_0b815a3e-6f9d-4c2e-8a7b-1c3d5e7f9a0b';
+  const EDGE = 'anon_11111111-2222-4333-8444-555555555555';
+  let queue: EventQueue | undefined;
+  let fetchMock: jest.Mock;
+  const originalFetch = (global as any).fetch;
+
+  beforeEach(() => {
+    storage.remove('dl_offline_queue');
+    fetchMock = jest.fn(() => Promise.resolve({
+      ok: true, status: 200, headers: { get: () => null }, json: async () => ({ success: true, visitor_id: EDGE }),
+    }));
+    (global as any).fetch = fetchMock;
+  });
+  afterEach(() => {
+    queue?.destroy();
+    queue = undefined;
+    (global as any).fetch = originalFetch;
+    storage.remove('dl_offline_queue');
+  });
+
+  function event(i: number, id: string): IngestEventPayload {
+    return { ...makeEvent(i), visitor_id: id, anonymous_id: id, distinct_id: id, canonical_id: id, session_id: 's' } as unknown as IngestEventPayload;
+  }
+
+  function sentEvents(call = 0): any[] {
+    return JSON.parse(fetchMock.mock.calls[call][1].body).events;
+  }
+
+  test('pending id: the first collect names no visitor, and the edge answer is adopted', async () => {
+    const adopt = jest.fn();
+    let pending: string | null = P;
+    let replaced: { from: string; to: string } | null = null;
+    queue = new EventQueue({ workspaceId: 'ws', endpoint: 'https://t.shop.example', flushInterval: 100000 });
+    queue.setEdgeVisitor({ pending: () => pending, replaced: () => replaced, adopt: (id) => { adopt(id); pending = null; replaced = { from: P, to: id }; } });
+    queue.enqueue(event(1, P));
+    await queue.flush();
+    const [first] = sentEvents();
+    for (const f of ['visitor_id', 'anonymous_id', 'distinct_id', 'canonical_id']) expect(first).not.toHaveProperty(f);
+    expect(first.session_id).toBe('s');
+    expect(adopt).toHaveBeenCalledWith(EDGE);
+    // An event queued with the old id before the adoption goes out with the edge's id.
+    queue.enqueue(event(2, P));
+    await queue.flush();
+    expect(sentEvents(1)[0].visitor_id).toBe(EDGE);
+    expect(sentEvents(1)[0].anonymous_id).toBe(EDGE);
+  });
+
+  test('setting off (hooks answer null) or DATALYR endpoint: payload untouched, nothing adopted', async () => {
+    const adopt = jest.fn();
+    queue = new EventQueue({ workspaceId: 'ws', endpoint: 'https://t.shop.example', flushInterval: 100000 });
+    queue.setEdgeVisitor({ pending: () => null, replaced: () => null, adopt });
+    queue.enqueue(event(1, P));
+    await queue.flush();
+    expect(sentEvents()[0].visitor_id).toBe(P);
+    queue.destroy();
+    queue = new EventQueue({ workspaceId: 'ws', endpoint: 'https://ingest.datalyr.com', flushInterval: 100000 });
+    queue.setEdgeVisitor({ pending: () => P, replaced: () => null, adopt });
+    queue.enqueue(event(2, P));
+    await queue.flush();
+    expect(sentEvents(1)[0].visitor_id).toBe(P);
+    expect(adopt).not.toHaveBeenCalled();
+  });
+});

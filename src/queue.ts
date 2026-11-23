@@ -5,6 +5,15 @@
 import { storage } from './storage';
 import { generateUUID, calculateRetryDelay } from './utils';
 import type { IngestEventPayload, IngestBatchPayload, NetworkStatus } from './types';
+import { isFirstPartyEndpoint } from './visitor-token';
+
+/** FX-083 C19: the SDK's side of edge visitor adoption (edgeCookieV2). */
+export interface EdgeVisitorHooks {
+  pending: () => string | null;
+  replaced: () => { from: string; to: string } | null;
+  adopt: (id: string) => void;
+}
+const EDGE_ID_FIELDS = ['visitor_id', 'anonymous_id', 'distinct_id', 'canonical_id'];
 
 // Default critical events that bypass batching
 const DEFAULT_CRITICAL_EVENTS = ['purchase', 'signup', 'subscribe', 'lead', 'conversion'];
@@ -77,6 +86,7 @@ export class EventQueue {
   private enabled = true; // FIXED (consent): when false (opt-out / withdrawn analytics consent) all enqueue/flush/drain is a no-op
   private consentCheck?: () => boolean; // live consent gate re-evaluated at DRAIN time (not just the latched `enabled`)
   private consentSignal?: () => string | null; // FX-083 C18: X-DL-Consent value, null = send no signal (setting off)
+  private edgeVisitor?: EdgeVisitorHooks;       // FX-083 C19: adopt the edge's visitor id (edgeCookieV2), unset = today
   private rateLimitedUntil = 0; // FIXED (429): skip flush/drain until the server's Retry-After window passes
   // permanent drops used to be invisible — a debug-gated log line and
   // nothing else, so 11 days of 403s looked identical to a healthy queue. Counted
@@ -397,6 +407,15 @@ export class EventQueue {
     const endpoints = [this.config.endpoint, ...this.config.fallbackEndpoints];
     const currentEndpoint = endpoints[endpointIndex] || this.config.endpoint;
 
+    // FX-083 C19 (edgeCookieV2, first-party endpoint only): events carrying the id minted
+    // on this page with nothing stored go without it, so the edge fills the visitor it
+    // kept (`__dl_vid_h`) and answers with it; events queued before an adoption are
+    // rewritten to the adopted id. Unset hooks: the payload is untouched.
+    const edge = this.edgeVisitor && isFirstPartyEndpoint(currentEndpoint)
+      ? this.applyEdgeVisitor(events, true)
+      : null;
+    if (edge) batchPayload.events = edge.events;
+
     const body = JSON.stringify(batchPayload);
     // keepalive requests share a 64KB in-flight quota (Fetch spec) — a larger
     // body fails INSTANTLY with a network error, then retries through every fallback +
@@ -487,6 +506,8 @@ export class EventQueue {
 
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
+
+      if (edge?.pending) await this.adoptFromResponse(response);
 
       if (!splitAfter413) {
         this.log(`Batch sent successfully to ${currentEndpoint}: ${events.length} events`);
@@ -1117,7 +1138,10 @@ export class EventQueue {
     // copy is the source of truth for the next load (sendBeacon true ≠ delivered).
     let beaconed = 0;
     for (const chunk of chunks) {
-      const blob = new Blob([JSON.stringify(this.buildBatch(chunk))], {
+      const edgeChunk = this.edgeVisitor && isFirstPartyEndpoint(this.config.endpoint)
+        ? this.applyEdgeVisitor(chunk, false)
+        : null;
+      const blob = new Blob([JSON.stringify(this.buildBatch(edgeChunk ? edgeChunk.events : chunk))], {
         type: 'application/json'
       });
       if (!navigator.sendBeacon(this.beaconUrl(), blob)) break;
@@ -1172,6 +1196,57 @@ export class EventQueue {
       return value === 'granted' || value === 'denied' ? value : null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * FX-083 C19: hooks the SDK sets while edgeCookieV2 is on. `pending` is the id minted
+   * on this page with nothing stored (null otherwise); `adopt` takes the edge's answer.
+   */
+  setEdgeVisitor(hooks: EdgeVisitorHooks): void {
+    this.edgeVisitor = hooks;
+  }
+
+  private applyEdgeVisitor(
+    events: IngestEventPayload[],
+    stripPending: boolean,
+  ): { events: IngestEventPayload[]; pending: boolean } | null {
+    let pending: string | null = null;
+    let replaced: { from: string; to: string } | null = null;
+    try {
+      pending = stripPending ? this.edgeVisitor?.pending() ?? null : null;
+      replaced = this.edgeVisitor?.replaced() ?? null;
+    } catch {
+      return null;
+    }
+    if (!pending && !replaced) return null;
+    let stripped = false;
+    const out = events.map((event) => {
+      let copy: Record<string, unknown> | null = null;
+      for (const field of EDGE_ID_FIELDS) {
+        const value = (event as unknown as Record<string, unknown>)[field];
+        if (pending && value === pending) {
+          copy = copy ?? { ...event };
+          delete copy[field];
+          stripped = true;
+        } else if (replaced && value === replaced.from) {
+          copy = copy ?? { ...event };
+          copy[field] = replaced.to;
+        }
+      }
+      return (copy ?? event) as IngestEventPayload;
+    });
+    return { events: out, pending: stripped };
+  }
+
+  private async adoptFromResponse(response: Response): Promise<void> {
+    try {
+      if (typeof response?.json !== 'function') return;
+      const body: any = await response.json().catch(() => null);
+      const id = body && typeof body.visitor_id === 'string' ? body.visitor_id : null;
+      if (id) this.edgeVisitor?.adopt(id);
+    } catch {
+      // never let adoption break delivery
     }
   }
 
