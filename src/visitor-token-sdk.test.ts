@@ -243,3 +243,42 @@ describe('C14: getStripeMetadata() / getWhopCheckoutMetadata() return the token'
     expect(tokenCalls()).toHaveLength(0);
   });
 });
+
+describe('C15: Calendly and iClosed links and embeds', () => {
+  function addEl(html: string): HTMLElement {
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    const el = div.firstElementChild as HTMLElement;
+    document.body.appendChild(el);
+    return el;
+  }
+
+  test('off: untouched, no request', async () => {
+    const cal = addLink('https://calendly.com/team/intro');
+    const ic = addLink('https://app.iclosed.io/e/team/call');
+    await boot({ visitorToken: { stripe: true } });
+    expect(cal.getAttribute('href')).toBe('https://calendly.com/team/intro');
+    expect(ic.getAttribute('href')).toBe('https://app.iclosed.io/e/team/call');
+    expect(tokenCalls()).toHaveLength(0);
+  });
+
+  test('on: salesforce_uuid on Calendly, dl_vt on iClosed, only when empty', async () => {
+    const cal = addLink('https://calendly.com/team/intro?month=2026-12');
+    const calOwn = addLink('https://calendly.com/team/other?salesforce_uuid=OWN');
+    const calInline = addEl('<div class="calendly-inline-widget" data-url="https://calendly.com/team/demo"></div>');
+    const ic = addLink('https://app.iclosed.io/e/team/call');
+    const icFrame = addEl('<iframe src="https://app.iclosed.io/e/team/embed"></iframe>');
+    const stripe = addLink('https://buy.stripe.com/test_1');
+    const sdk = await boot({ visitorToken: { calendly: true, iclosed: true } });
+    await settle();
+    expect(new URL(cal.href).searchParams.get('salesforce_uuid')).toBe(T1);
+    expect(new URL(cal.href).searchParams.get('month')).toBe('2026-12');
+    expect(new URL(calOwn.href).searchParams.get('salesforce_uuid')).toBe('OWN');
+    expect(new URL(calInline.getAttribute('data-url') as string).searchParams.get('salesforce_uuid')).toBe(T1);
+    expect(new URL(ic.href).searchParams.get('dl_vt')).toBe(T1);
+    expect(new URL(icFrame.getAttribute('src') as string).searchParams.get('dl_vt')).toBe(T1);
+    // Stripe stays on the raw id: its own switch is off.
+    expect(new URL(stripe.href).searchParams.get('client_reference_id')).toBe(sdk.getVisitorId());
+    expect(tokenCalls()).toHaveLength(1);
+  });
+});

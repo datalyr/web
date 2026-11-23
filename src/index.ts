@@ -19,7 +19,7 @@ import { shopifyCartId } from './shopify-cart';
 import { readShopifyProductView, readShopifySearch, shopifyPixelWillRun } from './shopify-product-view';
 import { ReplayLoader, REPLAY_ENDPOINT, replayMode, replayAttribution, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
-import { TokenLinkDecorator, VisitorTokenClient, anyTokenEnabled, rawIdsAccepted, tokenEnabled, type TokenLinkRule } from './visitor-token';
+import { TokenLinkDecorator, VisitorTokenClient, VISITOR_TOKEN_KEY, anyTokenEnabled, rawIdsAccepted, tokenEnabled, type TokenLinkRule } from './visitor-token';
 import {
   generateUUID,
   sanitizeEventData,
@@ -573,6 +573,22 @@ class Datalyr {
         embedAttribute: 'client-reference-id',
         // A raw id stamped before the setting arrived (late dashboard config) is ours to replace.
         replaceable: (value) => value === this.identity?.getAnonymousId(),
+      });
+    }
+    // C15: Calendly links and embed URLs carry it in salesforce_uuid (Calendly passes
+    // that field to its webhook); iClosed scheduler links and embeds in dl_vt.
+    if (tokenEnabled(settings, 'calendly')) {
+      rules.push({
+        provider: 'calendly',
+        param: 'salesforce_uuid',
+        matchHost: (host) => host === 'calendly.com' || host.endsWith('.calendly.com'),
+      });
+    }
+    if (tokenEnabled(settings, 'iclosed')) {
+      rules.push({
+        provider: 'iclosed',
+        param: VISITOR_TOKEN_KEY,
+        matchHost: (host) => host === 'iclosed.io' || host.endsWith('.iclosed.io'),
       });
     }
     return rules;
