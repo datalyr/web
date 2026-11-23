@@ -204,3 +204,42 @@ describe('C13: Stripe Payment Links carry the token', () => {
     expect(new URL(a.href).searchParams.get('client_reference_id')).toBe(T2);
   });
 });
+
+describe('C14: getStripeMetadata() / getWhopCheckoutMetadata() return the token', () => {
+  test('before the token is ready: the raw id, and the call starts the request', async () => {
+    const sdk = await boot({ visitorToken: { stripe: true, whop: true } });
+    const vid = sdk.getVisitorId();
+    expect(sdk.getStripeMetadata()).toEqual({ client_reference_id: vid, metadata: { visitor_id: vid } });
+    expect(sdk.getWhopCheckoutMetadata()).toEqual({ visitor_id: vid });
+    await settle();
+    expect(tokenCalls()).toHaveLength(1);
+    expect(sdk.getStripeMetadata()).toEqual({ client_reference_id: T1, metadata: { visitor_id: vid, dl_vt: T1 } });
+    expect(sdk.getWhopCheckoutMetadata()).toEqual({ visitor_id: vid, dl_vt: T1 });
+  });
+
+  test('raw ids retired (rawIdFallback: false): empty until the token is ready', async () => {
+    const sdk = await boot({ visitorToken: { stripe: true, whop: true, rawIdFallback: false } });
+    expect(sdk.getStripeMetadata()).toEqual({ client_reference_id: '', metadata: { visitor_id: '' } });
+    expect(sdk.getWhopCheckoutMetadata()).toEqual({ visitor_id: '' });
+    await sdk.getVisitorToken();
+    expect(sdk.getStripeMetadata()).toEqual({ client_reference_id: T1, metadata: { visitor_id: '', dl_vt: T1 } });
+    expect(sdk.getWhopCheckoutMetadata()).toEqual({ visitor_id: '', dl_vt: T1 });
+  });
+
+  test('only the provider switched on changes', async () => {
+    const sdk = await boot({ visitorToken: { whop: true } });
+    await sdk.getVisitorToken();
+    const vid = sdk.getVisitorId();
+    expect(sdk.getStripeMetadata()).toEqual({ client_reference_id: vid, metadata: { visitor_id: vid } });
+    expect(sdk.getWhopCheckoutMetadata()).toEqual({ visitor_id: vid, dl_vt: T1 });
+  });
+
+  test('consent denied: the getters fall back and nothing is requested', async () => {
+    const sdk = await boot({ visitorToken: { stripe: true } });
+    sdk.setConsent({ marketing: false });
+    const vid = sdk.getVisitorId();
+    expect(sdk.getStripeMetadata()).toEqual({ client_reference_id: vid, metadata: { visitor_id: vid } });
+    await settle();
+    expect(tokenCalls()).toHaveLength(0);
+  });
+});

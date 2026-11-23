@@ -19,7 +19,7 @@ import { shopifyCartId } from './shopify-cart';
 import { readShopifyProductView, readShopifySearch, shopifyPixelWillRun } from './shopify-product-view';
 import { ReplayLoader, REPLAY_ENDPOINT, replayMode, replayAttribution, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
-import { TokenLinkDecorator, VisitorTokenClient, anyTokenEnabled, tokenEnabled, type TokenLinkRule } from './visitor-token';
+import { TokenLinkDecorator, VisitorTokenClient, anyTokenEnabled, rawIdsAccepted, tokenEnabled, type TokenLinkRule } from './visitor-token';
 import {
   generateUUID,
   sanitizeEventData,
@@ -1291,9 +1291,21 @@ class Datalyr {
    *
    * The server-side Datalyr webhook reads `client_reference_id` on Checkout
    * and `metadata.visitor_id` on every other Stripe object.
+   *
+   * FX-083 (`visitorToken.stripe` on): once the signed token is ready,
+   * `client_reference_id` and `metadata.dl_vt` carry it. Before it is ready this
+   * returns the raw id (today's value) while raw ids are accepted
+   * (`visitorToken.rawIdFallback`, default true), else empty values; the first call
+   * starts the request. For the token without the wait, use `await getVisitorToken()`.
    */
-  getStripeMetadata(): { client_reference_id: string; metadata: { visitor_id: string } } {
+  getStripeMetadata(): { client_reference_id: string; metadata: { visitor_id: string; dl_vt?: string } } {
     const visitorId = this.identity ? this.identity.getAnonymousId() : this.getterBeforeInit('getStripeMetadata', '');
+    if (this.identity && tokenEnabled(this.config.visitorToken, 'stripe')) {
+      const raw = rawIdsAccepted(this.config.visitorToken) ? visitorId : '';
+      const token = this.readyToken();
+      if (token) return { client_reference_id: token, metadata: { visitor_id: raw, dl_vt: token } };
+      return { client_reference_id: raw, metadata: { visitor_id: raw } };
+    }
     return {
       client_reference_id: visitorId,
       metadata: { visitor_id: visitorId },
@@ -1311,10 +1323,28 @@ class Datalyr {
    *     plan_id,
    *     metadata: datalyr.getWhopCheckoutMetadata(),
    *   })
+   *
+   * FX-083 (`visitorToken.whop` on): once the signed token is ready it is returned as
+   * `dl_vt`. Before that, the raw id while raw ids are accepted, else an empty value
+   * (see getStripeMetadata()).
    */
-  getWhopCheckoutMetadata(): { visitor_id: string } {
+  getWhopCheckoutMetadata(): { visitor_id: string; dl_vt?: string } {
     if (!this.identity) return { visitor_id: this.getterBeforeInit('getWhopCheckoutMetadata', '') };
+    if (tokenEnabled(this.config.visitorToken, 'whop')) {
+      const raw = rawIdsAccepted(this.config.visitorToken) ? this.identity.getAnonymousId() : '';
+      const token = this.readyToken();
+      return token ? { visitor_id: raw, dl_vt: token } : { visitor_id: raw };
+    }
     return { visitor_id: this.identity.getAnonymousId() };
+  }
+
+  /** The cached token, or null; a getter asking for one starts the request (C17). */
+  private readyToken(): string | null {
+    const client = this.tokenClient();
+    if (!client) return null;
+    const token = client.peek();
+    if (!token || !client.isFresh()) void client.get().catch(() => null);
+    return token;
   }
 
   /**
