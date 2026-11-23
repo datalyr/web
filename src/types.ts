@@ -2,6 +2,21 @@
  * Datalyr Web SDK - Type Definitions
  */
 
+/** FX-083: which providers get the signed visitor token. All off by default. */
+export interface VisitorTokenSettings {
+  stripe?: boolean;
+  whop?: boolean;
+  calendly?: boolean;
+  iclosed?: boolean;
+  checkoutchamp?: boolean;
+  /**
+   * Before a token is ready, the getters return the raw visitor id (today's value) while
+   * DATALYR still accepts raw ids. Default true; set false once raw ids are retired, and
+   * the getters return empty values until a token is ready.
+   */
+  rawIdFallback?: boolean;
+}
+
 export interface DatalyrConfig {
   // Required
   workspaceId: string;
@@ -110,6 +125,21 @@ export interface DatalyrConfig {
   inAppHandoff?: boolean;
   stripePaymentLinks?: boolean;
   stripeLinkDomains?: string[];
+  // FX-083 signed visitor token. Every setting below ships OFF; with all of them off the
+  // SDK sends exactly what it sent before. Usually delivered by the dashboard.
+  // - visitorToken: per provider, put a short signed token (2 hours, one workspace) on
+  //   checkout and booking links instead of the raw visitor id, and return it from
+  //   getStripeMetadata() / getWhopCheckoutMetadata(). See getVisitorToken().
+  visitorToken?: VisitorTokenSettings;
+  // - consentHeader: send `X-DL-Consent: granted|denied` on first-party (own domain)
+  //   event requests, and `dl_consent=` on their beacons.
+  consentHeader?: boolean;
+  // - edgeCookieV2: the edge on your own domain keeps an HttpOnly copy of the visitor id
+  //   (`__dl_vid_h`); optOut() and consent withdrawal ask it to clear that copy.
+  edgeCookieV2?: boolean;
+  // - optOutDeletesVisitorId: optOut() also deletes the stored visitor id, so a visitor
+  //   who opts in again starts with a new one.
+  optOutDeletesVisitorId?: boolean;
   // - replay: session replay is enabled from the Datalyr dashboard only (it is billed per
   //   recorded session). Pass `replay: false` to keep it off on this site no matter what
   //   the dashboard says. Nothing passed here can turn it on; the object form is what the
