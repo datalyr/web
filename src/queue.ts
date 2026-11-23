@@ -76,6 +76,7 @@ export class EventQueue {
   private inFlight: IngestEventPayload[] = []; // FIXED: batch currently in _flight's keepalive fetch — forceFlush must NOT re-beacon it
   private enabled = true; // FIXED (consent): when false (opt-out / withdrawn analytics consent) all enqueue/flush/drain is a no-op
   private consentCheck?: () => boolean; // live consent gate re-evaluated at DRAIN time (not just the latched `enabled`)
+  private consentSignal?: () => string | null; // FX-083 C18: X-DL-Consent value, null = send no signal (setting off)
   private rateLimitedUntil = 0; // FIXED (429): skip flush/drain until the server's Retry-After window passes
   // permanent drops used to be invisible — a debug-gated log line and
   // nothing else, so 11 days of 403s looked identical to a healthy queue. Counted
@@ -423,12 +424,16 @@ export class EventQueue {
       const timeout = controller ? setTimeout(() => controller.abort(), SEND_TIMEOUT_MS) : null;
       let response: Response;
       try {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'X-Batch-Size': events.length.toString()
+        };
+        // FX-083 C18: the edge on the customer's own domain reads the consent decision.
+        const consent = firstPartyEndpoint ? this.consentValue() : null;
+        if (consent) headers['X-DL-Consent'] = consent;
         response = await fetch(currentEndpoint, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Batch-Size': events.length.toString()
-          },
+          headers,
           body,
           keepalive: useKeepalive,
           ...(firstPartyEndpoint ? { credentials: 'include' as RequestCredentials } : {}),
@@ -1115,7 +1120,7 @@ export class EventQueue {
       const blob = new Blob([JSON.stringify(this.buildBatch(chunk))], {
         type: 'application/json'
       });
-      if (!navigator.sendBeacon(this.config.endpoint, blob)) break;
+      if (!navigator.sendBeacon(this.beaconUrl(), blob)) break;
       beaconed += chunk.length;
     }
     this.log(`forceFlush(terminal): beaconed ${beaconed}/${live.length} live events; backlog (${pending.length - live.length}) persisted for next-load drain`);
@@ -1149,6 +1154,39 @@ export class EventQueue {
    */
   setConsentCheck(fn: () => boolean): void {
     this.consentCheck = fn;
+  }
+
+  /**
+   * FX-083 C18: the consent decision ('granted' / 'denied') sent to a first-party
+   * endpoint as `X-DL-Consent`, and as `dl_consent=` on beacons (which cannot set
+   * headers). The function returns null while the consentHeader setting is off:
+   * then requests are exactly as before.
+   */
+  setConsentSignal(fn: () => string | null): void {
+    this.consentSignal = fn;
+  }
+
+  private consentValue(): string | null {
+    try {
+      const value = this.consentSignal?.();
+      return value === 'granted' || value === 'denied' ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private beaconUrl(): string {
+    const endpoint = this.config.endpoint;
+    try {
+      if (/(^|\.)datalyr\.com$/i.test(new URL(endpoint).hostname)) return endpoint;
+      const consent = this.consentValue();
+      if (!consent) return endpoint;
+      const url = new URL(endpoint);
+      url.searchParams.set('dl_consent', consent);
+      return url.toString();
+    } catch {
+      return endpoint;
+    }
   }
 
   /**

@@ -314,3 +314,21 @@ describe('C16: CheckoutChamp outbound links carry dl_vt', () => {
     expect(tokenCalls()).toHaveLength(0);
   });
 });
+
+describe('C18: consent signal for first-party requests', () => {
+  test('off: no signal', async () => {
+    const sdk = await boot({ endpoint: 'https://t.shop.example' });
+    expect(sdk.consentSignal()).toBeNull();
+  });
+
+  test('on: granted, then denied after a marketing withdrawal or opt-out', async () => {
+    const sdk = await boot({ endpoint: 'https://t.shop.example', consentHeader: true });
+    expect(sdk.consentSignal()).toBe('granted');
+    sdk.setConsent({ marketing: false });
+    expect(sdk.consentSignal()).toBe('denied');
+    sdk.setConsent({ marketing: true });
+    expect(sdk.consentSignal()).toBe('granted');
+    sdk.optOut();
+    expect(sdk.consentSignal()).toBe('denied');
+  });
+});

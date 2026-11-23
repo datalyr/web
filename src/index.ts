@@ -300,6 +300,8 @@ class Datalyr {
     // a fail-open value while Shopify's customerPrivacy loads async; a returning declined
     // visitor fires no visitorConsentCollected event, so the drain must re-check per run.
     this.queue.setConsentCheck(() => this.shouldTrack());
+    // FX-083 C18: X-DL-Consent on first-party requests, only with the consentHeader setting.
+    this.queue.setConsentSignal(() => this.consentSignal());
 
     // FIXED (ISSUE-01): Start async initialization immediately but don't block constructor
     // This allows encryption to initialize before any events are tracked
@@ -1408,6 +1410,12 @@ class Datalyr {
       });
     }
     return this.visitorTokenClient;
+  }
+
+  /** FX-083 C18: 'granted' / 'denied' for first-party requests; null while the setting is off. */
+  private consentSignal(): 'granted' | 'denied' | null {
+    if (this.config?.consentHeader !== true) return null;
+    return this.shouldTrack() && this.consentAllowsMarketing() ? 'granted' : 'denied';
   }
 
   /** The gate Stripe link decoration uses today: tracking allowed and marketing not denied. */
