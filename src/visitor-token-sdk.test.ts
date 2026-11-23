@@ -170,3 +170,37 @@ describe('getVisitorToken() with a provider switched on', () => {
     expect(JSON.parse(tokenCalls()[0][1].body).visitor_id).toBe(sdk.getVisitorId());
   });
 });
+
+describe('C13: Stripe Payment Links carry the token', () => {
+  test('off: the raw visitor id is stamped as today', async () => {
+    const a = addLink('https://buy.stripe.com/test_1');
+    const sdk = await boot();
+    expect(new URL(a.href).searchParams.get('client_reference_id')).toBe(sdk.getVisitorId());
+  });
+
+  test('on: client_reference_id is the token, never the raw id', async () => {
+    const a = addLink('https://buy.stripe.com/test_1');
+    const sdk = await boot({ visitorToken: { stripe: true } });
+    await settle();
+    const ref = new URL(a.href).searchParams.get('client_reference_id');
+    expect(ref).toBe(T1);
+    expect(ref).not.toBe(sdk.getVisitorId());
+    expect(tokenCalls()).toHaveLength(1);
+  });
+
+  test('on, but stripePaymentLinks: false still means no Stripe decoration', async () => {
+    const a = addLink('https://buy.stripe.com/test_1');
+    await boot({ visitorToken: { stripe: true }, stripePaymentLinks: false });
+    expect(a.getAttribute('href')).toBe('https://buy.stripe.com/test_1');
+    expect(tokenCalls()).toHaveLength(0);
+  });
+
+  test("reset(): stamped links get the new visitor's token", async () => {
+    const a = addLink('https://buy.stripe.com/test_1');
+    const sdk = await boot({ visitorToken: { stripe: true } });
+    await settle();
+    sdk.reset();
+    await settle();
+    expect(new URL(a.href).searchParams.get('client_reference_id')).toBe(T2);
+  });
+});

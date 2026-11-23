@@ -19,7 +19,7 @@ import { shopifyCartId } from './shopify-cart';
 import { readShopifyProductView, readShopifySearch, shopifyPixelWillRun } from './shopify-product-view';
 import { ReplayLoader, REPLAY_ENDPOINT, replayMode, replayAttribution, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
-import { VisitorTokenClient, anyTokenEnabled } from './visitor-token';
+import { TokenLinkDecorator, VisitorTokenClient, anyTokenEnabled, tokenEnabled, type TokenLinkRule } from './visitor-token';
 import {
   generateUUID,
   sanitizeEventData,
@@ -112,6 +112,7 @@ class Datalyr {
   private stripeLinksDisposer?: () => void;     // tears down the Stripe Payment Link observer/listener
   private stripeSessionWatcher?: StripeSessionWatcher; // observes Checkout Session ids (server-created sessions)
   private visitorTokenClient?: VisitorTokenClient;     // FX-083: created on first use, only with a provider switched on
+  private tokenDecorator?: TokenLinkDecorator;         // FX-083: puts the token on checkout / booking links
   private inAppHandoffTimer: ReturnType<typeof setInterval> | null = null;
   private inAppHandoffWrite: (() => void) | null = null;
   private inAppHandoffReported = false;
@@ -530,6 +531,51 @@ class Datalyr {
       this.syncStripePaymentLinks(this.config.stripeLinkDomains ?? []);
     }
     if (this.config.stripeCheckoutSessions !== false) this.startStripeSessionCapture();
+    this.startTokenDecoration();
+  }
+
+  /**
+   * FX-083: put the signed visitor token on the links of each provider switched on in
+   * the visitorToken setting. Same gate as Stripe link decoration (tracking allowed,
+   * marketing consent not denied), re-checked before every write. Once per page.
+   */
+  private startTokenDecoration(): void {
+    if (this.tokenDecorator || !this.tokenAllowed()) return;
+    const client = this.tokenClient();
+    if (!client) return;
+    const rules = this.tokenLinkRules();
+    if (rules.length === 0) return;
+    this.tokenDecorator = new TokenLinkDecorator({
+      rules,
+      client,
+      canDecorate: () => this.tokenAllowed(),
+      onLinkClick: () => this.queue?.flush(),
+    });
+    this.tokenDecorator.start();
+  }
+
+  private tokenLinkRules(): TokenLinkRule[] {
+    const settings = this.config.visitorToken;
+    const rules: TokenLinkRule[] = [];
+    // C13: Stripe Payment Links (buy.stripe.com + stripeLinkDomains, exact host) and the
+    // pricing-table / buy-button embeds. stripePaymentLinks: false still turns it off.
+    if (tokenEnabled(settings, 'stripe') && this.config.stripePaymentLinks !== false) {
+      const hosts = new Set<string>(['buy.stripe.com']);
+      for (const d of this.config.stripeLinkDomains ?? []) {
+        const h = String(d).trim().toLowerCase();
+        if (h) hosts.add(h);
+      }
+      rules.push({
+        provider: 'stripe',
+        param: 'client_reference_id',
+        matchHost: (host) => hosts.has(host),
+        embedSelector: 'stripe-pricing-table, stripe-buy-button',
+        embedAttribute: 'client-reference-id',
+        // A raw id stamped before the setting arrived (late dashboard config) is ours to replace.
+        replaceable: (value) => value === this.identity?.getAnonymousId(),
+      });
+    }
+    return rules;
   }
 
   /**
@@ -1171,6 +1217,7 @@ class Datalyr {
     this.identity.reset();
     // FX-083: the cached token names the previous visitor; the next one names the new id.
     this.visitorTokenClient?.clear();
+    this.tokenDecorator?.reissue(); // links stamped for the previous visitor get the new one's token
     this.syncInAppHandoff(); // the URL must not keep the pre-reset visitor id
     // Replay: drop what was recorded for the previous user now; the new recording (new
     // page load id, new visitor id, new session id) starts below, after the session
@@ -2096,6 +2143,9 @@ class Datalyr {
     // skip silently rather than stamp a value Stripe would discard.
     const CLIENT_REFERENCE_ID_RE = /^[A-Za-z0-9_-]{1,200}$/;
     const getClientReferenceId = (): string | null => {
+      // FX-083 (C13): with the Stripe token on, client_reference_id carries the signed
+      // token (startTokenDecoration), never the raw id.
+      if (tokenEnabled(this.config.visitorToken, 'stripe')) return null;
       const vid = this.identity.getAnonymousId();
       return vid && CLIENT_REFERENCE_ID_RE.test(vid) ? vid : null;
     };
@@ -3111,6 +3161,8 @@ class Datalyr {
       this.stripeSessionWatcher.stop();
       this.stripeSessionWatcher = undefined;
     }
+    this.tokenDecorator?.stop(false);
+    this.tokenDecorator = undefined;
     this.visitorTokenClient = undefined;
 
     // Clean up queue

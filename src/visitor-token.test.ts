@@ -259,6 +259,21 @@ describe('TokenLinkDecorator', () => {
     expect(t.getAttribute('client-reference-id')).toBe('MINE');
   });
 
+  it('replaces a raw id an older stamp wrote; removing the token leaves the field empty', async () => {
+    const raw = 'anon_0b815a3e-6f9d-4c2e-8a7b-1c3d5e7f9a0b';
+    const withRaw: TokenLinkRule[] = [{ ...rules[0], replaceable: (v) => v === raw }];
+    const a = add(`<a href="https://buy.stripe.com/test_1?client_reference_id=${raw}">pay</a>`);
+    const t = add(`<stripe-buy-button client-reference-id="${raw}"></stripe-buy-button>`);
+    decorator = new TokenLinkDecorator({ rules: withRaw, client: client(), canDecorate: () => true });
+    decorator.start();
+    await settle();
+    expect(new URL(a.getAttribute('href') as string).searchParams.get('client_reference_id')).toBe(T1);
+    expect(t.getAttribute('client-reference-id')).toBe(T1);
+    decorator.stop(true);
+    expect(a.getAttribute('href')).toBe('https://buy.stripe.com/test_1');
+    expect(t.hasAttribute('client-reference-id')).toBe(false);
+  });
+
   it('exact host only: no path substrings or look-alike hosts', async () => {
     const evil = add('<a href="https://evil.com/calendly.com/x">x</a>');
     const sub = add('<a href="https://calendly.com.evil.com/x">x</a>');

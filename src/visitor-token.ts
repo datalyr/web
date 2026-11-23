@@ -219,6 +219,12 @@ export interface TokenLinkRule {
   /** Custom elements whose whole attribute takes the token (Stripe pricing table / buy button). */
   embedSelector?: string;
   embedAttribute?: string;
+  /**
+   * A value already in the field that may be replaced anyway: the raw visitor id an
+   * older stamp (the raw-id Stripe decorator) wrote. Removing the token later leaves
+   * the field empty, never the raw id.
+   */
+  replaceable?: (value: string) => boolean;
 }
 
 interface StampRecord {
@@ -322,9 +328,9 @@ export class TokenLinkDecorator {
     if (this.stopped || typeof document === 'undefined' || !this.opts.canDecorate()) return;
     const token = this.opts.client.peek();
     let found = false as boolean;
-    this.forEachCandidate((el, attr, rule, refresh) => {
+    this.forEachCandidate((el, attr, rule, refresh, whole) => {
       found = true;
-      if (token) this.stamp(el, attr, rule, token, refresh);
+      if (token) this.stamp(el, attr, rule, token, refresh, whole);
     });
     if (found && (!token || !this.opts.client.isFresh())) this.fetchThenStamp();
   }
@@ -347,18 +353,18 @@ export class TokenLinkDecorator {
   }
 
   private forEachCandidate(
-    visit: (el: Element, attr: string, rule: TokenLinkRule | null, refresh: boolean) => void,
+    visit: (el: Element, attr: string, rule: TokenLinkRule, refresh: boolean, whole: boolean) => void,
   ): void {
     for (const target of URL_TARGETS) {
       document.querySelectorAll(target.selector).forEach((el) => {
         const rule = this.ruleFor(el.getAttribute(target.attr));
-        if (rule) visit(el, target.attr, rule, target.refresh);
+        if (rule) visit(el, target.attr, rule, target.refresh, false);
       });
     }
     for (const rule of this.opts.rules) {
       if (!rule.embedSelector || !rule.embedAttribute) continue;
       const attr = rule.embedAttribute;
-      document.querySelectorAll(rule.embedSelector).forEach((el) => visit(el, attr, null, true));
+      document.querySelectorAll(rule.embedSelector).forEach((el) => visit(el, attr, rule, true, true));
     }
   }
 
@@ -376,27 +382,35 @@ export class TokenLinkDecorator {
     return null;
   }
 
-  /** `rule` null = an embed attribute that takes the whole token. */
-  private stamp(el: Element, attr: string, rule: TokenLinkRule | null, token: string, refresh: boolean): void {
+  /** `whole`: an embed attribute that takes the whole token (not a URL parameter). */
+  private stamp(el: Element, attr: string, rule: TokenLinkRule, token: string, refresh: boolean, whole: boolean): void {
     const current = el.getAttribute(attr);
     const record = this.stamped.get(el);
     const ours = !!record && record.attr === attr && record.value === current;
-    if (!rule) {
-      if (current && !ours) return; // the site set it
+    if (whole) {
+      const raw = !!current && !ours && !!rule.replaceable?.(current);
+      if (current && !ours && !raw) return; // the site set it
       if (current === token || (ours && !refresh)) return;
       el.setAttribute(attr, token);
-      this.stamped.set(el, { attr, param: null, original: ours ? record!.original : current, value: token });
+      this.stamped.set(el, { attr, param: null, original: ours ? record!.original : raw ? null : current, value: token });
       return;
     }
     if (!current) return;
     try {
       const url = new URL(current, window.location.href);
       const existing = url.searchParams.get(rule.param);
-      if (existing && (!ours || existing === token || !refresh)) return;
+      let original = ours ? record!.original : current;
+      if (existing && !ours) {
+        if (!rule.replaceable?.(existing)) return; // the site set it
+        url.searchParams.delete(rule.param);
+        original = url.toString();
+      } else if (existing && (existing === token || !refresh)) {
+        return;
+      }
       url.searchParams.set(rule.param, token);
       const next = url.toString();
       el.setAttribute(attr, next);
-      this.stamped.set(el, { attr, param: rule.param, original: ours ? record!.original : current, value: next });
+      this.stamped.set(el, { attr, param: rule.param, original, value: next });
     } catch {
       // malformed URL: leave it
     }
@@ -435,7 +449,7 @@ export class TokenLinkDecorator {
     if (!rule) return;
     if (this.opts.canDecorate()) {
       const token = this.opts.client.peek();
-      if (token) this.stamp(anchor, 'href', rule, token, true);
+      if (token) this.stamp(anchor, 'href', rule, token, true, false);
     }
     try {
       this.opts.onLinkClick?.();
