@@ -45,7 +45,7 @@ function client(endpoint = 'https://ingest.datalyr.com'): VisitorTokenClient {
 }
 
 async function settle(): Promise<void> {
-  for (let i = 0; i < 10; i++) await Promise.resolve();
+  for (let i = 0; i < 50; i++) await Promise.resolve();
 }
 
 const originalFetch = global.fetch;

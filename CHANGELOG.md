@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- FX-083 signed visitor token, script side. Every setting ships off; with all of them off the SDK sends exactly what it sent before (no new request, no link changed, getters unchanged). Settings (init options or the dashboard config): `visitorToken: { stripe, whop, calendly, iclosed, checkoutchamp, rawIdFallback }`, `consentHeader`, `edgeCookieV2`, `optOutDeletesVisitorId`.
+  - New `getVisitorToken(): Promise<string | null>`: a short signed token (57 characters, 2 hours, one workspace) from `POST <endpoint>/v1/visitor-token`, only for `anon_<uuid>` ids and only while tracking and marketing consent allow. Cached in memory and in sessionStorage `dl_vt`; renewed after 15 minutes. `reset()` clears it. An inbound `dl_vt` in a URL is never adopted.
+  - Links (per provider, only empty fields, re-stamped on click, renewed every 15 minutes while such a link is on the page): Stripe Payment Links and embeds get the token in `client_reference_id` instead of the raw id; Calendly links and embeds get `salesforce_uuid`; iClosed links and embeds get `dl_vt`; links to `checkoutChampDomains` get `dl_vt`. Whop links are not decorated.
+  - `getStripeMetadata()` returns the token as `client_reference_id` and `metadata.dl_vt`; `getWhopCheckoutMetadata()` returns `dl_vt`. Before the token is ready: the raw id while raw ids are accepted (`rawIdFallback`, default true), else empty values.
+  - `optOut()` and consent withdrawal stop decorating, put stamped links back to their original href and clear the token; with `edgeCookieV2`, they call `POST <endpoint>/v/clear` on a first-party endpoint.
+  - `consentHeader`: `X-DL-Consent: granted|denied` on first-party event requests, `dl_consent=` on their beacons.
+  - `optOutDeletesVisitorId`: `optOut()` deletes the stored visitor id (cookie and storage); opting in again starts a new one.
 - Package entry points: `require('@datalyr/web')` returned `{}` because `main` pointed at the browser script build (`dist/datalyr.js`). `main` now points at the CommonJS build (`dist/datalyr.cjs.js`), and an `exports` map sends `import` to the ESM build and `require` to the CommonJS build, with types for both. `unpkg` and `jsdelivr` keep serving `dist/datalyr.js`, and deep imports under `dist/` (such as `@datalyr/web/dist/datalyr.js`) still work. No built file changed.
 - Release as a minor version (1.10.0). Two narrow cases change: a deep import without a file extension (`@datalyr/web/dist/datalyr.cjs`) no longer resolves in Node or webpack 5; add `.js`. A plain Node ESM `import` of this package needs Node 20.19 or later (or 22.12 or later); before, it loaded but returned an empty object. Bundlers, CommonJS and the CDN script are not affected.
 

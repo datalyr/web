@@ -99,6 +99,7 @@ afterEach(() => {
   document.body.innerHTML = '';
   document.cookie = '__dl_opt_out=; path=/; max-age=0';
   document.cookie = '__dl_visitor_id=; path=/; max-age=0';
+  document.cookie = '__dl_visitor_id=; domain=localhost; path=/; max-age=0';
   localStorage.clear();
   sessionStorage.clear();
   window.history.replaceState(null, '', '/');
