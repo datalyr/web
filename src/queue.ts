@@ -12,6 +12,8 @@ export interface EdgeVisitorHooks {
   pending: () => string | null;
   replaced: () => { from: string; to: string } | null;
   adopt: (id: string) => void;
+  /** The edge answered without a visitor id (old edge, switch off): use the local id. */
+  giveUp: () => void;
 }
 const EDGE_ID_FIELDS = ['visitor_id', 'anonymous_id', 'distinct_id', 'canonical_id'];
 
@@ -87,6 +89,7 @@ export class EventQueue {
   private consentCheck?: () => boolean; // live consent gate re-evaluated at DRAIN time (not just the latched `enabled`)
   private consentSignal?: () => string | null; // FX-083 C18: X-DL-Consent value, null = send no signal (setting off)
   private edgeVisitor?: EdgeVisitorHooks;       // FX-083 C19: adopt the edge's visitor id (edgeCookieV2), unset = today
+  private edgeGate: Promise<void> | null = null; // FX-083 C19: the one id-less request in flight
   private rateLimitedUntil = 0; // FIXED (429): skip flush/drain until the server's Retry-After window passes
   // permanent drops used to be invisible — a debug-gated log line and
   // nothing else, so 11 days of 403s looked identical to a healthy queue. Counted
@@ -192,7 +195,7 @@ export class EventQueue {
       this.persistCriticalEvents(batch);
       const ids = batch.map(e => e.event_id);
 
-      this.sendBatch(batch)
+      this.deliver(batch)
         .then(() => {
           // Delivered — drop the persisted copies so they aren't replayed next load.
           this.removeFromOfflineQueue(ids);
@@ -359,7 +362,7 @@ export class EventQueue {
     this.inFlight = events;
 
     try {
-      await this.sendBatch(events);
+      await this.deliver(events);
       // SUCCESS: Now it's safe to remove events from queue
       this.queue.splice(0, batchSize);
       this.log(`Successfully sent and removed ${batchSize} events from queue`);
@@ -461,6 +464,7 @@ export class EventQueue {
       } finally {
         if (timeout) clearTimeout(timeout);
       }
+      if (edge?.pending) await this.adoptFromResponse(response);
 
       if (response.status === 413 && events.length > 1) {
         // 1.9.15 (services-b-125): a batch over ingest's size limit is not a bad batch.
@@ -506,8 +510,6 @@ export class EventQueue {
 
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-
-      if (edge?.pending) await this.adoptFromResponse(response);
 
       if (!splitAfter413) {
         this.log(`Batch sent successfully to ${currentEndpoint}: ${events.length} events`);
@@ -932,7 +934,7 @@ export class EventQueue {
         const batch = this.offlineQueue.splice(0, this.config.batchSize);
 
         try {
-          await this.sendBatch(batch);
+          await this.deliver(batch);
           this.markSettled(batch);
           this.saveOfflineQueue();
         } catch (error) {
@@ -1139,7 +1141,7 @@ export class EventQueue {
     let beaconed = 0;
     for (const chunk of chunks) {
       const edgeChunk = this.edgeVisitor && isFirstPartyEndpoint(this.config.endpoint)
-        ? this.applyEdgeVisitor(chunk, false)
+        ? this.applyEdgeVisitor(chunk, true)
         : null;
       const blob = new Blob([JSON.stringify(this.buildBatch(edgeChunk ? edgeChunk.events : chunk))], {
         type: 'application/json'
@@ -1207,6 +1209,38 @@ export class EventQueue {
     this.edgeVisitor = hooks;
   }
 
+  private edgePendingId(): string | null {
+    if (!this.edgeVisitor || !isFirstPartyEndpoint(this.config.endpoint)) return null;
+    try {
+      return this.edgeVisitor.pending();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * FX-083 C19: every send goes through here. While the page's minted id is pending, only
+   * ONE id-less request is in flight (critical sends included); the rest wait for its
+   * answer and then go with the adopted (or local) id. Nothing pending: sendBatch as before.
+   */
+  private deliver(events: IngestEventPayload[]): Promise<void> {
+    if (!this.edgeGate && !this.edgePendingId()) return this.sendBatch(events);
+    return this.deliverGated(events);
+  }
+
+  private async deliverGated(events: IngestEventPayload[]): Promise<void> {
+    while (this.edgeGate) await this.edgeGate;
+    if (!this.edgePendingId()) return this.sendBatch(events);
+    let release: () => void = () => undefined;
+    this.edgeGate = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      await this.sendBatch(events);
+    } finally {
+      this.edgeGate = null;
+      release();
+    }
+  }
+
   private applyEdgeVisitor(
     events: IngestEventPayload[],
     stripPending: boolean,
@@ -1221,17 +1255,38 @@ export class EventQueue {
     }
     if (!pending && !replaced) return null;
     let stripped = false;
-    const out = events.map((event) => {
+    // The minted id is dropped while pending, the replaced id becomes the adopted one,
+    // at the top level and inside event_data (two levels: $identify / $alias carry it).
+    const fix = (obj: Record<string, unknown>, fields: ReadonlyArray<string> | null, depth: number): Record<string, unknown> | null => {
       let copy: Record<string, unknown> | null = null;
-      for (const field of EDGE_ID_FIELDS) {
-        const value = (event as unknown as Record<string, unknown>)[field];
+      for (const key of fields ?? Object.keys(obj)) {
+        const value = obj[key];
         if (pending && value === pending) {
-          copy = copy ?? { ...event };
-          delete copy[field];
+          copy = copy ?? { ...obj };
+          delete copy[key];
           stripped = true;
         } else if (replaced && value === replaced.from) {
-          copy = copy ?? { ...event };
-          copy[field] = replaced.to;
+          copy = copy ?? { ...obj };
+          copy[key] = replaced.to;
+        } else if (depth > 0 && value && typeof value === 'object' && !Array.isArray(value)) {
+          const inner = fix(value as Record<string, unknown>, null, depth - 1);
+          if (inner) {
+            copy = copy ?? { ...obj };
+            copy[key] = inner;
+          }
+        }
+      }
+      return copy;
+    };
+    const out = events.map((event) => {
+      const top = event as unknown as Record<string, unknown>;
+      let copy = fix(top, EDGE_ID_FIELDS, 0);
+      const data = top.event_data;
+      if (data && typeof data === 'object' && !Array.isArray(data)) {
+        const inner = fix(data as Record<string, unknown>, null, 1);
+        if (inner) {
+          copy = copy ?? { ...top };
+          copy.event_data = inner;
         }
       }
       return (copy ?? event) as IngestEventPayload;
@@ -1243,8 +1298,10 @@ export class EventQueue {
     try {
       if (typeof response?.json !== 'function') return;
       const body: any = await response.json().catch(() => null);
-      const id = body && typeof body.visitor_id === 'string' ? body.visitor_id : null;
+      const id = body && typeof body.visitor_id === 'string' && body.visitor_id ? body.visitor_id : null;
       if (id) this.edgeVisitor?.adopt(id);
+      // An answer that names no visitor (old edge, switch off): stop waiting, use the local id.
+      else if (response.ok) this.edgeVisitor?.giveUp();
     } catch {
       // never let adoption break delivery
     }

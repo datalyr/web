@@ -315,6 +315,14 @@ export class IdentityManager {
     return this.mintedFresh && this.persistNewId ? this.anonymousId : null;
   }
 
+  /**
+   * Stop waiting for the edge: its answer named no visitor (old edge, switch off), or this
+   * browser opted out (never re-adopt an opted-out visitor's id). The local id stays.
+   */
+  cancelEdgeAdoption(): void {
+    this.mintedFresh = false;
+  }
+
   /** The minted id an adopted edge id replaced (events queued with it are rewritten). */
   getReplacedVisitor(): { from: string; to: string } | null {
     return this.replacedVisitor;

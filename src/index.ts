@@ -309,7 +309,11 @@ class Datalyr {
       pending: () => (this.config.edgeCookieV2 === true && this.shouldTrack() ? this.identity.pendingEdgeVisitorId() : null),
       replaced: () => (this.config.edgeCookieV2 === true ? this.identity.getReplacedVisitor() : null),
       adopt: (id) => this.adoptEdgeVisitor(id),
+      giveUp: () => this.identity.cancelEdgeAdoption(),
     });
+    // A browser that ever opted out (the __dl_opt_out cookie, either value) never adopts
+    // the edge's id: that id is the opted-out visitor's.
+    if (this.cookies.get('__dl_opt_out')) this.identity.cancelEdgeAdoption();
 
     // FIXED (ISSUE-01): Start async initialization immediately but don't block constructor
     // This allows encryption to initialize before any events are tracked
@@ -1588,6 +1592,7 @@ class Datalyr {
     // FX-083 C21 (owner answer 9, setting optOutDeletesVisitorId, off): delete the stored
     // visitor id too, so opting in again starts a new visitor.
     if (this.config.optOutDeletesVisitorId === true) this.identity.forgetAnonymousId();
+    this.identity.cancelEdgeAdoption(); // FX-083 C19: never adopt the edge's id after an opt-out
     this.session.refreshStoredRecord(); // drop the visitor id from the session record
     this.syncInAppHandoff(); // remove the visitor id from the address bar now, not in 30s
     this.syncReplay(); // stop and discard the recording

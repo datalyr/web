@@ -107,7 +107,7 @@ describe('EventQueue edge visitor adoption (C19, edgeCookieV2)', () => {
     let pending: string | null = P;
     let replaced: { from: string; to: string } | null = null;
     queue = new EventQueue({ workspaceId: 'ws', endpoint: 'https://t.shop.example', flushInterval: 100000 });
-    queue.setEdgeVisitor({ pending: () => pending, replaced: () => replaced, adopt: (id) => { adopt(id); pending = null; replaced = { from: P, to: id }; } });
+    queue.setEdgeVisitor({ pending: () => pending, replaced: () => replaced, adopt: (id) => { adopt(id); pending = null; replaced = { from: P, to: id }; }, giveUp: () => { pending = null; } });
     queue.enqueue(event(1, P));
     await queue.flush();
     const [first] = sentEvents();
@@ -124,16 +124,98 @@ describe('EventQueue edge visitor adoption (C19, edgeCookieV2)', () => {
   test('setting off (hooks answer null) or DATALYR endpoint: payload untouched, nothing adopted', async () => {
     const adopt = jest.fn();
     queue = new EventQueue({ workspaceId: 'ws', endpoint: 'https://t.shop.example', flushInterval: 100000 });
-    queue.setEdgeVisitor({ pending: () => null, replaced: () => null, adopt });
+    queue.setEdgeVisitor({ pending: () => null, replaced: () => null, adopt, giveUp: jest.fn() });
     queue.enqueue(event(1, P));
     await queue.flush();
     expect(sentEvents()[0].visitor_id).toBe(P);
     queue.destroy();
     queue = new EventQueue({ workspaceId: 'ws', endpoint: 'https://ingest.datalyr.com', flushInterval: 100000 });
-    queue.setEdgeVisitor({ pending: () => P, replaced: () => null, adopt });
+    queue.setEdgeVisitor({ pending: () => P, replaced: () => null, adopt, giveUp: jest.fn() });
     queue.enqueue(event(2, P));
     await queue.flush();
     expect(sentEvents(1)[0].visitor_id).toBe(P);
     expect(adopt).not.toHaveBeenCalled();
+  });
+
+  function hooks() {
+    const state = { pending: P as string | null, replaced: null as { from: string; to: string } | null };
+    const h = {
+      pending: () => state.pending,
+      replaced: () => state.replaced,
+      adopt: jest.fn((id: string) => { state.pending = null; state.replaced = { from: P, to: id }; }),
+      giveUp: jest.fn(() => { state.pending = null; }),
+    };
+    return { state, h };
+  }
+
+  test('only ONE id-less request in flight: a critical send waits for the first answer', async () => {
+    let answer!: () => void;
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => {
+      answer = () => resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ success: true, visitor_id: EDGE }) });
+    }));
+    const { h } = hooks();
+    queue = new EventQueue({ workspaceId: 'ws', endpoint: 'https://t.shop.example', flushInterval: 100000 });
+    queue.setEdgeVisitor(h);
+    queue.enqueue(event(1, P));
+    const flushing = queue.flush();
+    await Promise.resolve();
+    queue.enqueue({ ...event(2, P), event_name: 'purchase' } as IngestEventPayload); // critical: sent at once
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1); // the critical send is waiting
+    answer();
+    await flushing;
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Whichever went first went without the id; the other waited and carries the edge's.
+    for (const e of sentEvents(0)) expect(e).not.toHaveProperty('visitor_id');
+    for (const e of sentEvents(1)) expect(e.visitor_id).toBe(EDGE);
+    const names = [...sentEvents(0), ...sentEvents(1)].map((e: any) => e.event_name).sort();
+    expect(names).toEqual(['pageview', 'purchase']);
+    expect(h.adopt).toHaveBeenCalledTimes(1);
+  });
+
+  test('an answer with no visitor_id (old edge, switch off): stop stripping, the local id goes', async () => {
+    fetchMock.mockImplementationOnce(() => Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ success: true }) }));
+    const { h } = hooks();
+    queue = new EventQueue({ workspaceId: 'ws', endpoint: 'https://t.shop.example', flushInterval: 100000 });
+    queue.setEdgeVisitor(h);
+    queue.enqueue(event(1, P));
+    await queue.flush();
+    expect(h.giveUp).toHaveBeenCalled();
+    queue.enqueue(event(2, P));
+    await queue.flush();
+    expect(sentEvents(1)[0].visitor_id).toBe(P);
+  });
+
+  test('the minted id inside event_data ($identify) is stripped while pending, replaced after', async () => {
+    const { h } = hooks();
+    queue = new EventQueue({ workspaceId: 'ws', endpoint: 'https://t.shop.example', flushInterval: 100000 });
+    queue.setEdgeVisitor(h);
+    queue.enqueue({ ...event(1, P), event_name: '$identify', event_data: { anonymous_id: P, traits: { previous_id: P }, plan: 'pro' } } as unknown as IngestEventPayload);
+    await queue.flush();
+    const sent = sentEvents(0)[0];
+    expect(sent.event_data).toEqual({ traits: {}, plan: 'pro' });
+    queue.enqueue({ ...event(2, P), event_name: '$alias', event_data: { previousId: P } } as unknown as IngestEventPayload);
+    await queue.flush();
+    expect(sentEvents(1)[0].event_data).toEqual({ previousId: EDGE });
+  });
+
+  test('a beacon while the id is pending goes without it too', async () => {
+    const beacon = jest.fn(() => true);
+    (navigator as any).sendBeacon = beacon;
+    const { h } = hooks();
+    queue = new EventQueue({ workspaceId: 'ws', endpoint: 'https://t.shop.example', flushInterval: 100000 });
+    queue.setEdgeVisitor(h);
+    queue.enqueue(event(1, P));
+    await queue.forceFlush(true);
+    const blob = (beacon.mock.calls[0] as any[])[1] as Blob;
+    const text = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.readAsText(blob);
+    });
+    const body = JSON.parse(text);
+    expect(body.events[0]).not.toHaveProperty('visitor_id');
+    expect(body.events[0]).not.toHaveProperty('anonymous_id');
   });
 });

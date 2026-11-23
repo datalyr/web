@@ -506,4 +506,41 @@ describe('C19 (script side): adopt the edge visitor when nothing is stored (edge
     expect(collectBodies()[0].events[0].visitor_id).toBe(minted);
     expect(sdk.getVisitorId()).toBe(minted);
   });
+
+  test('an edge answer with no visitor_id: the local id is kept and sent', async () => {
+    const sdk = await boot({ endpoint: 'https://t.shop.example', edgeCookieV2: true });
+    const minted = sdk.getVisitorId();
+    sdk.track('signup_started');
+    await sdk.flush();
+    await settle();
+    expect(sdk.getVisitorId()).toBe(minted);
+    sdk.track('next_step');
+    await sdk.flush();
+    expect(collectBodies()[1].events[0].visitor_id).toBe(minted);
+  });
+
+  test('a browser that opted out before (the __dl_opt_out cookie): never adopts', async () => {
+    collectVisitor = EDGE;
+    document.cookie = '__dl_opt_out=false; path=/';
+    const sdk = await boot({ endpoint: 'https://t.shop.example', edgeCookieV2: true });
+    const minted = sdk.getVisitorId();
+    sdk.track('signup_started');
+    await sdk.flush();
+    await settle();
+    expect(collectBodies()[0].events[0].visitor_id).toBe(minted);
+    expect(sdk.getVisitorId()).toBe(minted);
+  });
+
+  test('optOut() then optIn() on this page: never adopts the edge id', async () => {
+    collectVisitor = EDGE;
+    const sdk = await boot({ endpoint: 'https://t.shop.example', edgeCookieV2: true });
+    sdk.optOut();
+    sdk.optIn();
+    const local = sdk.getVisitorId();
+    sdk.track('signup_started');
+    await sdk.flush();
+    await settle();
+    expect(collectBodies()[0].events[0].visitor_id).toBe(local);
+    expect(sdk.getVisitorId()).toBe(local);
+  });
 });
