@@ -1,8 +1,9 @@
 /**
  * FX-083: signed visitor token, script side.
  *
- * A short, signed, expiring token (`dv1` + 54 base64url characters) that only DATALYR's
- * servers can make. It names this visit (device) for one workspace for 2 hours, so a
+ * A short, signed, expiring token that only DATALYR's servers can make. It is opaque to
+ * the browser (the visitor id inside is encrypted): the script only checks it is a short
+ * URL-safe string. It names this visit (device) for one workspace for 2 hours, so a
  * checkout or booking can find the visit that brought it without the raw visitor id
  * travelling in a link. The browser only asks for it and puts it on links; it never
  * reads one from a URL (an inbound `dl_vt` is never adopted as an identity).
@@ -17,19 +18,23 @@ export type VisitorTokenProvider = keyof Omit<VisitorTokenSettings, 'rawIdFallba
 
 /** sessionStorage key for the cached token, and the URL parameter iClosed / CheckoutChamp read. */
 export const VISITOR_TOKEN_KEY = 'dl_vt';
+// sessionStorage flag: the mint route is not there (switch off, old ingest); stop asking.
+const MINT_OFF_KEY = 'dl_vt_off';
 /** While a decoratable link is on the page the token is renewed this often. */
 export const VISITOR_TOKEN_REFRESH_MS = 15 * 60 * 1000;
 /** Token life (owner answer 2): 2 hours, checked server-side at the provider's start time. */
 export const VISITOR_TOKEN_LIFE_MS = 2 * 60 * 60 * 1000;
 // A token this close to its expiry is not handed out any more.
 const EXPIRY_MARGIN_MS = 60 * 1000;
-// After a failed request, wait this long before asking again (a broken route must not
-// turn the observer or the click handler into a request loop).
+// After a transient failure (network, 429, 5xx), wait this long before asking again.
 const RETRY_AFTER_FAILURE_MS = 60 * 1000;
+// Tokens are minted by ingest; the customer's own-domain edge has no route for it.
+export const DEFAULT_INGEST_ENDPOINT = 'https://ingest.datalyr.com';
 
-export const VISITOR_TOKEN_RE = /^dv1[A-Za-z0-9_-]{54}$/;
-// Tokens are only minted for ids the script made itself.
-const MINTABLE_VISITOR_ID_RE = /^anon_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The token is opaque: a short URL-safe string (Stripe's client_reference_id set). */
+export const VISITOR_TOKEN_RE = /^[A-Za-z0-9_-]{16,64}$/;
+// Tokens are only minted for ids the script made itself (ingest: anon_<lowercase uuid>).
+const MINTABLE_VISITOR_ID_RE = /^anon_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export function tokenEnabled(settings: unknown, provider: VisitorTokenProvider): boolean {
   return !!settings && typeof settings === 'object' && (settings as Record<string, unknown>)[provider] === true;
@@ -57,6 +62,11 @@ export function endpointUrl(endpoint: string, path: string): string {
   return endpoint.replace(/\/+$/, '') + path;
 }
 
+/** The ingest base the token is minted against: never the own-domain edge. */
+export function mintBase(endpoint: string | undefined): string {
+  return endpoint && !isFirstPartyEndpoint(endpoint) ? endpoint : DEFAULT_INGEST_ENDPOINT;
+}
+
 interface CachedToken {
   t: string; // token
   v: string; // visitor id it names
@@ -65,6 +75,7 @@ interface CachedToken {
 }
 
 export interface VisitorTokenClientOptions {
+  /** The configured event endpoint; minting always goes to ingest (mintBase). */
   endpoint: string;
   workspaceId: string;
   getVisitorId: () => string | null | undefined;
@@ -80,13 +91,22 @@ function session(): Storage | undefined {
   }
 }
 
+type MintResult = CachedToken | 'retry' | 'stop';
+
 export class VisitorTokenClient {
   private cached: CachedToken | null = null;
   private inflight: Promise<string | null> | null = null;
   private generation = 0;
   private lastFailureAt = 0;
+  private mintOff = false;
 
-  constructor(private opts: VisitorTokenClientOptions) {}
+  constructor(private opts: VisitorTokenClientOptions) {
+    try {
+      this.mintOff = session()?.getItem(MINT_OFF_KEY) === '1';
+    } catch {
+      // blocked storage
+    }
+  }
 
   /** A token for the current visitor that has not expired, or null. Never calls the network. */
   peek(): string | null {
@@ -103,8 +123,9 @@ export class VisitorTokenClient {
 
   /**
    * The current visitor's token: the cached one while it is younger than 15 minutes,
-   * otherwise a new one from `POST <endpoint>/v1/visitor-token`. Null when tracking or
-   * marketing consent is off, for a visitor id the script did not make, or on failure.
+   * otherwise a new one from ingest's `POST /v1/visitor-token`. Null when tracking or
+   * marketing consent is off, for a visitor id the script did not make, on failure, or
+   * for the rest of the tab session once ingest showed it has no mint route.
    */
   get(): Promise<string | null> {
     if (!this.opts.allowed()) return Promise.resolve(null);
@@ -113,13 +134,16 @@ export class VisitorTokenClient {
     const cached = this.read();
     if (cached && Date.now() - cached.i < VISITOR_TOKEN_REFRESH_MS) return Promise.resolve(cached.t);
     if (this.inflight) return this.inflight;
-    if (Date.now() - this.lastFailureAt < RETRY_AFTER_FAILURE_MS) return Promise.resolve(cached ? cached.t : null);
+    if (this.mintOff || Date.now() - this.lastFailureAt < RETRY_AFTER_FAILURE_MS) {
+      return Promise.resolve(cached ? cached.t : null);
+    }
     const generation = this.generation;
     const request = this.mint(visitorId).then((result) => {
+      if (result === 'stop') this.stopMinting();
       // reset(), opt-out or a withdrawal while the request was out: drop the answer.
       if (generation !== this.generation || !this.opts.allowed() || this.opts.getVisitorId() !== visitorId) return null;
-      if (!result) {
-        this.lastFailureAt = Date.now();
+      if (result === 'stop' || result === 'retry') {
+        if (result === 'retry') this.lastFailureAt = Date.now();
         const stillValid = this.read();
         return stillValid ? stillValid.t : null;
       }
@@ -147,27 +171,46 @@ export class VisitorTokenClient {
     }
   }
 
-  private async mint(visitorId: string): Promise<CachedToken | null> {
+  private stopMinting(): void {
+    this.mintOff = true;
     try {
-      if (typeof fetch !== 'function') return null;
-      const endpoint = this.opts.endpoint;
-      const response = await fetch(endpointUrl(endpoint, '/v1/visitor-token'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-DL-Consent': 'granted' },
-        body: JSON.stringify({ workspace_id: this.opts.workspaceId, visitor_id: visitorId }),
-        credentials: isFirstPartyEndpoint(endpoint) ? 'include' : 'omit',
-      });
-      if (!response || !response.ok) return null;
-      const body: any = await response.json().catch(() => null);
-      const token = body && typeof body.token === 'string' ? body.token : null;
-      if (!token || !VISITOR_TOKEN_RE.test(token)) return null;
-      const now = Date.now();
-      const expiresIn = Number(body.expires_in) * 1000;
-      const life = Number.isFinite(expiresIn) && expiresIn > 0 ? Math.min(expiresIn, VISITOR_TOKEN_LIFE_MS) : VISITOR_TOKEN_LIFE_MS;
-      return { t: token, v: visitorId, i: now, e: now + life - EXPIRY_MARGIN_MS };
+      session()?.setItem(MINT_OFF_KEY, '1');
     } catch {
-      return null;
+      // the memory flag still holds for this page
     }
+  }
+
+  private async mint(visitorId: string): Promise<MintResult> {
+    let response: Response;
+    try {
+      if (typeof fetch !== 'function') return 'stop';
+      // Consent goes in the body: ingest's preflight does not allow X-DL-Consent here.
+      response = await fetch(endpointUrl(mintBase(this.opts.endpoint), '/v1/visitor-token'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace_id: this.opts.workspaceId, visitor_id: visitorId, consent: 'granted' }),
+        credentials: 'omit',
+      });
+    } catch {
+      return 'retry'; // network
+    }
+    if (!response) return 'retry';
+    if (response.status === 429 || response.status >= 500) return 'retry';
+    if (!response.ok || response.status === 204) return 'stop'; // no route, refused, no key
+    let body: any = null;
+    try {
+      body = await response.json();
+    } catch {
+      return 'stop'; // not JSON: not the mint route
+    }
+    const token = body && typeof body.token === 'string' ? body.token : null;
+    if (!token || !VISITOR_TOKEN_RE.test(token)) return 'stop';
+    const now = Date.now();
+    const expiresAt = typeof body.expiresAt === 'string' ? Date.parse(body.expiresAt) : NaN;
+    const life = Number.isFinite(expiresAt) && expiresAt > now
+      ? Math.min(expiresAt - now, VISITOR_TOKEN_LIFE_MS)
+      : VISITOR_TOKEN_LIFE_MS;
+    return { t: token, v: visitorId, i: now, e: now + life - EXPIRY_MARGIN_MS };
   }
 
   private read(): CachedToken | null {
@@ -228,10 +271,11 @@ export interface TokenLinkRule {
 }
 
 interface StampRecord {
-  attr: string;
   param: string | null; // null for an embed attribute (the attribute IS the token)
   original: string | null;
-  value: string;
+  value: string; // the whole attribute value we wrote
+  token: string; // the token inside it
+  iframe: boolean;
 }
 
 // Element kinds whose URL attribute can carry the token. `refresh: false` for iframes:
@@ -255,29 +299,87 @@ export interface TokenLinkDecoratorOptions {
  * Puts the token on checkout and booking links:
  *  - only in fields that are empty (a value the site set is never replaced);
  *  - re-stamped on click, renewed every 15 minutes while such a link is on the page;
- *  - each element's original attribute is kept, so `stop(true)` puts every stamped link
- *    back exactly as it was (opt-out, consent withdrawal).
+ *  - each element's original attribute is kept (per attribute), so `stop(true)` puts
+ *    every stamped link back exactly as it was (opt-out, consent withdrawal);
+ *  - paused on `pagehide` and resumed when the page comes back from the back-forward cache.
  * No request is made on a page without a decoratable link.
  */
 export class TokenLinkDecorator {
-  private stamped = new Map<Element, StampRecord>();
+  private stamped = new Map<Element, Map<string, StampRecord>>();
   private observer?: MutationObserver;
   private restampTimer: ReturnType<typeof setTimeout> | null = null;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   private pending: Promise<unknown> | null = null;
   private stopped = false;
+  private paused = false;
   private readonly onClick = (e: Event): void => this.handleClick(e);
-  private readonly onPageHide = (): void => this.stop(false);
+  private readonly onPageHide = (): void => this.pause();
+  private readonly onPageShow = (e: Event): void => {
+    if ((e as PageTransitionEvent).persisted) this.resume();
+  };
 
   constructor(private opts: TokenLinkDecoratorOptions) {}
 
   start(): void {
     if (typeof document === 'undefined') return;
+    this.arm();
+    try {
+      window.addEventListener('pagehide', this.onPageHide);
+      window.addEventListener('pageshow', this.onPageShow);
+    } catch {
+      // best-effort
+    }
+  }
+
+  /** Renew the token now if a decoratable link is on the page, then re-stamp. */
+  refresh(): void {
+    if (this.stopped || this.paused || !this.opts.canDecorate() || !this.hasCandidate()) return;
+    this.fetchThenStamp();
+  }
+
+  /**
+   * The visitor changed (reset(), an adopted edge id): put links back, then stamp the
+   * new visitor's token once it is ready. Iframes are left alone (rewriting src reloads
+   * the booking widget); they keep the earlier stamp.
+   */
+  reissue(): void {
+    if (this.stopped) return;
+    this.restoreAll(false);
+    this.stampAll();
+  }
+
+  /** Stop decorating; with `strip`, put every link stamped on this page back as it was. */
+  stop(strip: boolean): void {
+    this.stopped = true;
+    this.disarm();
+    try {
+      window.removeEventListener('pagehide', this.onPageHide);
+      window.removeEventListener('pageshow', this.onPageShow);
+    } catch {
+      // best-effort
+    }
+    if (strip) this.restoreAll(true);
+  }
+
+  /** Stamp every decoratable element; asks for a token when one is needed and missing. */
+  stampAll(): void {
+    if (this.stopped || this.paused || typeof document === 'undefined' || !this.opts.canDecorate()) return;
+    const token = this.opts.client.peek();
+    let found = false as boolean;
+    this.forEachCandidate((el, attr, rule, refresh, whole) => {
+      found = true;
+      if (token) this.stamp(el, attr, rule, token, refresh, whole);
+    });
+    if (found && (!token || !this.opts.client.isFresh())) this.fetchThenStamp();
+  }
+
+  private arm(): void {
+    this.paused = false;
     this.stampAll();
     document.addEventListener('click', this.onClick, true);
     try {
       this.observer = new MutationObserver(() => {
-        if (this.restampTimer != null || this.stopped) return;
+        if (this.restampTimer != null || this.stopped || this.paused) return;
         this.restampTimer = setTimeout(() => {
           this.restampTimer = null;
           this.stampAll();
@@ -288,51 +390,25 @@ export class TokenLinkDecorator {
       // no MutationObserver: the click-time stamp still covers links rendered later
     }
     this.refreshTimer = setInterval(() => this.refresh(), VISITOR_TOKEN_REFRESH_MS);
-    try {
-      window.addEventListener('pagehide', this.onPageHide, { once: true });
-    } catch {
-      // best-effort
-    }
   }
 
-  /** Renew the token now if a decoratable link is on the page, then re-stamp. */
-  refresh(): void {
-    if (this.stopped || !this.opts.canDecorate() || !this.hasCandidate()) return;
-    this.fetchThenStamp();
-  }
-
-  /**
-   * The visitor changed (reset()): put every link back, then stamp the new visitor's
-   * token once it is ready.
-   */
-  reissue(): void {
-    if (this.stopped) return;
-    this.restoreAll();
-    this.stampAll();
-  }
-
-  /** Stop decorating; with `strip`, put every link stamped on this page back as it was. */
-  stop(strip: boolean): void {
-    this.stopped = true;
+  private disarm(): void {
     try { this.observer?.disconnect(); } catch { /* idempotent */ }
     this.observer = undefined;
     if (this.restampTimer != null) { clearTimeout(this.restampTimer); this.restampTimer = null; }
     if (this.refreshTimer != null) { clearInterval(this.refreshTimer); this.refreshTimer = null; }
     if (typeof document !== 'undefined') document.removeEventListener('click', this.onClick, true);
-    try { window.removeEventListener('pagehide', this.onPageHide); } catch { /* best-effort */ }
-    if (strip) this.restoreAll();
   }
 
-  /** Stamp every decoratable element; asks for a token when one is needed and missing. */
-  stampAll(): void {
-    if (this.stopped || typeof document === 'undefined' || !this.opts.canDecorate()) return;
-    const token = this.opts.client.peek();
-    let found = false as boolean;
-    this.forEachCandidate((el, attr, rule, refresh, whole) => {
-      found = true;
-      if (token) this.stamp(el, attr, rule, token, refresh, whole);
-    });
-    if (found && (!token || !this.opts.client.isFresh())) this.fetchThenStamp();
+  private pause(): void {
+    if (this.stopped || this.paused) return;
+    this.paused = true;
+    this.disarm();
+  }
+
+  private resume(): void {
+    if (this.stopped || !this.paused) return;
+    this.arm(); // the token may have aged in the cache: stampAll renews it
   }
 
   private fetchThenStamp(): void {
@@ -382,17 +458,27 @@ export class TokenLinkDecorator {
     return null;
   }
 
+  private record(el: Element, attr: string, rec: StampRecord): void {
+    let byAttr = this.stamped.get(el);
+    if (!byAttr) {
+      byAttr = new Map();
+      this.stamped.set(el, byAttr);
+    }
+    byAttr.set(attr, rec);
+  }
+
   /** `whole`: an embed attribute that takes the whole token (not a URL parameter). */
   private stamp(el: Element, attr: string, rule: TokenLinkRule, token: string, refresh: boolean, whole: boolean): void {
     const current = el.getAttribute(attr);
-    const record = this.stamped.get(el);
-    const ours = !!record && record.attr === attr && record.value === current;
+    const record = this.stamped.get(el)?.get(attr);
+    const ours = !!record && record.value === current;
+    const iframe = el.tagName === 'IFRAME';
     if (whole) {
       const raw = !!current && !ours && !!rule.replaceable?.(current);
       if (current && !ours && !raw) return; // the site set it
       if (current === token || (ours && !refresh)) return;
       el.setAttribute(attr, token);
-      this.stamped.set(el, { attr, param: null, original: ours ? record!.original : raw ? null : current, value: token });
+      this.record(el, attr, { param: null, original: ours ? record!.original : raw ? null : current, value: token, token, iframe });
       return;
     }
     if (!current) return;
@@ -410,39 +496,43 @@ export class TokenLinkDecorator {
       url.searchParams.set(rule.param, token);
       const next = url.toString();
       el.setAttribute(attr, next);
-      this.stamped.set(el, { attr, param: rule.param, original, value: next });
+      this.record(el, attr, { param: rule.param, original, value: next, token, iframe });
     } catch {
       // malformed URL: leave it
     }
   }
 
-  private restoreAll(): void {
-    this.stamped.forEach((record, el) => {
-      try {
-        const current = el.getAttribute(record.attr);
-        if (current === record.value) {
-          if (record.original === null) el.removeAttribute(record.attr);
-          else el.setAttribute(record.attr, record.original);
-        } else if (current && record.param) {
-          // The site rewrote the link after we stamped it: take only our token out.
-          const url = new URL(current, window.location.href);
-          const value = url.searchParams.get(record.param);
-          if (value && VISITOR_TOKEN_RE.test(value)) {
-            url.searchParams.delete(record.param);
-            el.setAttribute(record.attr, url.toString());
+  /** Put stamped attributes back; `includeIframes` false keeps iframe stamps (no reload). */
+  private restoreAll(includeIframes: boolean): void {
+    this.stamped.forEach((byAttr, el) => {
+      byAttr.forEach((record, attr) => {
+        if (record.iframe && !includeIframes) return;
+        byAttr.delete(attr);
+        try {
+          const current = el.getAttribute(attr);
+          if (current === record.value) {
+            if (record.original === null) el.removeAttribute(attr);
+            else el.setAttribute(attr, record.original);
+          } else if (current && record.param) {
+            // The site rewrote the link after we stamped it: take only our token out.
+            const url = new URL(current, window.location.href);
+            if (url.searchParams.get(record.param) === record.token) {
+              url.searchParams.delete(record.param);
+              el.setAttribute(attr, url.toString());
+            }
+          } else if (current && !record.param && current === record.token) {
+            el.removeAttribute(attr);
           }
-        } else if (current && !record.param && VISITOR_TOKEN_RE.test(current)) {
-          el.removeAttribute(record.attr);
+        } catch {
+          // best-effort
         }
-      } catch {
-        // best-effort
-      }
+      });
+      if (byAttr.size === 0) this.stamped.delete(el);
     });
-    this.stamped.clear();
   }
 
   private handleClick(e: Event): void {
-    if (this.stopped) return;
+    if (this.stopped || this.paused) return;
     const anchor = (e.target as Element | null)?.closest?.('a[href]');
     if (!anchor) return;
     const rule = this.ruleFor(anchor.getAttribute('href'));

@@ -1387,8 +1387,8 @@ class Datalyr {
   }
 
   /**
-   * FX-083: the signed visitor token for this visit: a short, expiring value only
-   * DATALYR can make (57 characters, `[A-Za-z0-9_-]`). Pass it where you pass the
+   * FX-083: the signed visitor token for this visit: a short, expiring, opaque value
+   * only DATALYR can make (`[A-Za-z0-9_-]`, at most 64 characters). Pass it where you pass the
    * visitor id today (Stripe `client_reference_id` or `metadata.dl_vt`, Whop
    * checkout metadata `dl_vt`); it cannot merge two people if a link is shared.
    *

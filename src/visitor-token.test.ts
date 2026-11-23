@@ -14,7 +14,8 @@ import {
 
 const VID = 'anon_0b815a3e-6f9d-4c2e-8a7b-1c3d5e7f9a0b';
 const VID2 = 'anon_1c926b4f-7a0e-4d3f-9b8c-2d4e6f8a0b1c';
-const tok = (c: string): string => 'dv1' + c.repeat(54);
+// Opaque tokens: the script only checks a short URL-safe string.
+const tok = (c: string): string => 'dv2' + c.repeat(40);
 const T1 = tok('A');
 const T2 = tok('B');
 const T3 = tok('C');
@@ -28,7 +29,7 @@ function mockFetch(): jest.Mock {
   fetchMock = jest.fn(async () => {
     const token = tokens.shift();
     return token
-      ? { ok: true, status: 200, json: async () => ({ token, expires_in: 7200 }) }
+      ? { ok: true, status: 200, json: async () => ({ token, expiresAt: new Date(Date.now() + 7200_000).toISOString() }) }
       : { ok: false, status: 500, json: async () => ({}) };
   });
   global.fetch = fetchMock as unknown as typeof fetch;
@@ -76,21 +77,66 @@ describe('settings', () => {
 });
 
 describe('VisitorTokenClient', () => {
-  it('asks POST <endpoint>/v1/visitor-token with the workspace and visitor, and X-DL-Consent', async () => {
+  it('asks ingest POST /v1/visitor-token with workspace, visitor and consent in the body (no consent header)', async () => {
     const c = client('https://ingest.datalyr.com/');
     await expect(c.get()).resolves.toBe(T1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://ingest.datalyr.com/v1/visitor-token');
     expect(init.method).toBe('POST');
-    expect(init.headers['X-DL-Consent']).toBe('granted');
-    expect(JSON.parse(init.body)).toEqual({ workspace_id: 'ws_1', visitor_id: VID });
+    expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
+    expect(JSON.parse(init.body)).toEqual({ workspace_id: 'ws_1', visitor_id: VID, consent: 'granted' });
     expect(init.credentials).toBe('omit');
   });
 
-  it('sends cookies only to a first-party (own domain) endpoint', async () => {
+  it('never mints through the own-domain edge: an own-domain endpoint mints at ingest', async () => {
     await client('https://t.shop.example').get();
-    expect(fetchMock.mock.calls[0][1].credentials).toBe('include');
+    expect(fetchMock.mock.calls[0][0]).toBe('https://ingest.datalyr.com/v1/visitor-token');
+    expect(fetchMock.mock.calls[0][1].credentials).toBe('omit');
+  });
+
+  it('a configured ingest endpoint is used as is', async () => {
+    await client('https://ingest-eu.datalyr.com').get();
+    expect(fetchMock.mock.calls[0][0]).toBe('https://ingest-eu.datalyr.com/v1/visitor-token');
+  });
+
+  it('reads expiresAt: a token stops being handed out at its expiry', async () => {
+    jest.useFakeTimers({ now: 1_800_000_000_000, doNotFake: ['queueMicrotask'] });
+    fetchMock.mockImplementationOnce(async () => ({
+      ok: true, status: 200, json: async () => ({ token: T1, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() }),
+    }));
+    const c = client();
+    await c.get();
+    jest.setSystemTime(Date.now() + 9 * 60_000 + 1);
+    expect(c.peek()).toBeNull(); // 10 minutes minus the 1-minute margin
+  });
+
+  it.each([
+    ['404 (no route)', { ok: false, status: 404, json: async () => ({}) }],
+    ['200 not JSON', { ok: true, status: 200, json: async () => { throw new Error('not json'); } }],
+    ['200 without a token (switch off answers like the batch route)', { ok: true, status: 200, json: async () => ({ success: true }) }],
+    ['204 (no key)', { ok: true, status: 204, json: async () => null }],
+  ])('%s: stops minting for the tab session', async (_label, answer) => {
+    jest.useFakeTimers({ now: 1_800_000_000_000, doNotFake: ['queueMicrotask'] });
+    fetchMock.mockImplementationOnce(async () => answer);
+    const c = client();
+    await expect(c.get()).resolves.toBeNull();
+    jest.setSystemTime(Date.now() + 10 * 60_000);
+    await expect(c.get()).resolves.toBeNull();
+    await expect(client().get()).resolves.toBeNull(); // a new page in the same tab
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a 5xx is retried after a minute, not before', async () => {
+    jest.useFakeTimers({ now: 1_800_000_000_000, doNotFake: ['queueMicrotask'] });
+    tokens = [];
+    const c = client();
+    await expect(c.get()).resolves.toBeNull();
+    await expect(c.get()).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    tokens = [T1];
+    jest.setSystemTime(Date.now() + 61_000);
+    await expect(c.get()).resolves.toBe(T1);
   });
 
   it('caches in memory and sessionStorage dl_vt; a second get makes no request', async () => {
@@ -161,12 +207,12 @@ describe('VisitorTokenClient', () => {
     expect(c.peek()).toBeNull();
   });
 
-  it('refuses a malformed token and does not retry for a minute after a failure', async () => {
-    tokens = ['not-a-token' as string, T1];
-    const c = client();
-    await expect(c.get()).resolves.toBeNull();
-    await expect(c.get()).resolves.toBeNull();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+  it('refuses a malformed token (too short, or characters outside [A-Za-z0-9_-])', async () => {
+    for (const bad of ['short', 'has space in it 1234567', 'x'.repeat(65)]) {
+      sessionStorage.clear();
+      tokens = [bad];
+      await expect(client().get()).resolves.toBeNull();
+    }
   });
 
   it('never adopts a dl_vt from the page URL', async () => {
@@ -376,5 +422,53 @@ describe('TokenLinkDecorator', () => {
     await settle();
     expect(new URL(a.getAttribute('href') as string).searchParams.get('client_reference_id')).toBe(T2);
     expect(JSON.parse(fetchMock.mock.calls[1][1].body).visitor_id).toBe(VID2);
+  });
+
+  it('one element with both href and data-url: both stamped, both restored', async () => {
+    const el = add('<a href="https://calendly.com/team/intro" data-url="https://calendly.com/team/demo">book</a>');
+    start();
+    await settle();
+    expect(new URL(el.getAttribute('href') as string).searchParams.get('salesforce_uuid')).toBe(T1);
+    expect(new URL(el.getAttribute('data-url') as string).searchParams.get('salesforce_uuid')).toBe(T1);
+    decorator!.stop(true);
+    expect(el.getAttribute('href')).toBe('https://calendly.com/team/intro');
+    expect(el.getAttribute('data-url')).toBe('https://calendly.com/team/demo');
+  });
+
+  it('reissue() leaves iframes alone (no second widget reload); links get the new token', async () => {
+    const c = client();
+    const a = add('<a href="https://calendly.com/team/intro">book</a>');
+    const frame = add('<iframe src="https://app.iclosed.io/e/team/call"></iframe>');
+    start(c);
+    await settle();
+    const frameSrc = frame.getAttribute('src');
+    visitorId = VID2;
+    c.clear();
+    decorator!.reissue();
+    await settle();
+    expect(frame.getAttribute('src')).toBe(frameSrc);
+    expect(new URL(a.getAttribute('href') as string).searchParams.get('salesforce_uuid')).toBe(T2);
+    // An opt-out still takes the token off the iframe.
+    decorator!.stop(true);
+    expect(frame.getAttribute('src')).toBe('https://app.iclosed.io/e/team/call');
+  });
+
+  it('back-forward cache: paused on pagehide, re-armed on pageshow (persisted)', async () => {
+    add('<a href="https://buy.stripe.com/test_1">pay</a>');
+    start();
+    await settle();
+    window.dispatchEvent(new Event('pagehide'));
+    const whileHidden = add('<a href="https://buy.stripe.com/test_2">pay</a>');
+    await new Promise((r) => setTimeout(r, 200));
+    expect(whileHidden.getAttribute('href')).toBe('https://buy.stripe.com/test_2');
+    const show = new Event('pageshow') as PageTransitionEvent;
+    Object.defineProperty(show, 'persisted', { value: true });
+    window.dispatchEvent(show);
+    await settle();
+    expect(new URL(whileHidden.getAttribute('href') as string).searchParams.get('client_reference_id')).toBe(T1);
+    // And it keeps observing after the restore.
+    const later = add('<a href="https://buy.stripe.com/test_3">pay</a>');
+    await new Promise((r) => setTimeout(r, 200));
+    expect(new URL(later.getAttribute('href') as string).searchParams.get('client_reference_id')).toBe(T1);
   });
 });

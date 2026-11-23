@@ -6,7 +6,7 @@ export {}; // module scope: index.test.ts declares helper names globally
 
 type SdkModule = typeof import('./index');
 
-const tok = (c: string): string => 'dv1' + c.repeat(54);
+const tok = (c: string): string => 'dv2' + c.repeat(40); // opaque to the script
 const T1 = tok('A');
 const T2 = tok('B');
 
@@ -29,7 +29,7 @@ function mockNetwork(): jest.Mock {
     if (target.includes('/v1/visitor-token')) {
       const token = tokens.shift();
       return token
-        ? { ok: true, status: 200, json: async () => ({ token, expires_in: 7200 }) }
+        ? { ok: true, status: 200, json: async () => ({ token, expiresAt: new Date(Date.now() + 7200_000).toISOString() }) }
         : { ok: false, status: 500, json: async () => ({}) };
     }
     if (collectVisitor && target.startsWith('https://t.shop.example') && new URL(target).pathname === '/') {
@@ -140,8 +140,14 @@ describe('getVisitorToken() with a provider switched on', () => {
     expect(tokenCalls()).toHaveLength(1);
     const [url, init] = tokenCalls()[0];
     expect(url).toBe('https://ingest.datalyr.com/v1/visitor-token');
-    expect(JSON.parse(init.body)).toEqual({ workspace_id: 'ws-token', visitor_id: sdk.getVisitorId() });
-    expect(init.headers['X-DL-Consent']).toBe('granted');
+    expect(JSON.parse(init.body)).toEqual({ workspace_id: 'ws-token', visitor_id: sdk.getVisitorId(), consent: 'granted' });
+    expect(init.headers['X-DL-Consent']).toBeUndefined();
+  });
+
+  test('own-domain endpoint: the token is still minted at ingest, never through the edge', async () => {
+    const sdk = await boot({ visitorToken: { stripe: true }, endpoint: 'https://t.shop.example' });
+    await expect(sdk.getVisitorToken()).resolves.toBe(T1);
+    expect(tokenCalls()[0][0]).toBe('https://ingest.datalyr.com/v1/visitor-token');
   });
 
   test('no request on a page without a decoratable link until a getter asks', async () => {
