@@ -114,6 +114,7 @@ class Datalyr {
   private visitorTokenClient?: VisitorTokenClient;     // FX-083: created on first use, only with a provider switched on
   private tokenDecorator?: TokenLinkDecorator;         // FX-083: puts the token on checkout / booking links
   private edgeCookieCleared = false;                   // FX-083 C19: POST /v/clear at most once per withdrawal
+  private previousVisitorIds = new Set<string>();      // FX-083 C15: ids this page had before reset()
   private inAppHandoffTimer: ReturnType<typeof setInterval> | null = null;
   private inAppHandoffWrite: (() => void) | null = null;
   private inAppHandoffReported = false;
@@ -589,7 +590,7 @@ class Datalyr {
         embedSelector: 'stripe-pricing-table, stripe-buy-button',
         embedAttribute: 'client-reference-id',
         // A raw id stamped before the setting arrived (late dashboard config) is ours to replace.
-        replaceable: (value) => value === this.identity?.getAnonymousId(),
+        replaceable: (value) => this.isOwnRawVisitorId(value),
       });
     }
     // C15: Calendly links and embed URLs carry it in salesforce_uuid (Calendly passes
@@ -599,6 +600,8 @@ class Datalyr {
         provider: 'calendly',
         param: 'salesforce_uuid',
         matchHost: (host) => host === 'calendly.com' || host.endsWith('.calendly.com'),
+        // Today's setup has customers put the raw visitor id here: replace that, nothing else.
+        replaceable: (value) => this.isOwnRawVisitorId(value),
       });
     }
     if (tokenEnabled(settings, 'iclosed')) {
@@ -606,6 +609,7 @@ class Datalyr {
         provider: 'iclosed',
         param: VISITOR_TOKEN_KEY,
         matchHost: (host) => host === 'iclosed.io' || host.endsWith('.iclosed.io'),
+        replaceable: (value) => this.isOwnRawVisitorId(value),
       });
     }
     // C16: the CheckoutChamp bridge, signed: dl_vt on outbound links to the listed
@@ -1260,6 +1264,8 @@ class Datalyr {
       console.warn('[Datalyr] SDK not initialized. Call init() first.');
       return;
     }
+    const previousVisitorId = this.identity.getAnonymousId();
+    if (previousVisitorId) this.previousVisitorIds.add(previousVisitorId);
     this.identity.reset();
     // FX-083: the cached token names the previous visitor; the next one names the new id.
     this.visitorTokenClient?.clear();
@@ -1460,6 +1466,18 @@ class Datalyr {
    * survives a browser that wiped the script's storage), only while the id minted on
    * this page with nothing stored is still pending. Everything keyed on the id follows.
    */
+  /**
+   * FX-083: a value in a link field that is this browser's own raw visitor id (current, or
+   * one it had earlier on this page: before reset(), or before an adopted edge id). Only
+   * such a value may be replaced by the token; anything else the site set is kept.
+   */
+  private isOwnRawVisitorId(value: string): boolean {
+    if (!value || !this.identity) return false;
+    return value === this.identity.getAnonymousId()
+      || value === this.identity.getReplacedVisitor()?.from
+      || this.previousVisitorIds.has(value);
+  }
+
   /** C19: the page's minted id is waiting for the edge's answer (same test as the queue's). */
   private edgeVisitorPending(): boolean {
     const endpoint = this.config?.endpoint;

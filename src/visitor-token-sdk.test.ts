@@ -300,6 +300,40 @@ describe('C15: Calendly and iClosed links and embeds', () => {
   });
 });
 
+describe('C15 (fix): a raw visitor id the site put in the field is replaced', () => {
+  test("Calendly salesforce_uuid / iClosed dl_vt holding this browser's raw id get the token; other values are kept", async () => {
+    // Boot once to learn this browser's id (stored), then load the page that carries it.
+    let sdk = await boot();
+    const vid = sdk.getVisitorId();
+    sdk.destroy();
+    instance = undefined;
+    const cal = addLink(`https://calendly.com/team/intro?salesforce_uuid=${vid}`);
+    const ic = addLink(`https://app.iclosed.io/e/team/call?dl_vt=${vid}`);
+    const calOther = addLink('https://calendly.com/team/x?salesforce_uuid=crm-0001');
+    const icOther = addLink('https://app.iclosed.io/e/team/y?dl_vt=anon_99999999-9999-4999-8999-999999999999');
+    sdk = await boot({ visitorToken: { calendly: true, iclosed: true } });
+    expect(sdk.getVisitorId()).toBe(vid);
+    await settle();
+    expect(new URL(cal.href).searchParams.get('salesforce_uuid')).toBe(T1);
+    expect(new URL(ic.href).searchParams.get('dl_vt')).toBe(T1);
+    expect(new URL(calOther.href).searchParams.get('salesforce_uuid')).toBe('crm-0001');
+    expect(new URL(icOther.href).searchParams.get('dl_vt')).toBe('anon_99999999-9999-4999-8999-999999999999');
+  });
+
+  test("the previous raw id (before reset()) is replaced too", async () => {
+    const sdk = await boot({ visitorToken: { calendly: true } });
+    const before = sdk.getVisitorId();
+    sdk.reset();
+    const cal = addLink(`https://calendly.com/team/intro?salesforce_uuid=${before}`);
+    await settle();
+    await new Promise((r) => setTimeout(r, 200));
+    await settle();
+    const value = new URL(cal.href).searchParams.get('salesforce_uuid');
+    expect(value).not.toBe(before);
+    expect(value).toMatch(/^[A-Za-z0-9_-]{16,64}$/);
+  });
+});
+
 describe('C16: CheckoutChamp outbound links carry dl_vt', () => {
   test('off: links to the funnel are untouched (the raw bridge stays off)', async () => {
     const a = addLink('https://checkout.brand.example/step1');
