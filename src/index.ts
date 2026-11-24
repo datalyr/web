@@ -264,6 +264,8 @@ class Datalyr {
     this.session.onSessionChange((sessionId) => {
       this.replay?.sessionChanged(sessionId);
       if (this.initialized) this.syncReplay();
+      // FX-126 verify N3: a signed Klaviyo token never crosses into a new session.
+      this.attribution?.bindKlaviyoSessionToken(sessionId);
     });
     this.attribution = new AttributionManager({
       attributionWindow: this.config.attributionWindow,
@@ -382,6 +384,7 @@ class Datalyr {
           await this.identity.hydrateEncryptedUserId();
           await this.adoptLegacyAutoIdentified();
           await this.attribution.hydrateKlaviyoProfileBinding();
+          this.attribution.bindKlaviyoSessionToken(this.session.getSessionId());
           this.log('Encryption initialized, user properties loaded');
         } catch (encErr) {
           console.warn('[Datalyr] Encryption unavailable (non-secure context?); continuing WITHOUT PII-at-rest encryption:', encErr);
@@ -427,6 +430,7 @@ class Datalyr {
         // container is disabled or the worker didn't send `config`. This is what
         // makes the dashboard toggles take effect with no snippet edits.
         applyRemoteConfig(this.config, this.container?.getRemoteConfig(), this.explicitConfigKeys);
+        this.syncKlaviyoSessionToken(this.container?.getRemoteConfig());
 
         // Privacy-strict turns auto-identify (email capture) OFF regardless of
         // the dashboard/remote value — privacy wins over the bridge.
@@ -657,6 +661,7 @@ class Datalyr {
       onRemoteConfig: (remote) => {
         applyRemoteConfig(this.config, remote, this.explicitConfigKeys);
         if (this.config.privacyMode === 'strict') this.config.autoIdentify = false;
+        this.syncKlaviyoSessionToken(remote ?? undefined);
         // A container started late (Shopify consent) delivers replay only here.
         if (this.initialized) this.syncReplay(remote ?? undefined);
         // ... and the dashboard's auto-identify (init decided before it arrived).
@@ -1167,6 +1172,7 @@ class Datalyr {
       return;
     }
     this.identity.reset();
+    this.attribution.resetKlaviyoSessionToken(); // FX-126 verify N3
     this.syncInAppHandoff(); // the URL must not keep the pre-reset visitor id
     // Replay: drop what was recorded for the previous user now; the new recording (new
     // page load id, new visitor id, new session id) starts below, after the session
@@ -1285,6 +1291,13 @@ class Datalyr {
   /**
    * Get the current session ID
    */
+  /** FX-126: the dashboard's klaviyoSessionToken switch (remote only; init() cannot set it).
+   * No remote config yet: nothing changes. */
+  private syncKlaviyoSessionToken(remote?: SdkRemoteConfig): void {
+    if (!remote || typeof remote !== 'object' || !this.attribution) return;
+    this.attribution.setKlaviyoSessionTokenEnabled(remote.klaviyoSessionToken === true);
+  }
+
   getSessionId(): string {
     if (!this.session) return this.getterBeforeInit('getSessionId', '');
     return this.session.getSessionId();
@@ -2214,6 +2227,21 @@ class Datalyr {
           ? existingExternalIds
           : {}),
         klaviyo: klaviyoProfileId,
+      };
+    }
+    // FX-126 (remote switch klaviyoSessionToken, off by default): a signed link
+    // token kept for this session rides on each later view_item / add_to_cart /
+    // checkout_started; ingest verifies it on every event. Off: null, nothing added.
+    const klaviyoSessionToken = klaviyoProfileId || INTERNAL_SIGNAL_EVENTS.has(eventName)
+      ? null
+      : this.attribution.klaviyoSessionTokenFor(eventName, this.session.getSessionId());
+    if (klaviyoSessionToken) {
+      const existingExternalIds = eventData.external_ids;
+      eventData.external_ids = {
+        ...(existingExternalIds && typeof existingExternalIds === 'object' && !Array.isArray(existingExternalIds)
+          ? existingExternalIds
+          : {}),
+        klaviyo: klaviyoSessionToken,
       };
     }
 
