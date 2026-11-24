@@ -42,6 +42,9 @@ export interface SdkRemoteConfig {
   // replay: init() `heatmaps: false` disables, nothing at init enables. Heat mode uses
   // the replay module (dl.replay.<v>.js) and replay.v as its version.
   heatmaps?: HeatmapsRemoteConfig;
+  // FX-126 (remote only, never folded into DatalyrConfig, so init() cannot turn it
+  // on): keep a DATALYR-signed Klaviyo link token for the session. Off by default.
+  klaviyoSessionToken?: boolean;
 }
 
 /** Keys the remote config is allowed to fill on DatalyrConfig. */

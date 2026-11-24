@@ -19,6 +19,15 @@ export class AttributionManager {
   // with the params cache on SPA navigation). Applied only while marketing is allowed.
   private referrerTwclid: string | null = null;
   private static readonly KLAVIYO_BINDING_TTL_MS = 10 * 60 * 1000;
+  // FX-126 (remote switch `klaviyoSessionToken`, off by default): a DATALYR-signed
+  // link token kept for the browser session, never past a dlk2 token's expiry.
+  // Shape only; ingest verifies the signature on every event that carries it.
+  private static readonly KLAVIYO_SESSION_TOKEN_KEY = 'dl_klaviyo_session_token';
+  private static readonly KLAVIYO_TOKEN_RE = /^(?:dlk1\.[A-Za-z0-9]{1,64}\.[A-Za-z0-9_-]{43}|dlk2\.[A-Za-z0-9]{1,64}\.(\d{1,12})\.[A-Za-z0-9_-]{43})$/;
+  static readonly KLAVIYO_SESSION_EVENTS: ReadonlySet<string> = new Set(['view_item', 'add_to_cart', 'checkout_started']);
+  private klaviyoSessionTokenEnabled = false;
+  private klaviyoSessionTokenGeneration = 0;
+  private klaviyoSessionToken: { token: string; expiresAt: number | null; sessionId: string | null } | null = null;
   private attributionWindow: number;
   private trackedParams: string[];
   private queryParamsCache: Record<string, string> | null = null;
@@ -140,7 +149,14 @@ export class AttributionManager {
     if (!Object.prototype.hasOwnProperty.call(params, 'dl_kprofile_id')) return;
     const profileId = this.validKlaviyoProfileId(params.dl_kprofile_id);
     delete params.dl_kprofile_id;
-    if (profileId && this.isMarketingAllowed()) this.pendingKlaviyoProfileId = profileId;
+    if (profileId && this.isMarketingAllowed()) {
+      this.pendingKlaviyoProfileId = profileId;
+      const kept = this.signedTokenShape(profileId);
+      if (kept) {
+        this.klaviyoSessionToken = kept;
+        this.persistKlaviyoSessionToken();
+      }
+    }
 
     try {
       const url = new URL(window.location.href);
@@ -159,6 +175,15 @@ export class AttributionManager {
    * a reload before the landing event is queued; it is not a profile cache. */
   async hydrateKlaviyoProfileBinding(): Promise<void> {
     const now = Date.now();
+    if (!this.klaviyoSessionToken) {
+      const kept = await storage.getEncrypted(AttributionManager.KLAVIYO_SESSION_TOKEN_KEY, null);
+      const shaped = typeof kept?.token === 'string' ? this.signedTokenShape(kept.token) : null;
+      if (shaped && this.isMarketingAllowed()) {
+        this.klaviyoSessionToken = { ...shaped, sessionId: typeof kept.sessionId === 'string' ? kept.sessionId : null };
+      } else if (kept) {
+        storage.remove(AttributionManager.KLAVIYO_SESSION_TOKEN_KEY);
+      }
+    }
     if (!this.pendingKlaviyoProfileId) {
       const stored = await storage.getEncrypted(AttributionManager.KLAVIYO_BINDING_KEY, null);
       const restored = this.validKlaviyoProfileId(stored?.profileId);
@@ -174,6 +199,54 @@ export class AttributionManager {
         expiresAt: now + AttributionManager.KLAVIYO_BINDING_TTL_MS,
       });
     }
+  }
+
+  /** A token of a signed shape (never a raw id), with a dlk2 token's own expiry. */
+  private signedTokenShape(value: string): { token: string; expiresAt: number | null; sessionId: null } | null {
+    const m = AttributionManager.KLAVIYO_TOKEN_RE.exec(value);
+    if (!m) return null;
+    const expiresAt = m[1] ? Number(m[1]) * 1000 : null;
+    if (expiresAt !== null && !(expiresAt > Date.now())) return null;
+    return { token: value, expiresAt, sessionId: null };
+  }
+
+  private persistKlaviyoSessionToken(): void {
+    if (!this.klaviyoSessionTokenEnabled || !this.klaviyoSessionToken) return;
+    const generation = this.klaviyoSessionTokenGeneration;
+    storage.setEncrypted(AttributionManager.KLAVIYO_SESSION_TOKEN_KEY, { ...this.klaviyoSessionToken })
+      // A drop that happened while the encrypted write was in flight wins.
+      .then(() => { if (generation !== this.klaviyoSessionTokenGeneration) storage.remove(AttributionManager.KLAVIYO_SESSION_TOKEN_KEY); })
+      .catch(() => { /* kept in memory only */ });
+  }
+
+  private dropKlaviyoSessionToken(): void {
+    this.klaviyoSessionTokenGeneration += 1;
+    this.klaviyoSessionToken = null;
+    storage.remove(AttributionManager.KLAVIYO_SESSION_TOKEN_KEY);
+  }
+
+  /** Remote switch `klaviyoSessionToken` (container config). Off clears what was kept. */
+  setKlaviyoSessionTokenEnabled(enabled: boolean): void {
+    this.klaviyoSessionTokenEnabled = enabled === true;
+    if (this.klaviyoSessionTokenEnabled) this.persistKlaviyoSessionToken();
+    else this.dropKlaviyoSessionToken();
+  }
+
+  /** The session's signed token for a later Klaviyo-relevant event, or null. */
+  klaviyoSessionTokenFor(eventName: string, sessionId: string, now = Date.now()): string | null {
+    if (!this.klaviyoSessionTokenEnabled || !AttributionManager.KLAVIYO_SESSION_EVENTS.has(eventName)) return null;
+    const kept = this.klaviyoSessionToken;
+    if (!kept) return null;
+    if (!this.isMarketingAllowed() || !sessionId || (kept.expiresAt !== null && !(kept.expiresAt > now))
+      || (kept.sessionId !== null && kept.sessionId !== sessionId)) {
+      this.dropKlaviyoSessionToken();
+      return null;
+    }
+    if (kept.sessionId === null) {
+      kept.sessionId = sessionId;
+      this.persistKlaviyoSessionToken();
+    }
+    return kept.token;
   }
 
   /** One-shot binding for the next queued event. */
