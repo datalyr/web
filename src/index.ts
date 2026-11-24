@@ -264,6 +264,8 @@ class Datalyr {
     this.session.onSessionChange((sessionId) => {
       this.replay?.sessionChanged(sessionId);
       if (this.initialized) this.syncReplay();
+      // FX-126 verify N3: a signed Klaviyo token never crosses into a new session.
+      this.attribution?.bindKlaviyoSessionToken(sessionId);
     });
     this.attribution = new AttributionManager({
       attributionWindow: this.config.attributionWindow,
@@ -382,6 +384,7 @@ class Datalyr {
           await this.identity.hydrateEncryptedUserId();
           await this.adoptLegacyAutoIdentified();
           await this.attribution.hydrateKlaviyoProfileBinding();
+          this.attribution.bindKlaviyoSessionToken(this.session.getSessionId());
           this.log('Encryption initialized, user properties loaded');
         } catch (encErr) {
           console.warn('[Datalyr] Encryption unavailable (non-secure context?); continuing WITHOUT PII-at-rest encryption:', encErr);
@@ -1169,6 +1172,7 @@ class Datalyr {
       return;
     }
     this.identity.reset();
+    this.attribution.resetKlaviyoSessionToken(); // FX-126 verify N3
     this.syncInAppHandoff(); // the URL must not keep the pre-reset visitor id
     // Replay: drop what was recorded for the previous user now; the new recording (new
     // page load id, new visitor id, new session id) starts below, after the session

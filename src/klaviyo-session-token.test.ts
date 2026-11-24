@@ -121,4 +121,27 @@ describe('Klaviyo session token (FX-126, remote switch klaviyoSessionToken)', ()
     await flush();
     expect(storage.keys().some((k) => k.includes('klaviyo_session_token'))).toBe(false);
   });
+
+  test('verify N3: a token never used in its session is not carried into a later session', async () => {
+    const first = await landed(`?dl_kprofile_id=${DLK1}`, { enabled: true });
+    first.bindKlaviyoSessionToken('s1'); // init binds it to the landing session
+    await flush();
+    const later = await landed('', { enabled: true });
+    later.bindKlaviyoSessionToken('s2'); // a later page load in a new session
+    expect(later.klaviyoSessionTokenFor('view_item', 's2')).toBeNull();
+    await flush();
+    expect(storage.keys().some((k) => k.includes('klaviyo_session_token'))).toBe(false);
+  });
+
+  test('verify N3: reset() drops the stored token', async () => {
+    const attr = await landed(`?dl_kprofile_id=${DLK1}`, { enabled: true });
+    attr.bindKlaviyoSessionToken('s1');
+    expect(attr.klaviyoSessionTokenFor('view_item', 's1')).toBe(DLK1);
+    attr.resetKlaviyoSessionToken();
+    expect(attr.klaviyoSessionTokenFor('view_item', 's1')).toBeNull();
+    await flush();
+    expect(storage.keys().some((k) => k.includes('klaviyo_session_token'))).toBe(false);
+    const next = await landed('', { enabled: true });
+    expect(next.klaviyoSessionTokenFor('view_item', 's1')).toBeNull();
+  });
 });

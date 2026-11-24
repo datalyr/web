@@ -28,6 +28,9 @@ export class AttributionManager {
   private klaviyoSessionTokenEnabled = false;
   private klaviyoSessionTokenGeneration = 0;
   private klaviyoSessionToken: { token: string; expiresAt: number | null; sessionId: string | null } | null = null;
+  // True only for a token captured from this page load's URL: a kept token that
+  // was never tied to a session must not be carried into a later one (verify N3).
+  private klaviyoTokenCapturedThisLoad = false;
   private attributionWindow: number;
   private trackedParams: string[];
   private queryParamsCache: Record<string, string> | null = null;
@@ -154,6 +157,7 @@ export class AttributionManager {
       const kept = this.signedTokenShape(profileId);
       if (kept) {
         this.klaviyoSessionToken = kept;
+        this.klaviyoTokenCapturedThisLoad = true;
         this.persistKlaviyoSessionToken();
       }
     }
@@ -222,7 +226,29 @@ export class AttributionManager {
   private dropKlaviyoSessionToken(): void {
     this.klaviyoSessionTokenGeneration += 1;
     this.klaviyoSessionToken = null;
+    this.klaviyoTokenCapturedThisLoad = false;
     storage.remove(AttributionManager.KLAVIYO_SESSION_TOKEN_KEY);
+  }
+
+  /** Ties the kept token to the current session (at startup and on every session
+   * change). A token captured on this page load takes this session; any other
+   * token belongs to its own session only, so a different session drops it. */
+  bindKlaviyoSessionToken(sessionId: string): void {
+    const kept = this.klaviyoSessionToken;
+    if (!kept) return;
+    if (!sessionId) { this.dropKlaviyoSessionToken(); return; }
+    if (kept.sessionId === null) {
+      if (!this.klaviyoTokenCapturedThisLoad) { this.dropKlaviyoSessionToken(); return; }
+      kept.sessionId = sessionId;
+      this.persistKlaviyoSessionToken();
+      return;
+    }
+    if (kept.sessionId !== sessionId) this.dropKlaviyoSessionToken();
+  }
+
+  /** reset(): the next user never inherits the previous user's signed token. */
+  resetKlaviyoSessionToken(): void {
+    this.dropKlaviyoSessionToken();
   }
 
   /** Remote switch `klaviyoSessionToken` (container config). Off clears what was kept. */
