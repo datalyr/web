@@ -9,7 +9,7 @@
  *
  * Precedence per key:  explicit init() value  >  remote config  >  built-in default
  */
-import type { DatalyrConfig, HeatmapsRemoteConfig, ReplayRemoteConfig } from './types';
+import type { DatalyrConfig, HeatmapsRemoteConfig, ReplayRemoteConfig, VisitorTokenSettings } from './types';
 
 /** Subset of DatalyrConfig the worker may deliver via the config envelope. */
 export interface SdkRemoteConfig {
@@ -42,6 +42,12 @@ export interface SdkRemoteConfig {
   // replay: init() `heatmaps: false` disables, nothing at init enables. Heat mode uses
   // the replay module (dl.replay.<v>.js) and replay.v as its version.
   heatmaps?: HeatmapsRemoteConfig;
+  // FX-083 (all off by default; see DatalyrConfig): signed visitor token per provider,
+  // the consent header, the edge cookie v2 clear call, and opt-out deleting the id.
+  visitorToken?: VisitorTokenSettings;
+  consentHeader?: boolean;
+  edgeCookieV2?: boolean;
+  optOutDeletesVisitorId?: boolean;
 }
 
 /** Keys the remote config is allowed to fill on DatalyrConfig. */
@@ -60,6 +66,10 @@ const REMOTE_KEYS: ReadonlyArray<keyof SdkRemoteConfig> = [
   'waitForShopifyConsent',
   'replay',
   'heatmaps',
+  'visitorToken',
+  'consentHeader',
+  'edgeCookieV2',
+  'optOutDeletesVisitorId',
 ];
 
 /**

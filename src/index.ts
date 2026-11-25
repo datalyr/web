@@ -19,6 +19,7 @@ import { shopifyCartId } from './shopify-cart';
 import { readShopifyProductView, readShopifySearch, shopifyPixelWillRun } from './shopify-product-view';
 import { ReplayLoader, REPLAY_ENDPOINT, replayMode, replayAttribution, replayTrackPayload } from './replay-loader';
 import { IN_APP_HANDOFF_PARAM, IN_APP_HANDOFF_REFRESH_MS, encodeInAppHandoff, isHandoffSourceApp } from './in-app-handoff';
+import { TokenLinkDecorator, VisitorTokenClient, VISITOR_TOKEN_KEY, anyTokenEnabled, endpointUrl, isFirstPartyEndpoint, rawIdsAccepted, tokenEnabled, type TokenLinkRule } from './visitor-token';
 import {
   generateUUID,
   sanitizeEventData,
@@ -110,6 +111,10 @@ class Datalyr {
   private outboundDisposer?: () => void;        // tears down the CC outbound-link observer/listener
   private stripeLinksDisposer?: () => void;     // tears down the Stripe Payment Link observer/listener
   private stripeSessionWatcher?: StripeSessionWatcher; // observes Checkout Session ids (server-created sessions)
+  private visitorTokenClient?: VisitorTokenClient;     // FX-083: created on first use, only with a provider switched on
+  private tokenDecorator?: TokenLinkDecorator;         // FX-083: puts the token on checkout / booking links
+  private edgeCookieCleared = false;                   // FX-083 C19: POST /v/clear at most once per withdrawal
+  private previousVisitorIds = new Set<string>();      // FX-083 C15: ids this page had before reset()
   private inAppHandoffTimer: ReturnType<typeof setInterval> | null = null;
   private inAppHandoffWrite: (() => void) | null = null;
   private inAppHandoffReported = false;
@@ -297,6 +302,22 @@ class Datalyr {
     // a fail-open value while Shopify's customerPrivacy loads async; a returning declined
     // visitor fires no visitorConsentCollected event, so the drain must re-check per run.
     this.queue.setConsentCheck(() => this.shouldTrack());
+    // FX-083 C18: X-DL-Consent on first-party requests, only with the consentHeader setting.
+    this.queue.setConsentSignal(() => this.consentSignal());
+    // FX-083 C19 (edgeCookieV2, off): with no stored visitor id, the first event request to
+    // the customer's own domain names none, and the id the edge kept is adopted.
+    this.queue.setEdgeVisitor({
+      pending: () => (this.config.edgeCookieV2 === true && this.shouldTrack() ? this.identity.pendingEdgeVisitorId() : null),
+      replaced: () => (this.config.edgeCookieV2 === true ? this.identity.getReplacedVisitor() : null),
+      adopt: (id) => this.adoptEdgeVisitor(id),
+      giveUp: () => {
+        this.identity.cancelEdgeAdoption();
+        this.tokenDecorator?.reissue(); // the local id is settled: decorate now
+      },
+    });
+    // A browser that ever opted out (the __dl_opt_out cookie, either value) never adopts
+    // the edge's id: that id is the opted-out visitor's.
+    if (this.cookies.get('__dl_opt_out')) this.identity.cancelEdgeAdoption();
 
     // FIXED (ISSUE-01): Start async initialization immediately but don't block constructor
     // This allows encryption to initialize before any events are tracked
@@ -528,6 +549,83 @@ class Datalyr {
       this.syncStripePaymentLinks(this.config.stripeLinkDomains ?? []);
     }
     if (this.config.stripeCheckoutSessions !== false) this.startStripeSessionCapture();
+    this.startTokenDecoration();
+  }
+
+  /**
+   * FX-083: put the signed visitor token on the links of each provider switched on in
+   * the visitorToken setting. Same gate as Stripe link decoration (tracking allowed,
+   * marketing consent not denied), re-checked before every write. Once per page.
+   */
+  private startTokenDecoration(): void {
+    if (this.tokenDecorator || !this.tokenAllowed()) return;
+    const client = this.tokenClient();
+    if (!client) return;
+    const rules = this.tokenLinkRules();
+    if (rules.length === 0) return;
+    this.tokenDecorator = new TokenLinkDecorator({
+      rules,
+      client,
+      canDecorate: () => this.tokenAllowed(),
+      onLinkClick: () => this.queue?.flush(),
+    });
+    this.tokenDecorator.start();
+  }
+
+  private tokenLinkRules(): TokenLinkRule[] {
+    const settings = this.config.visitorToken;
+    const rules: TokenLinkRule[] = [];
+    // C13: Stripe Payment Links (buy.stripe.com + stripeLinkDomains, exact host) and the
+    // pricing-table / buy-button embeds. stripePaymentLinks: false still turns it off.
+    if (tokenEnabled(settings, 'stripe') && this.config.stripePaymentLinks !== false) {
+      const hosts = new Set<string>(['buy.stripe.com']);
+      for (const d of this.config.stripeLinkDomains ?? []) {
+        const h = String(d).trim().toLowerCase();
+        if (h) hosts.add(h);
+      }
+      rules.push({
+        provider: 'stripe',
+        param: 'client_reference_id',
+        matchHost: (host) => hosts.has(host),
+        embedSelector: 'stripe-pricing-table, stripe-buy-button',
+        embedAttribute: 'client-reference-id',
+        // A raw id stamped before the setting arrived (late dashboard config) is ours to replace.
+        replaceable: (value) => this.isOwnRawVisitorId(value),
+      });
+    }
+    // C15: Calendly links and embed URLs carry it in salesforce_uuid (Calendly passes
+    // that field to its webhook); iClosed scheduler links and embeds in dl_vt.
+    if (tokenEnabled(settings, 'calendly')) {
+      rules.push({
+        provider: 'calendly',
+        param: 'salesforce_uuid',
+        matchHost: (host) => host === 'calendly.com' || host.endsWith('.calendly.com'),
+        // Today's setup has customers put the raw visitor id here: replace that, nothing else.
+        replaceable: (value) => this.isOwnRawVisitorId(value),
+      });
+    }
+    if (tokenEnabled(settings, 'iclosed')) {
+      rules.push({
+        provider: 'iclosed',
+        param: VISITOR_TOKEN_KEY,
+        matchHost: (host) => host === 'iclosed.io' || host.endsWith('.iclosed.io'),
+        replaceable: (value) => this.isOwnRawVisitorId(value),
+      });
+    }
+    // C16: the CheckoutChamp bridge, signed: dl_vt on outbound links to the listed
+    // checkoutChampDomains (each domain and its subdomains). The funnel stores it in a
+    // custom field; the raw _dl_* bridge stays off.
+    const ccDomains = (Array.isArray(this.config.checkoutChampDomains) ? this.config.checkoutChampDomains : [])
+      .map((d) => String(d).trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/[/:?#].*$/, '').replace(/^\.+/, ''))
+      .filter(Boolean);
+    if (tokenEnabled(settings, 'checkoutchamp') && ccDomains.length > 0) {
+      rules.push({
+        provider: 'checkoutchamp',
+        param: VISITOR_TOKEN_KEY,
+        matchHost: (host) => ccDomains.some((d) => host === d || host.endsWith('.' + d)),
+      });
+    }
+    return rules;
   }
 
   /**
@@ -1166,7 +1264,12 @@ class Datalyr {
       console.warn('[Datalyr] SDK not initialized. Call init() first.');
       return;
     }
+    const previousVisitorId = this.identity.getAnonymousId();
+    if (previousVisitorId) this.previousVisitorIds.add(previousVisitorId);
     this.identity.reset();
+    // FX-083: the cached token names the previous visitor; the next one names the new id.
+    this.visitorTokenClient?.clear();
+    this.tokenDecorator?.reissue(); // links stamped for the previous visitor get the new one's token
     this.syncInAppHandoff(); // the URL must not keep the pre-reset visitor id
     // Replay: drop what was recorded for the previous user now; the new recording (new
     // page load id, new visitor id, new session id) starts below, after the session
@@ -1240,9 +1343,21 @@ class Datalyr {
    *
    * The server-side Datalyr webhook reads `client_reference_id` on Checkout
    * and `metadata.visitor_id` on every other Stripe object.
+   *
+   * FX-083 (`visitorToken.stripe` on): once the signed token is ready,
+   * `client_reference_id` and `metadata.dl_vt` carry it. Before it is ready this
+   * returns the raw id (today's value) while raw ids are accepted
+   * (`visitorToken.rawIdFallback`, default true), else empty values; the first call
+   * starts the request. For the token without the wait, use `await getVisitorToken()`.
    */
-  getStripeMetadata(): { client_reference_id: string; metadata: { visitor_id: string } } {
+  getStripeMetadata(): { client_reference_id: string; metadata: { visitor_id: string; dl_vt?: string } } {
     const visitorId = this.identity ? this.identity.getAnonymousId() : this.getterBeforeInit('getStripeMetadata', '');
+    if (this.identity && tokenEnabled(this.config.visitorToken, 'stripe')) {
+      const raw = rawIdsAccepted(this.config.visitorToken) ? visitorId : '';
+      const token = this.readyToken();
+      if (token) return { client_reference_id: token, metadata: { visitor_id: raw, dl_vt: token } };
+      return { client_reference_id: raw, metadata: { visitor_id: raw } };
+    }
     return {
       client_reference_id: visitorId,
       metadata: { visitor_id: visitorId },
@@ -1260,10 +1375,137 @@ class Datalyr {
    *     plan_id,
    *     metadata: datalyr.getWhopCheckoutMetadata(),
    *   })
+   *
+   * FX-083 (`visitorToken.whop` on): once the signed token is ready it is returned as
+   * `dl_vt`. Before that, the raw id while raw ids are accepted, else an empty value
+   * (see getStripeMetadata()).
    */
-  getWhopCheckoutMetadata(): { visitor_id: string } {
+  getWhopCheckoutMetadata(): { visitor_id: string; dl_vt?: string } {
     if (!this.identity) return { visitor_id: this.getterBeforeInit('getWhopCheckoutMetadata', '') };
+    if (tokenEnabled(this.config.visitorToken, 'whop')) {
+      const raw = rawIdsAccepted(this.config.visitorToken) ? this.identity.getAnonymousId() : '';
+      const token = this.readyToken();
+      return token ? { visitor_id: raw, dl_vt: token } : { visitor_id: raw };
+    }
     return { visitor_id: this.identity.getAnonymousId() };
+  }
+
+  /** The cached token, or null; a getter asking for one starts the request (C17). */
+  private readyToken(): string | null {
+    const client = this.tokenClient();
+    if (!client) return null;
+    const token = client.peek();
+    if (!token || !client.isFresh()) void client.get().catch(() => null);
+    return token;
+  }
+
+  /**
+   * FX-083: the signed visitor token for this visit: a short, expiring, opaque value
+   * only DATALYR can make (`[A-Za-z0-9_-]`, at most 64 characters). Pass it where you pass the
+   * visitor id today (Stripe `client_reference_id` or `metadata.dl_vt`, Whop
+   * checkout metadata `dl_vt`); it cannot merge two people if a link is shared.
+   *
+   * Resolves null when no provider is switched on (`visitorToken` setting), before
+   * init(), while tracking or marketing consent is off, or when the request fails.
+   * Cached for the page and the tab session; a new one is fetched after 15 minutes.
+   */
+  async getVisitorToken(): Promise<string | null> {
+    const client = this.tokenClient();
+    if (!client) return null;
+    try {
+      return await client.get();
+    } catch {
+      return null;
+    }
+  }
+
+  /** The token client, only when a provider is switched on (else nothing is created or sent). */
+  private tokenClient(): VisitorTokenClient | undefined {
+    if (!this.initialized || !this.identity || !anyTokenEnabled(this.config.visitorToken)) return undefined;
+    if (!this.visitorTokenClient) {
+      this.visitorTokenClient = new VisitorTokenClient({
+        endpoint: this.config.endpoint || 'https://ingest.datalyr.com',
+        workspaceId: this.config.workspaceId,
+        getVisitorId: () => this.identity?.getAnonymousId(),
+        allowed: () => this.tokenAllowed(),
+        // C19: while the edge may still answer with the visitor it kept, the page's own
+        // id may never reach the server: no token for it until adopted or given up.
+        waiting: () => this.edgeVisitorPending(),
+      });
+    }
+    return this.visitorTokenClient;
+  }
+
+  /** FX-083 C18: 'granted' / 'denied' for first-party requests; null while the setting is off. */
+  private consentSignal(): 'granted' | 'denied' | null {
+    // edgeCookieV2 implies the header: the edge clears __dl_vid_h only when it sees denied.
+    if (this.config?.consentHeader !== true && this.config?.edgeCookieV2 !== true) return null;
+    return this.shouldTrack() && this.consentAllowsMarketing() ? 'granted' : 'denied';
+  }
+
+  /** The gate Stripe link decoration uses today: tracking allowed and marketing not denied. */
+  private tokenAllowed(): boolean {
+    return !!this.config && this.shouldTrack() && this.consentAllowsMarketing();
+  }
+
+  /**
+   * FX-083 C19 (opt-out, consent withdrawn): stop decorating, put every link stamped on
+   * this page back to its original href (tokens already at a provider live out their
+   * 2 hours), forget the cached token, and with the edgeCookieV2 setting ask the edge on
+   * the customer's own domain to clear its HttpOnly copy of the visitor id.
+   */
+  private withdrawVisitorToken(): void {
+    this.tokenDecorator?.stop(true);
+    this.tokenDecorator = undefined;
+    this.visitorTokenClient?.clear();
+    this.clearEdgeCookie();
+  }
+
+  /**
+   * FX-083 C19: take the visitor id the edge answered with (its HttpOnly `__dl_vid_h`
+   * survives a browser that wiped the script's storage), only while the id minted on
+   * this page with nothing stored is still pending. Everything keyed on the id follows.
+   */
+  /**
+   * FX-083: a value in a link field that is this browser's own raw visitor id (current, or
+   * one it had earlier on this page: before reset(), or before an adopted edge id). Only
+   * such a value may be replaced by the token; anything else the site set is kept.
+   */
+  private isOwnRawVisitorId(value: string): boolean {
+    if (!value || !this.identity) return false;
+    return value === this.identity.getAnonymousId()
+      || value === this.identity.getReplacedVisitor()?.from
+      || this.previousVisitorIds.has(value);
+  }
+
+  /** C19: the page's minted id is waiting for the edge's answer (same test as the queue's). */
+  private edgeVisitorPending(): boolean {
+    const endpoint = this.config?.endpoint;
+    return this.config?.edgeCookieV2 === true && !!endpoint && isFirstPartyEndpoint(endpoint)
+      && this.shouldTrack() && !!this.identity?.pendingEdgeVisitorId();
+  }
+
+  private adoptEdgeVisitor(id: string): void {
+    if (this.config?.edgeCookieV2 !== true || !this.shouldTrack()) return;
+    if (!this.identity.adoptEdgeVisitorId(id)) return;
+    this.session.refreshStoredRecord();
+    this.visitorTokenClient?.clear();
+    this.tokenDecorator?.reissue();
+    this.syncInAppHandoff();
+    this.log('Visitor id adopted from the edge');
+  }
+
+  private clearEdgeCookie(): void {
+    const endpoint = this.config?.endpoint;
+    if (this.config?.edgeCookieV2 !== true || this.edgeCookieCleared || !endpoint || !isFirstPartyEndpoint(endpoint)) return;
+    this.edgeCookieCleared = true;
+    try {
+      // Clears, forwards nothing. No body and no custom header: no CORS preflight.
+      void fetch(endpointUrl(endpoint, '/v/clear'), { method: 'POST', credentials: 'include', keepalive: true })
+        .catch(() => undefined);
+    } catch {
+      // best-effort
+    }
   }
 
   /**
@@ -1378,6 +1620,10 @@ class Datalyr {
       return;
     }
     this.optedOut = true;
+    // FX-083 C21 (owner answer 9, setting optOutDeletesVisitorId, off): delete the stored
+    // visitor id too, so opting in again starts a new visitor.
+    if (this.config.optOutDeletesVisitorId === true) this.identity.forgetAnonymousId();
+    this.identity.cancelEdgeAdoption(); // FX-083 C19: never adopt the edge's id after an opt-out
     this.session.refreshStoredRecord(); // drop the visitor id from the session record
     this.syncInAppHandoff(); // remove the visitor id from the address bar now, not in 30s
     this.syncReplay(); // stop and discard the recording
@@ -1398,6 +1644,8 @@ class Datalyr {
     }
     // X-1: stop stamping Stripe/CC outbound links with the visitor id / email.
     this.disposeMarketingLinkDecorators();
+    // FX-083 C19: stop decorating, take tokens off stamped links, forget the token.
+    this.withdrawVisitorToken();
     // Purge PII at rest.
     this.userProperties = {};
     // D02: deleting the keys is not enough on its own — an encrypted hydration
@@ -1436,6 +1684,7 @@ class Datalyr {
       return;
     }
     this.optedOut = false;
+    this.edgeCookieCleared = false;
     this.cookies.set('__dl_opt_out', 'false', this.config.cookieExpires);
     // Re-enable only if the full policy now allows (analytics consent + DNT/GPC), not
     // merely because opt-out was lifted — otherwise a GPC/DNT visitor's persisted
@@ -1531,6 +1780,10 @@ class Datalyr {
       this.disposeMarketingLinkDecorators();
       this.attribution?.forgetSeenTwclid();
     }
+    // FX-083 C19: analytics or marketing withdrawn: stop decorating, take tokens off the
+    // links already stamped, forget the token and ask the edge to clear its copy.
+    if (!allowed || !this.consentAllowsMarketing()) this.withdrawVisitorToken();
+    else this.edgeCookieCleared = false;
 
     this.log('Consent updated:', consent);
   }
@@ -2053,6 +2306,9 @@ class Datalyr {
     // skip silently rather than stamp a value Stripe would discard.
     const CLIENT_REFERENCE_ID_RE = /^[A-Za-z0-9_-]{1,200}$/;
     const getClientReferenceId = (): string | null => {
+      // FX-083 (C13): with the Stripe token on, client_reference_id carries the signed
+      // token (startTokenDecoration), never the raw id.
+      if (tokenEnabled(this.config.visitorToken, 'stripe')) return null;
       const vid = this.identity.getAnonymousId();
       return vid && CLIENT_REFERENCE_ID_RE.test(vid) ? vid : null;
     };
@@ -2701,6 +2957,8 @@ class Datalyr {
       this.disposeMarketingLinkDecorators();
       this.attribution?.forgetSeenTwclid();
     }
+    // FX-083 C19: same as setConsent() withdrawal.
+    if (!allowed || !this.consentAllowsMarketing()) this.withdrawVisitorToken();
 
     // Grant direction: cart-attribute stamping is cheap and idempotent (merges via
     // /cart/update.js), so run it now instead of waiting for the next page load.
@@ -3068,6 +3326,9 @@ class Datalyr {
       this.stripeSessionWatcher.stop();
       this.stripeSessionWatcher = undefined;
     }
+    this.tokenDecorator?.stop(false);
+    this.tokenDecorator = undefined;
+    this.visitorTokenClient = undefined;
 
     // Clean up queue
     if (this.queue) {
