@@ -1,6 +1,6 @@
 {
   "name": "@datalyr/web",
-  "version": "1.9.15",
+  "version": "1.10.0",
   "description": "DATALYR Web SDK: attribution and analytics for websites, tied to revenue",
   "main": "dist/datalyr.cjs.js",
   "module": "dist/datalyr.esm.js",

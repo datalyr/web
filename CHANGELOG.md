@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.10.0
+
+Includes every change listed under 1.9.15, which was never published on its own.
 
 - Package entry points: `require('@datalyr/web')` returned `{}` because `main` pointed at the browser script build (`dist/datalyr.js`). `main` now points at the CommonJS build (`dist/datalyr.cjs.js`), and an `exports` map sends `import` to the ESM build and `require` to the CommonJS build, with types for both. `unpkg` and `jsdelivr` keep serving `dist/datalyr.js`, and deep imports under `dist/` (such as `@datalyr/web/dist/datalyr.js`) still work. No built file changed.
-- Release as a minor version (1.10.0). Two narrow cases change: a deep import without a file extension (`@datalyr/web/dist/datalyr.cjs`) no longer resolves in Node or webpack 5; add `.js`. A plain Node ESM `import` of this package needs Node 20.19 or later (or 22.12 or later); before, it loaded but returned an empty object. Bundlers, CommonJS and the CDN script are not affected.
+- Minor version, not a patch. Two narrow cases change: a deep import without a file extension (`@datalyr/web/dist/datalyr.cjs`) no longer resolves in Node or webpack 5; add `.js`. A plain Node ESM `import` of this package needs Node 20.19 or later (or 22.12 or later); before, it loaded but returned an empty object. Bundlers, CommonJS and the CDN script are not affected.
 
 - npm package: ships only the built bundles and the public type declarations. The 43 `*.test.d.ts` files and every declaration map (`.d.ts.map`) are left out; the JavaScript source maps still ship, because the bundles point to them; the declaration build uses `tsconfig.build.json`, which excludes tests. `.npmignore` is removed (`files` in package.json already decided what ships).
 - Session rotation and the legacy storage-key migration no longer print `console.log` lines unless `debug: true`.
@@ -15,7 +17,7 @@
 
 These versions shipped only through the CDN (`dl.js`) and were never published to npm: 1.8.0, 1.8.1, 1.8.2, 1.9.0, 1.9.1, 1.9.3, 1.9.6 and 1.9.7. In the 1.8.0 to 1.9.7 range only 1.9.2, 1.9.4 and 1.9.5 are on npm. Older versions missing from npm: 1.7.7, 1.7.10 and 1.7.11. (entry added later)
 
-## 1.9.15
+## 1.9.15 (never published; ships in 1.10.0)
 
 - Offline backlog shared safely across tabs: every tab of a site shares one stored backlog (`dl_dl_offline_queue`). A save used to overwrite it, so the last tab to save erased the events other tabs had parked. A save now merges with what is stored, leaving out events this tab delivered or dropped. The stored format is unchanged (a plain array of events), so a rollback to an older script still reads and drains it.
 - A refused save (browser storage full) used to be ignored, so a parked purchase could exist only in memory. The backlog is now saved again with only critical events (`criticalEvents`) and `$identify` / `$alias`, a warning is logged, and `getStats().offlinePersisted` is `false` until a save succeeds. The events stay in memory and are still sent while the page is open.
